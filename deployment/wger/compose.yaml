@@ -1,0 +1,102 @@
+name: fitness-wger
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 10m, max-file: '3'}
+x-wger: &wger
+  image: docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
+  env_file: [./config/private.env]
+  restart: unless-stopped
+  logging: *logging
+services:
+  web:
+    <<: *wger
+    mem_limit: 1024m
+    cpus: 1.0
+    depends_on:
+      db: {condition: service_healthy}
+      cache: {condition: service_healthy}
+    volumes:
+      - static:/home/wger/static
+      - media:/home/wger/media
+      - ./overrides/react-main.js:/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro
+      - ./overrides/template.html:/home/wger/src/wger/core/templates/template.html:ro
+    expose: ['8000']
+    stop_grace_period: 60s
+    healthcheck:
+      test: [CMD, wget, --no-verbose, --tries=1, -O, /dev/null, 'http://localhost:8000/api/v2/version/']
+      interval: 30s
+      timeout: 5s
+      start_period: 300s
+      retries: 5
+  db:
+    image: docker.io/postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b
+    env_file: [./config/private.env]
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 768m
+    cpus: 0.5
+    shm_size: 256mb
+    volumes: [database:/var/lib/postgresql/data]
+    command: [postgres, -c, wal_level=logical, -c, shared_buffers=128MB, -c, effective_cache_size=512MB, -c, work_mem=4MB, -c, max_connections=30]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h localhost -U "$$POSTGRES_USER"']
+      interval: 15s
+      timeout: 5s
+      retries: 8
+  cache:
+    image: docker.io/redis:7.4-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 192m
+    cpus: 0.25
+    command: [redis-server, --maxmemory, 128mb, --maxmemory-policy, noeviction, --appendonly, 'yes']
+    volumes: [redis:/data]
+    healthcheck: {test: [CMD, redis-cli, ping], interval: 15s, timeout: 5s, retries: 5}
+  powersync:
+    image: docker.io/journeyapps/powersync-service@sha256:39f6a534f757afd1c633e91a19b23fde03186d16b5543b4af0f5c8f09d4cb79d
+    env_file: [./config/private.env]
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
+    cpus: 0.5
+    depends_on:
+      db: {condition: service_healthy}
+      web: {condition: service_healthy}
+    command: [start, -r, unified]
+    environment:
+      POWERSYNC_CONFIG_PATH: /config/powersync.yaml
+      PS_JWKS_URL: http://web:8000/api/v2/powersync-keys
+    volumes: [./config/powersync.yaml:/config/powersync.yaml:ro, ./config/sync_rules.yaml:/config/sync_rules.yaml:ro]
+    expose: ['8080']
+  nginx:
+    image: docker.io/nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 96m
+    cpus: 0.25
+    depends_on: [web, powersync]
+    volumes: [./config/nginx.conf:/etc/nginx/conf.d/default.conf:ro, static:/wger/static:ro, media:/wger/media:ro]
+    ports: ['127.0.0.1:8097:80']
+  celery_worker:
+    <<: *wger
+    mem_limit: 512m
+    cpus: 0.5
+    command: /start-worker
+    depends_on:
+      web: {condition: service_healthy}
+    volumes: [media:/home/wger/media]
+  celery_beat:
+    <<: *wger
+    mem_limit: 192m
+    cpus: 0.25
+    command: /start-beat
+    depends_on: [celery_worker]
+    volumes: [beat:/home/wger/beat]
+volumes:
+  database: {}
+  redis: {}
+  static: {}
+  media: {}
+  beat: {}
+networks:
+  default: {name: fitness_wger_private}

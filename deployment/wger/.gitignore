@@ -1,0 +1,5 @@
+config/private.env
+*.key
+*.pem
+backups/
+overrides/

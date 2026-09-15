@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.cortana.fitness-wger.vm</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/local/bin/limactl</string><string>start</string>
+    <string>--tty=false</string><string>fitness-wger</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StandardOutPath</key><string>/Users/OPERATOR/Library/Logs/fitness-wger-vm.log</string>
+  <key>StandardErrorPath</key><string>/Users/OPERATOR/Library/Logs/fitness-wger-vm.log</string>
+</dict></plist>
