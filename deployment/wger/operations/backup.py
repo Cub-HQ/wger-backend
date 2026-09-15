@@ -23,8 +23,6 @@ def snapshot(destination):
             vm("cd ~/fitness-wger && docker compose exec -T db sh -c 'pg_dump --format=custom --no-owner --no-acl -U \"$POSTGRES_USER\" \"$POSTGRES_DB\"'",output=f)
         with (root/'media.tar').open('wb') as f:
             vm("cd ~/fitness-wger && docker compose exec -T web tar -C /home/wger/media -cf - .",output=f)
-        with (root/'powersync.dump').open('wb') as f:
-            vm("cd ~/fitness-wger && docker compose exec -T db sh -c 'pg_dump --format=custom --no-owner --no-acl -U \"$POSTGRES_USER\" -n powersync \"$POSTGRES_DB\"'",output=f)
         after=vm(media_command)
         if before!=after:raise RuntimeError('Media changed during snapshot; retained incomplete snapshot, retry at idle')
         (root/'media-sha256.txt').write_bytes(after)

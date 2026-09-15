@@ -17,6 +17,7 @@ import uuid
 from snapshot import verify_snapshot
 
 PG = 'docker.io/postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
+WEB = 'docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04'
 PS = 'docker.io/journeyapps/powersync-service@sha256:39f6a534f757afd1c633e91a19b23fde03186d16b5543b4af0f5c8f09d4cb79d'
 
 
@@ -40,16 +41,17 @@ def main():
     for line in (work / 'config/private.env').read_text().splitlines():
         if line and not line.startswith('#') and '=' in line:
             key, value = line.split('=', 1); config[key] = value
-    database_password, storage_password = secrets.token_urlsafe(36), secrets.token_urlsafe(36)
+    database_password = secrets.token_urlsafe(36)
     config.update(POSTGRES_USER='restore', POSTGRES_PASSWORD=database_password, POSTGRES_DB='wger',
                   PS_DATABASE_URI=f'postgres://restore:{database_password}@db:5432/wger',
-                  PS_STORAGE_PG_URI=f'postgres://powersync_restore:{storage_password}@db:5432/wger', PS_PORT='8080')
+                  PS_STORAGE_PG_URI=f'postgres://restore:{database_password}@db:5432/wger', PS_PORT='8080')
     env = work / 'recovery.env'; env.write_text('\n'.join(k + '=' + v for k, v in config.items()) + '\n')
     labels = ['--label', 'fitness.backup.recovery-drill=' + name]
     run('docker', 'network', 'create', *labels, '--internal', name)
-    run('docker', 'volume', 'create', *labels, name + '-db')
+    for volume in ['db', 'media']:
+        run('docker', 'volume', 'create', *labels, name + '-' + volume)
     receipt = {'snapshot': str(source), 'project': name, 'created_containers': [name + '-db', name + '-powersync'],
-               'volumes': [name + '-db'], 'networks': [name], 'live_project_untouched': True, 'state': 'starting'}
+               'volumes': [name + '-db', name + '-media'], 'networks': [name], 'live_project_untouched': True, 'state': 'starting'}
     receipt_path = work / 'receipt.json'; receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
     run('docker', 'run', '-d', '--name', name + '-db', *labels, '--network', name, '--network-alias', 'db',
         '--memory', '384m', '--cpus', '0.25', '--env-file', str(env), '-v', name + '-db:/var/lib/postgresql/data', PG)
@@ -61,9 +63,8 @@ def main():
     else:
         raise RuntimeError('disposable database did not become ready')
     run('docker', 'exec', '-i', name + '-db', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-U', 'restore', '-d', 'wger', data=(source / 'database.dump').read_bytes())
-    sql = f"CREATE ROLE powersync_restore LOGIN PASSWORD '{storage_password}';".encode()
-    run('docker', 'exec', '-i', name + '-db', 'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'restore', '-d', 'wger', data=sql)
-    run('docker', 'exec', '-i', name + '-db', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '--role', 'powersync_restore', '-U', 'restore', '-d', 'wger', data=(source / 'powersync.dump').read_bytes())
+    run('docker', 'run', '--rm', '-i', *labels, '--network', 'none', '--memory', '128m', '--cpus', '0.25',
+        '--entrypoint', 'tar', '-v', name + '-media:/home/wger/media', WEB, '-C', '/home/wger/media', '-xf', '-', data=(source / 'media.tar').read_bytes())
     run('docker', 'run', '-d', '--name', name + '-powersync', *labels, '--network', name, '--memory', '384m', '--cpus', '0.25',
         '--env-file', str(env), '-e', 'POWERSYNC_CONFIG_PATH=/config/powersync.yaml', '-e', 'PS_JWKS_URL=http://127.0.0.1:9/unavailable',
         '-v', str(work / 'config/powersync.yaml') + ':/config/powersync.yaml:ro',
