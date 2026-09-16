@@ -24,6 +24,7 @@ EXTRACTOR_CREATED=1
 "$LIMA" copy "$VM:$VM_DIR/overrides/react-original-main.js" "$DEPLOY_DIR/overrides/react-original-main.js"
 "$LIMA" copy "$VM:$VM_DIR/overrides/template-original.html" "$DEPLOY_DIR/overrides/template-original.html"
 /usr/local/bin/python3 "$PATCH_DIR/patch_muscle_diagram.py" "$DEPLOY_DIR/overrides/react-original-main.js" "$DEPLOY_DIR/overrides/react-main.js"
+/usr/local/bin/python3 "$PATCH_DIR/patch_calendar_details.py" "$DEPLOY_DIR/overrides/react-main.js" "$DEPLOY_DIR/overrides/react-main.js"
 /usr/local/bin/python3 "$PATCH_DIR/patch_footer.py" "$DEPLOY_DIR/overrides/template-original.html" "$DEPLOY_DIR/overrides/template.html"
 "$LIMA" copy "$DEPLOY_DIR/overrides/react-main.js" "$VM:$VM_DIR/overrides/react-main.js"
 "$LIMA" copy "$DEPLOY_DIR/overrides/template.html" "$VM:$VM_DIR/overrides/template.html"
