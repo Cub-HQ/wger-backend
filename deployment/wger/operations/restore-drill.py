@@ -9,6 +9,15 @@ PG='docker.io/postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec
 WEB='docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04'
 NGINX='docker.io/nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236'
 def run(*a,data=None):return subprocess.run(a,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout
+def wait_for_database(name, *, attempts=60, delay=1):
+    for _ in range(attempts):
+        try:
+            run('docker','exec',name+'-db','pg_isready','-h','127.0.0.1','-U','restore','-d','wger')
+            return
+        except subprocess.CalledProcessError:
+            time.sleep(delay)
+    raise RuntimeError('disposable database did not become ready')
+
 
 def main():
     os.umask(0o077)
@@ -36,9 +45,7 @@ def main():
     receipt={'snapshot':str(src),'project':name,'port':args.port,'created_containers':[name+'-'+n for n in ['db','web','nginx']],'volumes':[name+'-'+n for n in ['db','media','static']],'network':name,'networks':[name,name+'-front'],'live_project_untouched':True,'state':'starting'}
     path=work/'receipt.json';path.write_text(json.dumps(receipt,indent=2))
     run('docker','run','-d','--name',name+'-db',*labels,'--network',name,'--memory','256m','--cpus','0.25','--env-file',str(env),'-v',name+'-db:/var/lib/postgresql/data',PG)
-    for _ in range(60):
-        try:run('docker','exec',name+'-db','pg_isready','-h','127.0.0.1','-U','restore');break
-        except subprocess.CalledProcessError:time.sleep(1)
+    wait_for_database(name)
     run('docker','exec','-i',name+'-db','pg_restore','--exit-on-error','--no-owner','--no-acl','-U','restore','-d','wger',data=(src/'database.dump').read_bytes())
     run('docker','run','--rm','-i',*labels,'--network','none','--memory','128m','--cpus','0.25','--entrypoint','tar','-v',name+'-media:/home/wger/media',WEB,'-C','/home/wger/media','-xf','-',data=(src/'media.tar').read_bytes())
     run('docker','run','-d','--name',name+'-web',*labels,'--network',name,'--memory','512m','--cpus','0.5','--env-file',str(env),'-v',name+'-media:/home/wger/media','-v',name+'-static:/home/wger/static','-v',str(work/'overrides/react-main.js')+':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro','-v',str(work/'overrides/template.html')+':/home/wger/src/wger/core/templates/template.html:ro','--entrypoint','/bin/sh',WEB,'-c','python3 manage.py collectstatic --no-input >/tmp/restore-static.log 2>&1 && gunicorn wger.wsgi:application --workers 1 --bind 0.0.0.0:8000')
