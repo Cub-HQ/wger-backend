@@ -1,0 +1,54 @@
+Issue #83 — canonical M4 gym deployment plan (PLAN ONLY; do not execute)
+Approved source baseline: fitness-coach main after merged PR #112 (current-main commit recorded by parent immediately before GO; must contain native Colima backup + fixed receipt cleanup). PR #102 merge `ad635c9fd44eb057b1bbf7c0462da40bbffea099` remains the approved product/release source ancestor.
+Approved UI source: Cubatica/react 3066f7693ac00632ad14ea0ef025371156f91d0d
+Approved server source/image pin: Cubatica/wger 135d8569a3eb27c9f0f74e865d56372421a61294 / ghcr.io/cubatica/fitness-wger:135d8569a3eb27c9f0f74e865d56372421a61294
+
+READ-ONLY BASELINE (observed 18 Sep 2026)
+- Live checkout: /Users/OPERATOR/fitness-wger (not a git checkout).
+- Runtime: stock wger/server:2.7 image sha256:1c5789... on web, celery_worker and celery_beat.
+- web healthy; db and cache healthy; PowerSync running with image sha256:39f6a... and restart count 0; nginx running.
+- DB identity/count baseline: fitness_wger / fitness_wger; users 5; sessions 387; workout logs 4564; exercise videos 0.
+- Current schema ends at manager.0029 and exercises.0040. New fork migrations are manager.0030 and exercises.0041.
+- Media: 0 files; empty-tree digest abcfa6a9d4df344d1781bc2560b5e4cdcae08b39ed303063535e7e1e926a304a.
+- Current overrides: react-main.js 0e687e50..., template.html f6e42043..., compose.yaml 4d4cbe40....
+- Volumes to preserve: fitness-wger_database, _media, _static, _redis, _beat.
+- PowerSync currently holds database connections and is actively replicating; release route deliberately quiesces it.
+- Trainerize terminal receipt exit_code=0, automatic_retry=false; no matching import processes and no owner on either reviewed writer lock. Treat both locks as PARKED, but recheck immediately before GO.
+- Backup destination is the established private `~/fitness-coach-migration` directory (0700). Do not create a scheduler, LaunchAgent or new backup framework. The approved follow-up must first make `backup.py` use the native local Colima runtime and retain format-2 artifacts.
+
+SERIAL RELEASE OWNER PATH
+1. In the merged worktree, verify approved pins and prepare the source/build inputs only. Do not sync any new compose, Dockerfile, config, operations or patch files into `/Users/OPERATOR/fitness-wger` before the backup and isolated restore are complete.
+2. Re-run live baseline from the untouched `/Users/OPERATOR/fitness-wger`: exact container IDs/images/config/state/health; DB counts; schema plan; media digest; override hashes; PowerSync state; volume names; private.env presence/mode only.
+3. Recheck import custody: no Trainerize/history process. Pass the exact reviewed native `training-writer.lock` as `WGER_WRITER_LOCK` and state `.training-writer.lock` as `WGER_HISTORY_LOCK`; `backup.py` must hold both for the entire closed snapshot window.
+4. Confirm established private `~/fitness-coach-migration` mode 0700. No scheduler or backup infrastructure change.
+5. Run the reviewed `backup.py` directly from the merged worktree with explicit destination and both lock paths. It must stop/start the exact existing writer container IDs, preserving each prior image/config/start state; it must never use `compose up` or the staged fork config. Require complete format-2 artifacts and no INCOMPLETE marker.
+6. Run isolated `restore-drill.py` from the merged worktree using the pinned Colima socket, then fixed `cleanup-drill.py` from its receipt. These are disposable-only. Prove counts/media/application/migrations and receipt-owned cleanup; live project untouched.
+7. Only after backup and restore proof pass, sync the merged deployment files into `/Users/OPERATOR/fitness-wger` while preserving `config/private.env` and every private artifact. Then run `prepare-react.sh` and record `.next` hashes/pins.
+8. Capture immediate pre-release live baseline again. Any unexpected count/media/lock/PowerSync change stops the release.
+9. Execute `release-web.sh` once with reviewed Colima socket and exact parked locks. No parallel command.
+10. Gate before QA: web healthy; web/worker/beat all use exact fork image/source revision; manager.0030 + exercises.0041 applied; DB counts equal pre-release counts; media digest/count unchanged; PowerSync exact prior image running, restart count stable after settle, no migration/schema failure in logs; nginx endpoint and /api/v2/version respond; corresponding-source footer links resolve.
+
+EXACT ROLLBACK PATH
+- Automatic: any release failure triggers release_web.py rollback. It restores prior override bytes, closed-window DB dump/schema/data, exact prior web/worker/beat image IDs, web health, then exact prior PowerSync image/running state. It never recreates DB/cache/nginx or unrelated services.
+- Verify automatic rollback before leaving window: stock image sha256:1c5789... restored on web/worker/beat; schema plan equals pre-release manager.0029/exercises.0040; counts 5/387/4564/0 (or the immediate pre-release values if legitimately changed); media digest/count unchanged; PowerSync sha256:39f6a... running; endpoint healthy.
+- Manual production recovery is not `recovery-drill.py`; that script is disposable-only. If automatic rollback reports failure, keep writers stopped and follow a separately reviewed production recovery procedure derived from the fresh verified snapshot and exact prior image inventory. Never delete existing volumes or use drill cleanup against production. Resume PowerSync only after DB restore and prior web health pass.
+
+RUNTIME QA MATRIX — AUTHENTICATED, ATHLETE-SCOPED
+A. Identity/preservation: exact image/source/footer pins; both athlete logins; counts/media/PowerSync unchanged; neither athlete can see the other's rows.
+B. Existing history: imported sample workout still renders real sets/units; zero and null remain distinct across the 12 reviewed cases; 18 native structured-cardio cases retain real metrics, never notes-only.
+C. Navigation: calendar ?date deep link; stable session detail/edit URL; newest-first all-workouts view, search/incremental loading; exercise progression table/chart links to sessions.
+D. Completed workout: edit reps/weight/RIR; add/delete set; edit notes/start/end without Australian timezone drift; completed session has no Start button.
+E. Ad-hoc: Log a workout without routine picker or visible synthetic routine; exercise/set save appears in calendar/workout list/progression/Nath reader.
+F. Active timer: Start/Finish on a new active session; survives reload/background; stores duration; does not rewrite history; false local timer is rejected if server save fails.
+G. Substitution: swap exercise with reason; future routine unchanged; provenance appears only after successful log save and is visible to Nath.
+H. Active sets: add/remove/skip; skipped rows do not become zero history; added rows initialize targets/rest; planned-vs-completed signal truthful.
+I. Previous: latest prior session before workout date only; strength units/native shapes; backdated session cannot see future values; imported history participates.
+J. Cardio/erg: time, distance, max/avg speed, pace, incline, calories persist in native fields; AU km/kph; render in detail/calendar/progression; no invented values.
+K. Videos: upload supported file and link URL on disposable exercise; API returns linked URL in video field; detail/session playback works; delete disposable artifact and prove baseline restored. Trainerize mapping is checked only where a real source URL exists.
+L. Phone presentation: exercise demo one tap; thumbnails, readable set format/trend; timer and controls usable at phone width. Explicitly record any remaining issue-83 backlog item not present rather than calling the whole matrix passed.
+
+STOP/GATES
+- No GO until Fork94Review approves this exact plan and the fresh backup+isolated restore gate is complete.
+- Parent performs one serial release window. No parallel import, deployment, or athlete mutation.
+- Any mismatch in locks, backup completeness, baseline counts/media, image pins, migration state, health or PowerSync state stops the release.
+- This plan does not execute deployment and does not claim runtime QA passed.

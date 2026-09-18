@@ -1,17 +1,71 @@
 #!/usr/bin/env python3
-"""Private full wger snapshots. No Git publishing, volume deletion or live restart."""
-import argparse, datetime, fcntl, hashlib, json, os, pathlib, shlex, subprocess, sys
+"""Private full wger snapshots from the local reviewed Colima runtime."""
+import argparse, datetime, fcntl, hashlib, json, os, pathlib, stat, subprocess, sys
 from snapshot import verify_snapshot, write_manifest
 
-LIMA='/usr/local/bin/limactl'
-VM='fitness-wger'
+DOCKER_HOST=f'unix://{pathlib.Path.home()}/.colima/docker.sock'
+DEPLOY=pathlib.Path.home()/'fitness-wger'
+WRITERS=('powersync','web','celery_worker','celery_beat')
 
 
-def vm(script, *, output=None, data=None, source_host=None):
-    command=[LIMA,'shell',VM,'bash','-lc',script]
-    if source_host:command=['/usr/bin/ssh','-o','BatchMode=yes','-o','ConnectTimeout=10',source_host,shlex.join(command)]
-    return subprocess.run(command,input=data,stdout=output or subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout
+def docker(*args, output=None, check=True):
+    return subprocess.run(['docker','-H',DOCKER_HOST,*args],stdout=output or subprocess.PIPE,stderr=subprocess.PIPE,check=check).stdout
 
+
+def compose(*args, output=None, check=True):
+    return docker('compose','-f',str(DEPLOY/'compose.yaml'),*args,output=output,check=check)
+
+def inspect_state(container):
+    records=json.loads(docker('inspect',container).decode())
+    if len(records)!=1:raise RuntimeError(f'expected one writer container inspection: {container}')
+    record=records[0];state=record.get('State')
+    if not isinstance(state,dict) or not record.get('Image') or not state.get('Status'):
+        raise RuntimeError(f'incomplete writer container inspection: {container}')
+    health=state.get('Health');health_status=health.get('Status') if isinstance(health,dict) else None
+    return {'image':record['Image'],'status':state['Status'],'health':health_status}
+
+
+def wait_for_state(container, expected, attempts=60):
+    for _ in range(attempts):
+        if inspect_state(container)==expected:return
+        subprocess.run(['/bin/sleep','1'],check=True)
+    raise RuntimeError(f'container did not restore prior state: {container}')
+
+
+def acquire_custody(writer_lock,history_lock):
+    if not writer_lock or not history_lock:raise RuntimeError('WGER_WRITER_LOCK and WGER_HISTORY_LOCK are required')
+    custody=[]
+    for path,namespace in [(pathlib.Path(writer_lock),'flock'),(pathlib.Path(history_lock),'lockf')]:
+        if not path.is_file():raise RuntimeError(f'required writer lock is missing: {path}')
+        handle=path.open('a');operation=fcntl.LOCK_EX|fcntl.LOCK_NB
+        try:fcntl.flock(handle,operation) if namespace=='flock' else fcntl.lockf(handle,operation)
+        except BlockingIOError:raise RuntimeError(f'writer/import custody is active: {path}') from None
+        custody.append(handle)
+    return custody
+
+def private_destination(requested):
+    home=pathlib.Path.home();approved=home/'fitness-coach-migration'
+    destination=pathlib.Path(requested).expanduser()
+    if not destination.is_absolute():destination=pathlib.Path.cwd()/destination
+    if destination!=approved:raise ValueError('destination must be established private ~/fitness-coach-migration')
+    current=pathlib.Path(destination.anchor)
+    for part in home.parts[1:]:
+        current=current/part
+        state=current.lstat()
+        if stat.S_ISLNK(state.st_mode):
+            if state.st_uid==os.getuid():raise ValueError(f'destination ancestor must be a real directory: {current}')
+        elif not stat.S_ISDIR(state.st_mode):
+            raise ValueError(f'destination ancestor must be a directory: {current}')
+    home_state=home.lstat();home_mode=stat.S_IMODE(home_state.st_mode)
+    if home_state.st_uid!=os.getuid() or home_mode&0o022:
+        raise ValueError('home directory must be owner-controlled')
+    try:destination_state=destination.lstat()
+    except FileNotFoundError:
+        destination.mkdir(mode=0o700)
+        destination_state=destination.lstat()
+    if stat.S_ISLNK(destination_state.st_mode) or not stat.S_ISDIR(destination_state.st_mode) or destination_state.st_uid!=os.getuid() or stat.S_IMODE(destination_state.st_mode)!=0o700:
+        raise ValueError('destination must be an owner-owned private real directory')
+    return destination
 
 def sha256(path):
     digest=hashlib.sha256()
@@ -38,39 +92,68 @@ def encrypt_snapshot(root, output, passphrase_file, *, runner=subprocess.run):
     return receipt_path
 
 
-def snapshot(destination, *, source_host=None):
+def media_inventory():
+    return docker('run','--rm','-v','fitness-wger_media:/media:ro','alpine:3.22','sh','-c','cd /media && find . -type f -exec sha256sum {} + | sort')
+
+
+def snapshot(destination):
     os.umask(0o077)
-    destination=pathlib.Path(destination).expanduser().resolve();destination.mkdir(parents=True,exist_ok=True,mode=0o700)
-    lock=(destination/'.snapshot.lock').open('a')
-    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    destination=private_destination(destination)
+    if not pathlib.Path(DOCKER_HOST.removeprefix('unix://')).is_socket() or not (DEPLOY/'compose.yaml').is_file():
+        raise RuntimeError('reviewed local Colima gym is unavailable')
+    lock=(destination/'.snapshot.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    custody=acquire_custody(os.environ.get('WGER_WRITER_LOCK'),os.environ.get('WGER_HISTORY_LOCK'))
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     root=destination/('wger-'+stamp);root.mkdir(mode=0o700)
-    media_command="cd ~/fitness-wger && docker compose exec -T web sh -c 'cd /home/wger/media && find . -type f -exec sha256sum {} + | sort'"
+    writer_ids={};writer_states={};running_ids=[];capture_complete=False;primary_error=None
     try:
-        before=vm(media_command,source_host=source_host)
-        with (root/'database.dump').open('wb') as f:
-            vm("cd ~/fitness-wger && docker compose exec -T db sh -c 'pg_dump --format=custom --no-owner --no-acl -U \"$POSTGRES_USER\" \"$POSTGRES_DB\"'",output=f,source_host=source_host)
-        with (root/'media.tar').open('wb') as f:
-            vm("cd ~/fitness-wger && docker compose exec -T web tar -C /home/wger/media -cf - .",output=f,source_host=source_host)
-        after=vm(media_command,source_host=source_host)
-        if before!=after:raise RuntimeError('Media changed during snapshot; retained incomplete snapshot, retry at idle')
+        writer_ids={service:compose('ps','-a','-q',service).decode().strip() for service in WRITERS}
+        if any(not ident for ident in writer_ids.values()):raise RuntimeError('all gym writer containers must exist before snapshot')
+        writer_states={service:inspect_state(ident) for service,ident in writer_ids.items()}
+        running_ids=[writer_ids[service] for service,state in writer_states.items() if state['status']=='running']
+        if running_ids:docker('stop',*running_ids)
+        before=media_inventory()
+        with (root/'database.dump').open('wb') as output:
+            compose('exec','-T','db','sh','-c','pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" "$POSTGRES_DB"',output=output)
+        with (root/'media.tar').open('wb') as output:
+            docker('run','--rm','-v','fitness-wger_media:/media:ro','alpine:3.22','tar','-C','/media','-cf','-','.',output=output)
+        after=media_inventory()
+        if before!=after:raise RuntimeError('Media changed inside closed writer snapshot window')
         (root/'media-sha256.txt').write_bytes(after)
-        (root/'images.json').write_bytes(vm("cd ~/fitness-wger && docker compose images --format json",source_host=source_host))
-        with (root/'deployment.tar').open('wb') as f:
-            vm("cd ~/fitness-wger && tar -cf - compose.yaml config overrides",output=f,source_host=source_host)
-        write_manifest(root,stamp)
-        (destination/'latest.json').write_text(json.dumps({'snapshot':str(root),'created_at':stamp})+'\n')
-        print(json.dumps({'snapshot':str(root),'snapshot_manifest_written':True,'size_bytes':sum(p.stat().st_size for p in root.iterdir())}))
-    except Exception:
-        (root/'INCOMPLETE').touch();raise
+        (root/'images.json').write_text(json.dumps(writer_states,indent=2)+'\n')
+        with (root/'deployment.tar').open('wb') as output:
+            subprocess.run(['/usr/bin/tar','-C',str(DEPLOY),'-cf','-','compose.yaml','config','overrides'],stdout=output,stderr=subprocess.PIPE,check=True)
+        write_manifest(root,stamp);capture_complete=True
+    except Exception as error:
+        primary_error=error;(root/'INCOMPLETE').touch()
+    finally:
+        resume_error=None
+        try:
+            if running_ids:docker('start',*running_ids,check=False)
+            if writer_states:
+                for service,ident in writer_ids.items():wait_for_state(ident,writer_states[service])
+                resumed={service:inspect_state(ident) for service,ident in writer_ids.items()}
+                if resumed != writer_states:raise RuntimeError('snapshot did not restore exact gym writer container/image/state/health')
+        except Exception as error:
+            resume_error=error;(root/'INCOMPLETE').touch()
+        finally:
+            for handle in custody:handle.close()
+            lock.close()
+        if primary_error is not None:
+            if resume_error is not None:primary_error.add_note(f'writer recovery also failed: {resume_error}')
+            raise primary_error
+        if resume_error is not None:raise resume_error
+    if not capture_complete:raise RuntimeError('snapshot capture did not complete')
+    (destination/'latest.json').write_text(json.dumps({'snapshot':str(root),'created_at':stamp})+'\n')
+    print(json.dumps({'snapshot':str(root),'snapshot_manifest_written':True,'size_bytes':sum(path.stat().st_size for path in root.iterdir())}))
     return root
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--destination',default='~/Backups/fitness-coach/wger');parser.add_argument('--source-host');parser.add_argument('--encrypted-bundle');parser.add_argument('--passphrase-file');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--destination',default='~/fitness-coach-migration');parser.add_argument('--encrypted-bundle');parser.add_argument('--passphrase-file');args=parser.parse_args()
     if bool(args.encrypted_bundle)!=bool(args.passphrase_file):parser.error('--encrypted-bundle and --passphrase-file are required together')
     try:
-        root=snapshot(args.destination,source_host=args.source_host)
+        root=snapshot(args.destination)
         if args.encrypted_bundle:print(json.dumps({'encrypted_receipt':str(encrypt_snapshot(root,args.encrypted_bundle,args.passphrase_file))}))
-    except subprocess.CalledProcessError as e:
-        print('Snapshot failed in guest command (details suppressed to protect configuration)',file=sys.stderr);sys.exit(e.returncode)
+    except subprocess.CalledProcessError as error:
+        print('Snapshot failed in local Colima command (details suppressed to protect configuration)',file=sys.stderr);sys.exit(error.returncode)

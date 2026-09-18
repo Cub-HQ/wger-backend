@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""Remove only the labelled disposable restore containers and volumes in receipt."""
-import argparse,json,pathlib,re,subprocess
-ap=argparse.ArgumentParser();ap.add_argument('receipt');args=ap.parse_args();r=json.loads(pathlib.Path(args.receipt).read_text());name=r['project']
+"""Remove only labelled disposable restore resources named by a receipt."""
+import argparse, json, pathlib, re, subprocess
+DOCKER=['docker','-H',f'unix://{pathlib.Path.home()}/.colima/docker.sock']
+
+parser=argparse.ArgumentParser();parser.add_argument('receipt');args=parser.parse_args()
+receipt_path=pathlib.Path(args.receipt);receipt=json.loads(receipt_path.read_text());name=receipt['project']
 if not re.fullmatch(r'wger-restore-[0-9a-f]{10}',name):raise ValueError('Not a drill project')
-present={}
-for kind,ids in [('container',r['created_containers']),('volume',r['volumes']),('network',r.get('networks',[r['network']]))]:
- present[kind]=[]
- existing=subprocess.check_output(['docker',kind,'ls']+(['-a'] if kind=='container' else [])+['--format','{{.Names}}' if kind=='container' else '{{.Name}}'],text=True).splitlines()
- for ident in ids:
-  expected=[name+'-'+x for x in (['db','web','nginx'] if kind=='container' else ['db','media','static'])] if kind!='network' else [name,name+'-front']
-  if ident not in expected:raise ValueError('Unexpected resource')
-  if ident not in existing:continue
-  present[kind].append(ident)
-  obj=json.loads(subprocess.check_output(['docker',kind,'inspect',ident]))[0]
-  labels=obj.get('Config',{}).get('Labels',{}) if kind=='container' else obj.get('Labels',{})
-  if labels.get('fitness.backup.restore-drill')!=name:raise ValueError('Resource not owned by drill')
-for ident in reversed(present['container']):subprocess.run(['docker','rm','-f',ident],check=True,stdout=subprocess.DEVNULL)
-for ident in present['volume']:subprocess.run(['docker','volume','rm',ident],check=True,stdout=subprocess.DEVNULL)
-for ident in present['network']:subprocess.run(['docker','network','rm',ident],check=True,stdout=subprocess.DEVNULL)
-r['state']='drill resources cleaned; original snapshots retained';pathlib.Path(args.receipt).write_text(json.dumps(r,indent=2)+'\n');print(r['state'])
+expected={
+    'container':{name+'-db',name+'-web',name+'-nginx'},
+    'volume':{name+'-db',name+'-media',name+'-static'},
+    'network':{name,name+'-front'},
+}
+resources={
+    'container':receipt['created_containers'],
+    'volume':receipt['volumes'],
+    'network':receipt.get('networks',[receipt['network']]),
+}
+present={kind:[] for kind in resources}
+for kind,identifiers in resources.items():
+    for ident in identifiers:
+        if ident not in expected[kind]:raise ValueError('Unexpected resource')
+        inspected=subprocess.run([*DOCKER,kind,'inspect',ident],text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+        if inspected.returncode:continue
+        obj=json.loads(inspected.stdout)[0]
+        labels=obj.get('Config',{}).get('Labels',{}) if kind=='container' else obj.get('Labels',{})
+        if labels.get('fitness.backup.restore-drill')!=name:raise ValueError('Resource not owned by drill')
+        present[kind].append(ident)
+for ident in reversed(present['container']):subprocess.run([*DOCKER,'rm','-f',ident],check=True,stdout=subprocess.DEVNULL)
+for ident in present['volume']:subprocess.run([*DOCKER,'volume','rm',ident],check=True,stdout=subprocess.DEVNULL)
+for ident in present['network']:subprocess.run([*DOCKER,'network','rm',ident],check=True,stdout=subprocess.DEVNULL)
+receipt['state']='drill resources cleaned; original snapshots retained';receipt_path.write_text(json.dumps(receipt,indent=2)+'\n');print(receipt['state'])
