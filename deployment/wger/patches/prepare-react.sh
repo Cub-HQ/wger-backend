@@ -23,7 +23,15 @@ EXTRACTOR_CREATED=1
 "$LIMA" shell "$VM" docker cp "$EXTRACTOR:/home/wger/src/wger/core/templates/template.html" "$VM_DIR/overrides/template-original.html"
 "$LIMA" copy "$VM:$VM_DIR/overrides/react-original-main.js" "$DEPLOY_DIR/overrides/react-original-main.js"
 "$LIMA" copy "$VM:$VM_DIR/overrides/template-original.html" "$DEPLOY_DIR/overrides/template-original.html"
-/usr/local/bin/python3 "$PATCH_DIR/patch_muscle_diagram.py" "$DEPLOY_DIR/overrides/react-original-main.js" "$DEPLOY_DIR/overrides/react-main.js"
+BUILD_DIR=$(mktemp -d)
+trap 'rm -rf "$BUILD_DIR"; cleanup' EXIT
+/usr/bin/curl --fail --location --silent --show-error \
+  https://github.com/wger-project/react/archive/89d234a800ba0f2097162f1d91444c7e3a5ccc5c.tar.gz \
+  --output "$BUILD_DIR/react-source.tgz"
+/usr/bin/tar -xzf "$BUILD_DIR/react-source.tgz" --strip-components=1 -C "$BUILD_DIR"
+/usr/local/bin/python3 "$PATCH_DIR/patch_ux_wave1.py" "$BUILD_DIR"
+(cd "$BUILD_DIR" && npm ci --ignore-scripts --no-audit --no-fund && npm run typecheck && npm run build)
+/usr/local/bin/python3 "$PATCH_DIR/patch_muscle_diagram.py" "$BUILD_DIR/build/main.js" "$DEPLOY_DIR/overrides/react-main.js"
 /usr/local/bin/python3 "$PATCH_DIR/patch_footer.py" "$DEPLOY_DIR/overrides/template-original.html" "$DEPLOY_DIR/overrides/template.html"
 "$LIMA" copy "$DEPLOY_DIR/overrides/react-main.js" "$VM:$VM_DIR/overrides/react-main.js"
 "$LIMA" copy "$DEPLOY_DIR/overrides/template.html" "$VM:$VM_DIR/overrides/template.html"

@@ -7,10 +7,12 @@ import hashlib
 from pathlib import Path
 import sys
 
-ORIGINAL_SHA256='38af8aa81a5fb7368a15f51234ff75e7b88893e857b50bac28a590f3276c5af7'
+ORIGINAL_SHA256 = '38af8aa81a5fb7368a15f51234ff75e7b88893e857b50bac28a590f3276c5af7'
+WAVE_ONE_SHA256 = '763fcf8ab715e5ee4f7c4be7ad999c06a465ea09afaf4fb26e67fe77eb30cc04'
+WAVE_ONE_REVIEW_REPAIR_SHA256 = 'fa79075075c16f43cabb118d244de81dbf63b4d749a0a4920d35587032ae05f1'
 source=Path(sys.argv[1]); target=Path(sys.argv[2])
 raw=source.read_bytes()
-if hashlib.sha256(raw).hexdigest()!=ORIGINAL_SHA256:
+if hashlib.sha256(raw).hexdigest() not in {ORIGINAL_SHA256, WAVE_ONE_SHA256, WAVE_ONE_REVIEW_REPAIR_SHA256}:
     raise SystemExit('Pinned React source changed; review the component patch before deployment')
 text=raw.decode()
 old='height:`400px`,width:`200px`,backgroundImage:'
