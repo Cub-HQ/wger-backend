@@ -23,7 +23,7 @@ import { Box, Button, Card, CardActionArea, CardContent, Chip, CircularProgress,
 import { addLogs } from "@/components/Routines/api/workoutLogs";
 import { WorkoutLog } from "@/components/Routines/models/WorkoutLog";
 import { WorkoutSession } from "@/components/Routines/models/WorkoutSession";
-import { useFetchRoutineWeighUnitsQuery } from "@/components/Routines/queries/units";
+import { useFetchRoutineRepUnitsQuery, useFetchRoutineWeighUnitsQuery } from "@/components/Routines/queries/units";
 import { useSessionsQuery } from "@/components/Routines/queries/sessions";
 import { ExerciseLog, TimeSeriesChart } from "@/components/Routines/widgets/LogWidgets";
 import { QueryKey } from "@/core/lib/consts";
@@ -32,7 +32,27 @@ import { useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
+const present = (value: number | null) => value !== null && value !== undefined;
 const number = (value: number | null) => value === null ? "—" : Number.isInteger(value) ? value.toString() : value.toFixed(1);
+const duration = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainder = Math.floor(seconds % 60);
+    return [hours, minutes, remainder].map(value => value.toString().padStart(2, "0")).join(":");
+};
+export const workoutMetrics = (log: WorkoutLog, repetitionUnit = "", weightUnit = "") => {
+    const measure = repetitionUnit.trim().toLowerCase();
+    const load = weightUnit.trim();
+    const metrics: string[] = [];
+    if (present(log.repetitions)) {
+        if (measure === "seconds") metrics.push(`Time ${duration(log.repetitions!)}`);
+        else if (measure === "kilometers" || measure === "kilometres") metrics.push(`Distance ${number(log.repetitions)} km`);
+        else if (present(log.weight) && !load.toLowerCase().includes("hour")) return [`${number(log.repetitions)} reps × ${number(log.weight)}${load ? ` ${load}` : ""}`];
+        else metrics.push(`${number(log.repetitions)} reps`);
+    }
+    if (present(log.weight)) metrics.push(`${load.toLowerCase().includes("hour") ? "Speed" : "Load"} ${number(log.weight)}${load ? ` ${load}` : ""}`);
+    return metrics;
+};
 const sessionName = (session: WorkoutSession) => {
     const sourceTitle = session.notes?.match(/^Original source title:\s*(.+)$/im)?.[1]?.trim();
     return sourceTitle || session.dayObj?.name || session.notes?.split(/\r?\n/, 1)[0]?.trim() || session.logs[0]?.exerciseObj?.getTranslation().name || "Workout";
@@ -51,21 +71,24 @@ const previousLogs = (log: WorkoutLog, sessions: WorkoutSession[]) => {
 
 export const SetSummary = ({ log, sessions }: { log: WorkoutLog, sessions: WorkoutSession[] }) => {
     const weightUnits = useFetchRoutineWeighUnitsQuery();
-    const unit = log.weightUnitObj?.name ?? weightUnits.data?.find(item => item.id === log.weightUnitId)?.name ?? "";
+    const repetitionUnits = useFetchRoutineRepUnitsQuery();
+    const weightUnit = log.weightUnitObj?.name ?? weightUnits.data?.find(item => item.id === log.weightUnitId)?.name ?? "";
+    const repetitionUnit = log.repetitionUnitObj?.name ?? repetitionUnits.data?.find(item => item.id === log.repetitionUnitId)?.name ?? "";
+    const metrics = workoutMetrics(log, repetitionUnit, weightUnit);
     const prior = previousLogs(log, sessions);
     const index = Math.max(0, [...(sessions.find(session => session.id === log.sessionId)?.logs ?? [])]
         .filter(entry => entry.exerciseId === log.exerciseId)
         .sort((a, b) => (a.iteration ?? 0) - (b.iteration ?? 0))
         .findIndex(entry => entry.id === log.id));
     const previous = prior[index] ?? prior.at(-1);
-    const weightDelta = previous?.weight != null && log.weight != null ? log.weight - previous.weight : null;
-    const repDelta = previous?.repetitions != null && log.repetitions != null ? log.repetitions - previous.repetitions : null;
-    const delta = weightDelta !== null && weightDelta !== 0
-        ? { value: weightDelta, unit }
-        : repDelta !== null && repDelta !== 0 ? { value: repDelta, unit: "reps" } : null;
+    const loadDelta = previous?.weight != null && log.weight != null ? log.weight - previous.weight : null;
+    const measureDelta = previous?.repetitions != null && log.repetitions != null ? log.repetitions - previous.repetitions : null;
+    const delta = loadDelta !== null && loadDelta !== 0
+        ? { value: loadDelta, unit: weightUnit }
+        : measureDelta !== null && measureDelta !== 0 ? { value: measureDelta, unit: repetitionUnit || "reps" } : null;
     const up = delta !== null && delta.value > 0;
     return <Stack direction={{ xs: "column", sm: "row" }} spacing={0.75} sx={{ alignItems: { sm: "center" } }}>
-        <Typography component="span">{number(log.repetitions)} reps × {number(log.weight)}{unit ? ` ${unit}` : ""}</Typography>
+        <Typography component="span">{metrics.length ? metrics.join(" · ") : "No recorded metrics"}</Typography>
         {delta && <Chip size="small" color={up ? "success" : "error"} label={`${up ? "▲" : "▼"} ${delta.value > 0 ? "+" : ""}${number(delta.value)}${delta.unit ? ` ${delta.unit}` : ""} vs last time`} />}
     </Stack>;
 };
@@ -99,7 +122,7 @@ export const WorkoutsOverview = () => {
                         <Stack direction="row" sx={{ justifyContent: "space-between", gap: 2 }}>
                             <Box>
                                 <Typography variant="h6">{sessionName(session)}</Typography>
-                                <Typography color="text.secondary">{dateToLocale(session.datetimeStart)} · {session.logs.length} sets</Typography>
+                                <Typography color="text.secondary">{dateToLocale(session.datetimeStart)} · {session.logs.length} entries</Typography>
                             </Box>
                             <Typography color="text.secondary">View</Typography>
                         </Stack>
