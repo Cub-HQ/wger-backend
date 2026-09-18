@@ -6,11 +6,11 @@ set -euo pipefail
 PATCH_DIR=$(cd "$(dirname "$0")" && pwd)
 DEPLOY_DIR=$(cd "$PATCH_DIR/.." && pwd)
 DOCKER_HOST=${WGER_DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}
-IMAGE=docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
+IMAGE=ghcr.io/cubatica/fitness-wger:135d8569a3eb27c9f0f74e865d56372421a61294
 REACT_REPO=https://github.com/Cubatica/react
-REACT_COMMIT=a3f3b9d407f3f799f87d8600c73394b34a28db33
+REACT_COMMIT=3066f7693ac00632ad14ea0ef025371156f91d0d
 WGER_REPO=https://github.com/Cubatica/wger
-WGER_COMMIT=65a1d40595a632984f016d9e9de0c103c004d9c4
+WGER_COMMIT=135d8569a3eb27c9f0f74e865d56372421a61294
 EXTRACTOR="fitness-wger-source-$$"
 BUILD_DIR=$(mktemp -d)
 cleanup() {

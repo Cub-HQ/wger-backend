@@ -17,7 +17,7 @@ import uuid
 from snapshot import verify_snapshot
 
 PG = 'docker.io/postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
-WEB = 'docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04'
+WEB = 'ghcr.io/cubatica/fitness-wger:135d8569a3eb27c9f0f74e865d56372421a61294'
 PS = 'docker.io/journeyapps/powersync-service@sha256:39f6a534f757afd1c633e91a19b23fde03186d16b5543b4af0f5c8f09d4cb79d'
 
 
