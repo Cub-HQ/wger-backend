@@ -12,4 +12,5 @@ LABEL org.opencontainers.image.source="https://github.com/Cubatica/wger" \
       org.opencontainers.image.licenses="AGPL-3.0"
 USER root
 COPY --from=source --chown=wger:wger /src/wger /home/wger/src/wger
+COPY --chown=wger:wger settings-main.py /home/wger/src/settings/main.py
 USER wger
