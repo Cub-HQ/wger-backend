@@ -110,12 +110,15 @@ AXES_IP_WHITELIST = env.list('AXES_IP_WHITELIST', default=[])
 _OUR_NETWORKS = tuple(ipaddress.ip_network(network) for network in ('127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '::1/128'))
 
 def _never_lock_our_nets(request, credentials=None):
-    candidate = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',', 1)[0].strip() or request.META.get('REMOTE_ADDR', '')
-    try:
-        address = ipaddress.ip_address(candidate)
-    except ValueError:
-        return False
-    return any(address in network for network in _OUR_NETWORKS)
+    candidates = (request.META.get('REMOTE_ADDR', ''), request.META.get('HTTP_X_FORWARDED_FOR', '').split(',', 1)[0].strip())
+    for candidate in candidates:
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if any(address in network for network in _OUR_NETWORKS):
+            return True
+    return False
 
 AXES_WHITELIST_CALLABLE = _never_lock_our_nets
 

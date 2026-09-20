@@ -24,6 +24,7 @@ services:
       - media:/home/wger/media
       - ./overrides/react-main.js:/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro
       - ./overrides/template.html:/home/wger/src/wger/core/templates/template.html:ro
+      - ./settings-main.py:/home/wger/src/settings/main.py:ro
     expose: ['8000']
     stop_grace_period: 60s
     healthcheck:
