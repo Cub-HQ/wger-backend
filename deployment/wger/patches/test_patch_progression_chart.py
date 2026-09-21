@@ -38,7 +38,10 @@ name={key?.toString()}''',
 
             widgets = (root / "src/components/Routines/widgets/LogWidgets.tsx").read_text()
             wave = (root / "src/components/Routines/widgets/WaveOne.tsx").read_text()
-            self.assertIn("const setNumber = a.iteration ?? 1", widgets)
+            self.assertIn("const counters = new Map<string, number>()", widgets)
+            self.assertIn("const session = log.sessionId ?? log.date.toDateString()", widgets)
+            self.assertIn("const setNumber = (counters.get(session) ?? 0) + 1", widgets)
+            self.assertNotIn("a.iteration ?? 1", widgets)
             self.assertIn("name={`Set ${key}`}", widgets)
             self.assertIn("chartEntries={", wave)
             self.assertIn("candidate.routineId === session.routineId", wave)

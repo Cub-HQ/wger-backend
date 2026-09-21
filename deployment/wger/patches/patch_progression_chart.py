@@ -37,12 +37,14 @@ replace(
         return r;
     }, new Map());""",
     """    // A set keeps the same colour across workout dates so its progression is visible.
-    const result: Map<number, WorkoutLog[]> = props.data.reduce(function (r, a) {
-        const setNumber = a.iteration ?? 1;
-        r.set(setNumber, r.get(setNumber) || []);
-        r.get(setNumber)!.push(a);
-        return r;
-    }, new Map());""",
+    const counters = new Map<string, number>();
+    const result = new Map<number, WorkoutLog[]>();
+    props.data.forEach(log => {
+        const session = log.sessionId ?? log.date.toDateString();
+        const setNumber = (counters.get(session) ?? 0) + 1;
+        counters.set(session, setNumber);
+        result.set(setNumber, [...(result.get(setNumber) ?? []), log]);
+    });""",
 )
 replace(widgets, 'name={key?.toString()}', 'name={`Set ${key}`}')
 
