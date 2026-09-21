@@ -12,10 +12,12 @@ WAVE_ONE_SHA256 = '763fcf8ab715e5ee4f7c4be7ad999c06a465ea09afaf4fb26e67fe77eb30c
 WAVE_ONE_REVIEW_REPAIR_SHA256 = 'fa79075075c16f43cabb118d244de81dbf63b4d749a0a4920d35587032ae05f1'
 WAVE_TWO_CARDIO_SHA256 = '5c3a2b01a43f0f4d0dfc8c21486d5226a029ffe881adf5f84431ad4b3d7840fc'
 WAVE_THREE_PHONE_SHA256 = 'd17d8954046843114f04325b7ac1ea0310e064965ec7a976831a3510e2317ced'
+SET_PROGRESSION_SHA256 = '0a2be14b70c4eae895da1ad1f446d746f0e82f9b13252520565b83d812222f46'
 source=Path(sys.argv[1]); target=Path(sys.argv[2])
 raw=source.read_bytes()
-if hashlib.sha256(raw).hexdigest() not in {ORIGINAL_SHA256, WAVE_ONE_SHA256, WAVE_ONE_REVIEW_REPAIR_SHA256, WAVE_TWO_CARDIO_SHA256, WAVE_THREE_PHONE_SHA256}:
-    raise SystemExit('Pinned React source changed; review the component patch before deployment')
+digest=hashlib.sha256(raw).hexdigest()
+if digest not in {ORIGINAL_SHA256, WAVE_ONE_SHA256, WAVE_ONE_REVIEW_REPAIR_SHA256, WAVE_TWO_CARDIO_SHA256, WAVE_THREE_PHONE_SHA256, SET_PROGRESSION_SHA256}:
+    raise SystemExit(f'Pinned React source changed ({digest}); review the component patch before deployment')
 text=raw.decode()
 old='height:`400px`,width:`200px`,backgroundImage:'
 new='height:`auto`,width:`200px`,maxWidth:`100%`,aspectRatio:`1 / 2`,backgroundSize:`contain`,backgroundImage:'
