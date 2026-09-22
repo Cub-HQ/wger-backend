@@ -10,7 +10,7 @@ import tempfile
 import time
 
 patch_dir = Path(__file__).resolve().parent
-deploy_dir = patch_dir.parent
+deploy_dir = Path(os.environ.get('WGER_DEPLOY_DIR', patch_dir.parent)).resolve()
 docker_host = os.environ.get('WGER_DOCKER_HOST', f'unix://{Path.home()}/.colima/default/docker.sock')
 writer_lock = os.environ.get('WGER_WRITER_LOCK')
 history_lock = os.environ.get('WGER_HISTORY_LOCK')

@@ -1,6 +1,8 @@
 import fcntl
 import os
 import pathlib
+import json
+import socket
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,58 @@ class ReleaseRouteTest(unittest.TestCase):
         self.assertIn('snapshot_complete and restored_schema != prior_schema', script)
         self.assertNotIn("'--force-recreate', 'db'", script)
         self.assertIn('prior writer states, overrides, database schema/data and exact images restored', script)
+    def test_release_targets_selected_live_deployment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            home = root / 'home'
+            socket_path = home / '.colima/default/docker.sock'
+            socket_path.parent.mkdir(parents=True)
+            docker_socket = socket.socket(socket.AF_UNIX)
+            docker_socket.bind(str(socket_path))
+            try:
+                deploy = root / 'live'
+                overrides = deploy / 'overrides'
+                config = deploy / 'config'
+                overrides.mkdir(parents=True)
+                config.mkdir()
+                (deploy / 'compose.yaml').write_text('services: {}\n')
+                (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
+                for name in ('react-main.js', 'template.html', 'corresponding-source.json'):
+                    (overrides / f'{name}.next').write_text(f'new {name}\n')
+                writer, history = root / 'writer.lock', root / 'history.lock'
+                writer.touch(); history.touch()
+                docker_log = root / 'docker.jsonl'
+                binary = root / 'bin/docker'
+                binary.parent.mkdir()
+                binary.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with Path(os.environ["DOCKER_LOG"]).open("a") as log: log.write(json.dumps(args) + "\\n")
+if "compose" in args and "ps" in args and "-q" in args:
+    services = args[args.index("-q") + 1:]
+    print("\\n".join({"web":"id-web", "celery_worker":"id-worker", "celery_beat":"id-beat", "powersync":"id-powersync"}[service] for service in services))
+elif "inspect" in args:
+    template, target = args[args.index("-f") + 1], args[-1]
+    if template == "{{.Image}}": print("image-" + target)
+    elif template == "{{.State.Status}}": print("running")
+    else: print("healthy")
+elif "showmigrations" in args: print("[X] manager.0029")
+elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
+''')
+                binary.chmod(0o755)
+                env = {**os.environ, 'HOME': str(home), 'PATH': str(binary.parent) + ':' + os.environ['PATH'],
+                       'DOCKER_LOG': str(docker_log), 'WGER_DEPLOY_DIR': str(deploy),
+                       'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history)}
+                result = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for name in ('react-main.js', 'template.html', 'corresponding-source.json'):
+                    self.assertEqual((overrides / name).read_text(), f'new {name}\n')
+                commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
+                self.assertTrue(any(str(deploy / 'compose.yaml') in command for command in map(' '.join, commands)))
+            finally:
+                docker_socket.close()
 
     def test_private_env_parser_handles_canonical_unquoted_spaces_without_eval(self):
         import sys
