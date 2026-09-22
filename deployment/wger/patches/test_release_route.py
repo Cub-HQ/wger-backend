@@ -1,3 +1,4 @@
+import hashlib
 import fcntl
 import os
 import pathlib
@@ -61,15 +62,17 @@ class ReleaseRouteTest(unittest.TestCase):
                 config.mkdir()
                 (deploy / 'compose.yaml').write_text('services: {}\n')
                 (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
-                for name in ('react-main.js', 'template.html', 'corresponding-source.json'):
+                for name in ('template.html', 'corresponding-source.json'):
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
+                bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
+                (overrides / 'react-main.js.next').write_bytes(bundle)
                 writer, history = root / 'writer.lock', root / 'history.lock'
                 writer.touch(); history.touch()
                 docker_log = root / 'docker.jsonl'
                 binary = root / 'bin/docker'
                 binary.parent.mkdir()
                 binary.write_text('''#!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 with Path(os.environ["DOCKER_LOG"]).open("a") as log: log.write(json.dumps(args) + "\\n")
@@ -81,20 +84,53 @@ elif "inspect" in args:
     if template == "{{.Image}}": print("image-" + target)
     elif template == "{{.State.Status}}": print("running")
     else: print("healthy")
+elif any("stored_name" in arg for arg in args):
+    manifest = json.loads(Path(os.environ["STATIC_MANIFEST"]).read_text())
+    print(manifest["paths"]["node/@wger-project/react-components/build/main.js"])
+elif "compose" in args and "cp" in args:
+    index = args.index("cp")
+    source, destination = args[index + 1:index + 3]
+    relative = source.removeprefix("nginx:/wger/static/")
+    Path(destination).write_bytes((Path(os.environ["STATIC_ROOT"]) / relative).read_bytes())
 elif "showmigrations" in args: print("[X] manager.0029")
 elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
+elif "sha256sum" in args:
+    path = Path(os.environ["STATIC_ROOT"]) / Path(args[-1]).relative_to("/wger/static")
+    print(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + args[-1])
 ''')
                 binary.chmod(0o755)
+                served_name = 'node/@wger-project/react-components/build/main.123456789abc.js'
+                served_file = root / 'static' / served_name
+                served_file.parent.mkdir(parents=True)
+                served_file.write_bytes(bundle.replace(b'main.js.map', b'main.js.92e5bc28799b.map'))
+                manifest = root / 'staticfiles.json'
+                manifest.write_text(json.dumps({'paths': {'node/@wger-project/react-components/build/main.js': served_name}}))
                 env = {**os.environ, 'HOME': str(home), 'PATH': str(binary.parent) + ':' + os.environ['PATH'],
                        'DOCKER_LOG': str(docker_log), 'WGER_DEPLOY_DIR': str(deploy),
-                       'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history)}
+                       'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history),
+                       'STATIC_ROOT': str(root / 'static'), 'STATIC_MANIFEST': str(manifest)}
                 result = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                for name in ('react-main.js', 'template.html', 'corresponding-source.json'):
+                self.assertEqual((overrides / 'react-main.js').read_bytes(), bundle)
+                for name in ('template.html', 'corresponding-source.json'):
                     self.assertEqual((overrides / name).read_text(), f'new {name}\n')
                 commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
                 self.assertTrue(any(str(deploy / 'compose.yaml') in command for command in map(' '.join, commands)))
+                self.assertTrue(any('cp nginx:/wger/static/' + served_name in ' '.join(command) for command in commands))
+                served_file.write_text('stale collected browser bundle\n')
+                mismatch = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
+                                          text=True, capture_output=True)
+                self.assertNotEqual(mismatch.returncode, 0)
+                self.assertIn('fork release failed', mismatch.stderr)
+                logical_name = 'node/@wger-project/react-components/build/main.js'
+                manifest.write_text(json.dumps({'paths': {logical_name: logical_name}}))
+                plain_file = root / 'static' / logical_name
+                plain_file.write_bytes(bundle)
+                fallback = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
+                                          text=True, capture_output=True)
+                self.assertNotEqual(fallback.returncode, 0)
+                self.assertIn('fork release failed', fallback.stderr)
             finally:
                 docker_socket.close()
 

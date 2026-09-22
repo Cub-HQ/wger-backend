@@ -3,6 +3,7 @@
 import fcntl
 from release_env import read_database_environment
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -119,6 +120,19 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         compose('up', '-d', '--no-deps', '--force-recreate', *services)
         compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--no-input')
         wait_healthy(compose('ps', '-q', 'web', capture=True))
+        logical_bundle = 'node/@wger-project/react-components/build/main.js'
+        manifest_lookup = f'from django.contrib.staticfiles.storage import staticfiles_storage; print(staticfiles_storage.stored_name({logical_bundle!r}))'
+        served_name = compose('exec', '-T', 'web', 'python3', 'manage.py', 'shell', '-c', manifest_lookup, capture=True).splitlines()[-1]
+        served_path = Path(served_name)
+        if served_path.parent.as_posix() != 'node/@wger-project/react-components/build' or served_path.name == 'main.js' or not (served_path.name.startswith('main.') and served_path.suffix == '.js'):
+            raise subprocess.CalledProcessError(1, ('verify', 'browser-bundle-manifest'))
+        with tempfile.NamedTemporaryFile() as served_bundle:
+            compose('cp', f'nginx:/wger/static/{served_path.as_posix()}', served_bundle.name)
+            expected = (deploy_dir / 'overrides' / 'react-main.js').read_bytes()
+            actual = Path(served_bundle.name).read_bytes()
+        map_marker = b'sourceMappingURL=main.js.map'
+        if re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', map_marker, actual) != expected:
+            raise subprocess.CalledProcessError(1, ('verify', 'browser-bundle'))
         compose('up', '-d', '--no-deps', '--force-recreate', 'powersync')
         resumed = compose('ps', '-q', 'powersync', capture=True)
         resumed_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', resumed, capture=True)
