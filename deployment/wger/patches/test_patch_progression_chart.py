@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -47,6 +49,32 @@ name={key?.toString()}''',
             self.assertIn("candidate.routineId === session.routineId", wave)
             self.assertIn("log.exerciseId === logs[0].exerciseId", wave)
             self.assertIn("a.date.getTime() - b.date.getTime()", wave)
+
+            start = widgets.index("    const counters =")
+            grouping = widgets[start:widgets.index("    });", start) + len("    });")]
+            grouping = grouping.replace("new Map<string, number>()", "new Map()")
+            grouping = grouping.replace("new Map<number, WorkoutLog[]>()", "new Map()")
+            logs = [
+                {"sessionId": "aug", "date": "2026-08-20", "weight": weight}
+                for weight in (45, 50, 55)
+            ] + [
+                {"sessionId": "sep", "date": "2026-09-03", "weight": weight}
+                for weight in (50, 55, 60)
+            ]
+            script = f'''const props = {{data: JSON.parse(process.argv[1]).map(log => ({{...log, date: new Date(log.date)}}))}};
+{grouping}
+console.log(JSON.stringify(Array.from(result, ([setNumber, entries]) => [setNumber, entries.map(log => [log.date.toISOString().slice(0, 10), log.weight])])))'''
+            output = subprocess.run(
+                ["node", "-e", script, json.dumps(logs)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(json.loads(output.stdout), [
+                [1, [["2026-08-20", 45], ["2026-09-03", 50]]],
+                [2, [["2026-08-20", 50], ["2026-09-03", 55]]],
+                [3, [["2026-08-20", 55], ["2026-09-03", 60]]],
+            ])
 
 
 if __name__ == "__main__":
