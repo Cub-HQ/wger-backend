@@ -10,6 +10,12 @@ import warnings
 import environ
 
 from .settings_global import *  # noqa: F403
+# One athlete-facing locale covers templates, forms and API-rendered dates.
+LANGUAGE_CODE = 'en-au'
+LANGUAGES = (('en-au', 'Australian English'),)
+AVAILABLE_LANGUAGES = LANGUAGES
+FORMAT_MODULE_PATH = 'wger.formats'
+
 
 
 env = environ.Env(DJANGO_DEBUG=(bool, False))
