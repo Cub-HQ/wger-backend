@@ -177,11 +177,16 @@ console.log(JSON.stringify({{
             })
 
     def test_built_range_bundle_is_approved_for_release(self):
-        source = MUSCLE_PATCH.read_text()
-        self.assertIn(
-            "5776e03fc88f9dfed8694a16d65bac863a2ee40101c9b6209ee12683bbe22781",
-            source,
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "main.js"
+            target = Path(directory) / "react-main.js.next"
+            source.write_text("height:`400px`,width:`200px`,backgroundImage:muscular_system_back.svg")
+            with patch("sys.argv", [str(MUSCLE_PATCH), str(source), str(target)]), patch("hashlib.sha256") as sha256:
+                sha256.return_value.hexdigest.return_value = "5776e03fc88f9dfed8694a16d65bac863a2ee40101c9b6209ee12683bbe22781"
+                spec = importlib.util.spec_from_file_location("muscle_patch_for_chart_range", MUSCLE_PATCH)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            self.assertIn("maxWidth:`100%`", target.read_text())
 
 
 if __name__ == "__main__":
