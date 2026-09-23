@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 MODULE = Path(__file__).with_name("patch_progression_chart.py")
 
+MUSCLE_PATCH = Path(__file__).with_name("patch_muscle_diagram.py")
+
 
 class ProgressionChartPatchTest(unittest.TestCase):
     def test_charts_block_history_by_set_number(self):
@@ -75,6 +77,13 @@ console.log(JSON.stringify(Array.from(result, ([setNumber, entries]) => [setNumb
                 [2, [["2026-08-20", 50], ["2026-09-03", 55]]],
                 [3, [["2026-08-20", 55], ["2026-09-03", 60]]],
             ])
+
+    def test_built_range_bundle_is_approved_for_release(self):
+        source = MUSCLE_PATCH.read_text()
+        self.assertIn(
+            "5776e03fc88f9dfed8694a16d65bac863a2ee40101c9b6209ee12683bbe22781",
+            source,
+        )
 
 
 if __name__ == "__main__":
