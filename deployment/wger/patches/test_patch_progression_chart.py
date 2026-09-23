@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -101,6 +102,18 @@ console.log(JSON.stringify(Array.from(result, ([setNumber, entries]) => [setNumb
                 [2, [["2026-08-20", 50], ["2026-09-03", 55]]],
                 [3, [["2026-08-20", 55], ["2026-09-03", 60]]],
             ])
+            # Erase only this generated module's type syntax; execute its real bodies on Node 18+.
+            range_source = "\n".join(
+                line for line in range_module.read_text().splitlines()
+                if not line.startswith("export type ")
+            )
+            for annotation in (
+                " as const", " as ProgressionChartRange", ": ProgressionChartRange",
+                "<T extends { date: Date }>", ": T[]", ": Date",
+            ):
+                range_source = range_source.replace(annotation, "")
+            executable_range_module = range_module.with_suffix(".mjs")
+            executable_range_module.write_text(range_source)
 
             range_script = f'''const values = new Map();
 const elements = new Map();
@@ -131,7 +144,7 @@ globalThis.window = {{
         setItem: (key, value) => values.set(key, value),
     }},
 }};
-const range = await import({json.dumps(range_module.as_uri())});
+const range = await import({json.dumps(executable_range_module.as_uri())});
 const input = [
     ["old", "2026-06-22T12:00:00Z"],
     ["edge", "2026-06-23T12:00:00Z"],
@@ -161,7 +174,7 @@ console.log(JSON.stringify({{
     all: range.filterProgressionChartData(input, "all", new Date("2026-09-23T12:00:00Z")).map(entry => entry.id),
 }}));'''
             range_output = subprocess.run(
-                ["node", "--experimental-strip-types", "--input-type=module", "-e", range_script],
+                ["node", "--input-type=module", "-e", range_script],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -176,17 +189,25 @@ console.log(JSON.stringify({{
                 "all": ["old", "edge", "recent", "future"],
             })
 
-    def test_built_range_bundle_is_approved_for_release(self):
+    def test_bundle_fingerprint_checks_real_bytes(self):
+        spec = importlib.util.spec_from_file_location("muscle_patch_for_chart_range", MUSCLE_PATCH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "main.js"
             target = Path(directory) / "react-main.js.next"
-            source.write_text("height:`400px`,width:`200px`,backgroundImage:muscular_system_back.svg")
-            with patch("sys.argv", [str(MUSCLE_PATCH), str(source), str(target)]), patch("hashlib.sha256") as sha256:
-                sha256.return_value.hexdigest.return_value = "5776e03fc88f9dfed8694a16d65bac863a2ee40101c9b6209ee12683bbe22781"
-                spec = importlib.util.spec_from_file_location("muscle_patch_for_chart_range", MUSCLE_PATCH)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-            self.assertIn("maxWidth:`100%`", target.read_text())
+            fixture = b"height:`400px`,width:`200px`,backgroundImage:muscular_system_back.svg"
+            approved = {hashlib.sha256(fixture).hexdigest()}
+            source.write_bytes(fixture.replace(b"400", b"401"))
+            with self.assertRaisesRegex(SystemExit, "Pinned React source changed"):
+                module.patch_bundle(source, target, approved)
+            self.assertFalse(target.exists())
+            source.write_bytes(fixture)
+            with self.assertRaisesRegex(SystemExit, "Pinned React source changed"):
+                module.patch_bundle(source, target)
+            self.assertFalse(target.exists())
+            module.patch_bundle(source, target, approved)
+            self.assertEqual(target.read_text(), "height:`auto`,width:`200px`,maxWidth:`100%`,aspectRatio:`1 / 2`,backgroundSize:`contain`,backgroundImage:muscular_system_back.svg")
 
 
 if __name__ == "__main__":
