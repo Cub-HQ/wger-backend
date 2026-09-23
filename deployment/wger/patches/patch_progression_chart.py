@@ -15,7 +15,7 @@ def replace(path: str, old: str, new: str) -> None:
 
 
 range_module = root / "src/components/Routines/widgets/progressionChartRange.ts"
-range_module.write_text('''export const PROGRESSION_CHART_RANGES = [
+range_module.write_text(r'''export const PROGRESSION_CHART_RANGES = [
     { value: "1m", label: "1 month", months: 1 },
     { value: "3m", label: "3 months", months: 3 },
     { value: "6m", label: "6 months", months: 6 },
@@ -41,13 +41,46 @@ export const saveProgressionChartRange = (range: ProgressionChartRange) => {
     try { window.localStorage.setItem(STORAGE_KEY, range); } catch { /* The current page still uses the pick. */ }
 };
 
+export const mountProgressionChartRangeSetting = () => {
+    if (!/^\/[a-z-]+\/user\/preferences\/?$/.test(window.location.pathname)) return;
+    const content = document.getElementById("content");
+    if (!content || document.getElementById("progression-chart-range")) return;
+    const card = document.createElement("div");
+    card.className = "card mb-3";
+    const body = document.createElement("div");
+    body.className = "card-body";
+    const label = document.createElement("label");
+    label.className = "form-label";
+    label.htmlFor = "progression-chart-range";
+    label.textContent = "Exercise chart range";
+    const select = document.createElement("select");
+    select.className = "form-select";
+    select.id = "progression-chart-range";
+    select.value = loadProgressionChartRange();
+    PROGRESSION_CHART_RANGES.forEach(option => {
+        const item = document.createElement("option");
+        item.value = option.value;
+        item.textContent = option.label;
+        item.selected = option.value === select.value;
+        select.append(item);
+    });
+    select.addEventListener("change", () => saveProgressionChartRange(select.value as ProgressionChartRange));
+    const help = document.createElement("div");
+    help.className = "form-text";
+    help.textContent = "Changes are saved automatically and apply to every exercise chart.";
+    body.append(label, select, help);
+    card.append(body);
+    content.prepend(card);
+};
+
 export const filterProgressionChartData = <T extends { date: Date }>(
     data: T[],
     range: ProgressionChartRange = loadProgressionChartRange(),
     now: Date = new Date(),
 ): T[] => {
-    const months = PROGRESSION_CHART_RANGES.find(option => option.value === range)!.months;
+    const months = PROGRESSION_CHART_RANGES.find(option => option.value === range)?.months;
     if (months === null) return data;
+    if (months === undefined) return filterProgressionChartData(data, DEFAULT_RANGE, now);
     const cutoff = new Date(now);
     const day = cutoff.getDate();
     cutoff.setDate(1);
@@ -94,40 +127,17 @@ replace(
 )
 replace(widgets, 'name={key?.toString()}', 'name={`Set ${key}`}')
 
-preferences = "src/pages/Preferences/index.tsx"
+index = "src/index.tsx"
 replace(
-    preferences,
-    "import React from 'react';",
-    '''import { MenuItem, Stack, TextField, Typography } from "@mui/material";
-import { loadProgressionChartRange, PROGRESSION_CHART_RANGES, ProgressionChartRange, saveProgressionChartRange } from "@/components/Routines/widgets/progressionChartRange";
-import React, { useState } from 'react';''',
+    index,
+    "import App from './App';",
+    '''import App from './App';
+import { mountProgressionChartRangeSetting } from "@/components/Routines/widgets/progressionChartRange";''',
 )
 replace(
-    preferences,
-    '''        <div>
-            Preferences Page
-        </div>''',
-    '''        <Stack spacing={2} sx={{ maxWidth: 560, p: 3 }}>
-            <Typography variant="h4">Settings</Typography>
-            <TextField
-                select
-                label="Exercise chart range"
-                value={range}
-                onChange={event => {
-                    const selected = event.target.value as ProgressionChartRange;
-                    setRange(selected);
-                    saveProgressionChartRange(selected);
-                }}
-                helperText="Changes are saved automatically and apply to every exercise chart."
-            >
-                {PROGRESSION_CHART_RANGES.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
-            </TextField>
-        </Stack>''',
-)
-replace(
-    preferences,
-    "export const Preferences = () => {",
-    "export const Preferences = () => {\n    const [range, setRange] = useState<ProgressionChartRange>(loadProgressionChartRange);",
+    index,
+    "renderComponentShadowDom('react-page');",
+    "renderComponentShadowDom('react-page');\nmountProgressionChartRangeSetting();",
 )
 
 wave = "src/components/Routines/widgets/WaveOne.tsx"

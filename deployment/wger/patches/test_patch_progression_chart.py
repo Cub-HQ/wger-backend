@@ -10,13 +10,8 @@ MODULE = Path(__file__).with_name("patch_progression_chart.py")
 
 MUSCLE_PATCH = Path(__file__).with_name("patch_muscle_diagram.py")
 
-
-class ProgressionChartPatchTest(unittest.TestCase):
-    def test_charts_block_history_by_set_number(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fixtures = {
-                "src/components/Routines/widgets/LogWidgets.tsx": '''import { dateToLocale, luxonDateTimeToLocale } from "@/core/lib/date";
+LIVE_SETTING_FIXTURES = {
+    "src/components/Routines/widgets/LogWidgets.tsx": '''import { dateToLocale, luxonDateTimeToLocale } from "@/core/lib/date";
 export const ExerciseLog = (props: { exercise: Exercise, routineId: number, logEntries: WorkoutLog[] | undefined }) => {
 <TimeSeriesChart data={logEntries} key={props.exercise.id} />
 export const TimeSeriesChart = (props: { data: WorkoutLog[] }) => {
@@ -30,34 +25,45 @@ export const TimeSeriesChart = (props: { data: WorkoutLog[] }) => {
         return r;
     }, new Map());
 name={key?.toString()}''',
-                "src/components/Routines/widgets/WaveOne.tsx": '''                <ExerciseLog exercise={logs[0].exerciseObj!} routineId={session.routineId} logEntries={logs} />''',
-                "src/pages/Preferences/index.tsx": '''import React from 'react';
+    "src/components/Routines/widgets/WaveOne.tsx": '''                <ExerciseLog exercise={logs[0].exerciseObj!} routineId={session.routineId} logEntries={logs} />''',
+    "src/index.tsx": '''import App from './App';
+renderComponentShadowDom('react-page');''',
+}
 
-export const Preferences = () => {
-    return (
-        <div>
-            Preferences Page
-        </div>
-    );
-};''',
-            }
-            for relative, content in fixtures.items():
-                target = root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content)
 
-            with patch("sys.argv", [str(MODULE), str(root)]):
-                spec = importlib.util.spec_from_file_location("progression_chart_patch", MODULE)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+def apply_patch(root: Path):
+    for relative, content in LIVE_SETTING_FIXTURES.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    with patch("sys.argv", [str(MODULE), str(root)]):
+        spec = importlib.util.spec_from_file_location("progression_chart_patch", MODULE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+
+class ProgressionChartLiveSettingTest(unittest.TestCase):
+    def test_live_django_settings_page_mounts_range_control(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            apply_patch(root)
+            index = (root / "src/index.tsx").read_text()
+            self.assertIn("mountProgressionChartRangeSetting", index)
+            self.assertIn("mountProgressionChartRangeSetting();", index)
+
+
+
+
+class ProgressionChartPatchTest(unittest.TestCase):
+    def test_charts_block_history_by_set_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            apply_patch(root)
 
             widgets = (root / "src/components/Routines/widgets/LogWidgets.tsx").read_text()
             wave = (root / "src/components/Routines/widgets/WaveOne.tsx").read_text()
-            preferences = (root / "src/pages/Preferences/index.tsx").read_text()
             range_module = root / "src/components/Routines/widgets/progressionChartRange.ts"
             self.assertTrue(range_module.is_file())
-            self.assertIn("Exercise chart range", preferences)
-            self.assertIn("Changes are saved automatically", preferences)
             self.assertIn("filterProgressionChartData(props.data)", widgets)
             self.assertIn("const counters = new Map<string, number>()", widgets)
             self.assertIn("const session = log.sessionId ?? log.date.toDateString()", widgets)
@@ -97,10 +103,27 @@ console.log(JSON.stringify(Array.from(result, ([setNumber, entries]) => [setNumb
             ])
 
             range_script = f'''const values = new Map();
-globalThis.window = {{localStorage: {{
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
-}}}};
+const elements = new Map();
+class Element {{
+    constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; this.value = ""; this.textContent = ""; }}
+    set id(value) {{ this._id = value; elements.set(value, this); }}
+    get id() {{ return this._id; }}
+    append(...children) {{ this.children.push(...children); }}
+    prepend(...children) {{ this.children.unshift(...children); }}
+    addEventListener(type, listener) {{ this.listeners[type] = listener; }}
+}}
+const content = new Element("div"); content.id = "content";
+globalThis.document = {{
+    createElement: tagName => new Element(tagName),
+    getElementById: id => elements.get(id) ?? null,
+}};
+globalThis.window = {{
+    location: {{pathname: "/en/user/preferences"}},
+    localStorage: {{
+        getItem: key => values.get(key) ?? null,
+        setItem: (key, value) => values.set(key, value),
+    }},
+}};
 const range = await import({json.dumps(range_module.as_uri())});
 const input = [
     ["old", "2026-06-22T12:00:00Z"],
@@ -109,11 +132,17 @@ const input = [
     ["future", "2026-09-24T12:00:00Z"],
 ].map(([id, date]) => ({{id, date: new Date(date)}}));
 const initial = range.loadProgressionChartRange();
-range.saveProgressionChartRange("3m");
+range.mountProgressionChartRangeSetting();
+const select = elements.get("progression-chart-range");
+const settingInitial = select.value;
+select.value = "3m";
+select.listeners.change();
+range.mountProgressionChartRangeSetting();
 console.log(JSON.stringify({{
     options: range.PROGRESSION_CHART_RANGES.map(option => option.value),
     initial,
     stored: range.loadProgressionChartRange(),
+    setting: {{cards: content.children.length, initial: settingInitial, labels: select.children.map(option => option.textContent)}},
     threeMonths: range.filterProgressionChartData(input, "3m", new Date("2026-09-23T12:00:00Z")).map(entry => entry.id),
     monthEnd: range.filterProgressionChartData([
         {{id: "february", date: new Date("2026-02-28T12:00:00Z")}},
@@ -131,6 +160,7 @@ console.log(JSON.stringify({{
                 "options": ["1m", "3m", "6m", "1y", "2y", "3y", "all"],
                 "initial": "6m",
                 "stored": "3m",
+                "setting": {"cards": 1, "initial": "6m", "labels": ["1 month", "3 months", "6 months", "1 year", "2 years", "3 years", "All time"]},
                 "threeMonths": ["edge", "recent"],
                 "monthEnd": ["february", "march"],
                 "all": ["old", "edge", "recent", "future"],
