@@ -105,14 +105,21 @@ console.log(JSON.stringify(Array.from(result, ([setNumber, entries]) => [setNumb
             range_script = f'''const values = new Map();
 const elements = new Map();
 class Element {{
-    constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; this.value = ""; this.textContent = ""; }}
+    constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; this._value = ""; this.textContent = ""; }}
     set id(value) {{ this._id = value; elements.set(value, this); }}
     get id() {{ return this._id; }}
+    set value(value) {{ this._value = this.tagName !== "select" || this.children.some(child => child.value === value) ? value : ""; }}
+    get value() {{ return this._value || (this.tagName === "select" ? this.children[0]?.value ?? "" : ""); }}
     append(...children) {{ this.children.push(...children); }}
     prepend(...children) {{ this.children.unshift(...children); }}
     addEventListener(type, listener) {{ this.listeners[type] = listener; }}
 }}
-const content = new Element("div"); content.id = "content";
+const mountSetting = () => {{
+    elements.delete("progression-chart-range");
+    const content = new Element("div"); content.id = "content";
+    range.mountProgressionChartRangeSetting();
+    return {{content, select: elements.get("progression-chart-range")}};
+}};
 globalThis.document = {{
     createElement: tagName => new Element(tagName),
     getElementById: id => elements.get(id) ?? null,
@@ -132,17 +139,20 @@ const input = [
     ["future", "2026-09-24T12:00:00Z"],
 ].map(([id, date]) => ({{id, date: new Date(date)}}));
 const initial = range.loadProgressionChartRange();
-range.mountProgressionChartRangeSetting();
-const select = elements.get("progression-chart-range");
+const firstMount = mountSetting();
+const select = firstMount.select;
 const settingInitial = select.value;
 select.value = "3m";
 select.listeners.change();
-range.mountProgressionChartRangeSetting();
+const returningSetting = mountSetting().select.value;
+const storedSetting = range.loadProgressionChartRange();
+range.saveProgressionChartRange("all");
+const allTimeSetting = mountSetting().select.value;
 console.log(JSON.stringify({{
     options: range.PROGRESSION_CHART_RANGES.map(option => option.value),
     initial,
-    stored: range.loadProgressionChartRange(),
-    setting: {{cards: content.children.length, initial: settingInitial, labels: select.children.map(option => option.textContent)}},
+    stored: storedSetting,
+    setting: {{cards: firstMount.content.children.length, initial: settingInitial, returning: returningSetting, allTime: allTimeSetting, labels: select.children.map(option => option.textContent)}},
     threeMonths: range.filterProgressionChartData(input, "3m", new Date("2026-09-23T12:00:00Z")).map(entry => entry.id),
     monthEnd: range.filterProgressionChartData([
         {{id: "february", date: new Date("2026-02-28T12:00:00Z")}},
@@ -160,7 +170,7 @@ console.log(JSON.stringify({{
                 "options": ["1m", "3m", "6m", "1y", "2y", "3y", "all"],
                 "initial": "6m",
                 "stored": "3m",
-                "setting": {"cards": 1, "initial": "6m", "labels": ["1 month", "3 months", "6 months", "1 year", "2 years", "3 years", "All time"]},
+                "setting": {"cards": 1, "initial": "6m", "returning": "3m", "allTime": "all", "labels": ["1 month", "3 months", "6 months", "1 year", "2 years", "3 years", "All time"]},
                 "threeMonths": ["edge", "recent"],
                 "monthEnd": ["february", "march"],
                 "all": ["old", "edge", "recent", "future"],

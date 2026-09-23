@@ -56,14 +56,13 @@ export const mountProgressionChartRangeSetting = () => {
     const select = document.createElement("select");
     select.className = "form-select";
     select.id = "progression-chart-range";
-    select.value = loadProgressionChartRange();
     PROGRESSION_CHART_RANGES.forEach(option => {
         const item = document.createElement("option");
         item.value = option.value;
         item.textContent = option.label;
-        item.selected = option.value === select.value;
         select.append(item);
     });
+    select.value = loadProgressionChartRange();
     select.addEventListener("change", () => saveProgressionChartRange(select.value as ProgressionChartRange));
     const help = document.createElement("div");
     help.className = "form-text";
