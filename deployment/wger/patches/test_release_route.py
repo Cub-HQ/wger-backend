@@ -57,7 +57,7 @@ class ReleaseRouteTest(unittest.TestCase):
             docker_socket = socket.socket(socket.AF_UNIX)
             docker_socket.bind(str(socket_path))
             try:
-                deploy = root / 'live'
+                deploy = home / 'fitness-wger'
                 overrides = deploy / 'overrides'
                 config = deploy / 'config'
                 overrides.mkdir(parents=True)
@@ -81,6 +81,11 @@ with Path(os.environ["DOCKER_LOG"]).open("a") as log: log.write(json.dumps(args)
 proxy = Path(os.environ['DOCKER_LOG']).with_suffix('.proxy')
 if 'up' in args and ('web' in args or 'powersync' in args): proxy.write_text('stale')
 if args[-3:] == ['nginx', '-s', 'reload']: proxy.write_text('ready')
+fault=os.environ.get('RELEASE_FAULT','')
+if fault=='double' and 'migrate' in args:
+    print('release migration rejected',file=sys.stderr);sys.exit(9)
+if fault=='double' and 'up' in args and any('compose.rollback.yaml' in arg for arg in args):
+    print('rollback recreate rejected',file=sys.stderr);sys.exit(8)
 if "compose" in args and "ps" in args and "-q" in args:
     services = args[args.index("-q") + 1:]
     print("\\n".join({"web":"id-web", "celery_worker":"id-worker", "celery_beat":"id-beat", "powersync":"id-powersync"}[service] for service in services))
@@ -100,7 +105,12 @@ elif "compose" in args and "cp" in args:
 elif "showmigrations" in args: print("[X] manager.0029")
 elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
 elif "config" in args and "--format" in args:
-    print(json.dumps({"services":{name:{} for name in ("web","celery_worker","celery_beat","powersync","db","cache","nginx")}}))
+    services={name:{} for name in ('web','celery_worker','celery_beat','powersync','db','cache','nginx')}
+    if fault=='missing':services['web']['volumes']=[{'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'}]
+    for arg in args:
+        if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
+            print('services.web.build must be a string',file=sys.stderr);sys.exit(1)
+    print(json.dumps({'services':services}))
 elif "sha256sum" in args:
     path = Path(os.environ["STATIC_ROOT"]) / Path(args[-1]).relative_to("/wger/static")
     print(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + args[-1])
@@ -185,11 +195,27 @@ elif "sha256sum" in args:
                     self.assertTrue(any('up' in command and service in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
                 self.assertEqual(docker_log.with_suffix('.proxy').read_text(), 'ready')
                 (root / 'malformed-http').unlink()
+                (deploy / 'settings-main.py').unlink()
+                (deploy / 'settings-main.py').mkdir()
+                (overrides / 'settings-main.py').write_text('previous settings')
                 staged = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertEqual(staged.returncode, 0, staged.stderr)
+                self.assertTrue((deploy / 'settings-main.py').is_file())
                 for name in stage_names:
                     self.assertEqual((deploy / name).read_text(), 'new ' + name)
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
+                offset = len(docker_log.read_text().splitlines())
+                refused = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env={**staged_env,'RELEASE_FAULT':'missing'}, text=True,capture_output=True)
+                self.assertNotEqual(refused.returncode,0)
+                self.assertIn('bind source missing or wrong type',refused.stderr)
+                refused_commands=[json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
+                self.assertFalse(any('stop' in command or 'up' in command for command in refused_commands))
+                double = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double'},text=True,capture_output=True)
+                self.assertNotEqual(double.returncode,0)
+                self.assertIn('release migration rejected',double.stderr)
+                self.assertIn('rollback recreate rejected',double.stderr)
+                self.assertIn('previous compose running; public login 200',double.stderr)
+                self.assertEqual(docker_log.with_suffix('.proxy').read_text(),'ready')
                 served_file.write_text('stale collected browser bundle\n')
                 mismatch = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                           text=True, capture_output=True)

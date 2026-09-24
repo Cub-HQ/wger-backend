@@ -100,7 +100,9 @@ def deploy(args):
         env.update(WGER_SOURCE_DEPLOY=str(candidate), WGER_EXPECTED_SHA256=expected,
                    WGER_RELEASE_COMMIT=args.commit)
         result = subprocess.run(['bash', str(machinery / PREFIX / 'patches/release-web.sh')],
-                                env=env, check=True, text=True, stdout=subprocess.PIPE)
+                                env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode:
+            raise RuntimeError('release failed: ' + result.stderr[-6000:])
         proof = json.loads(result.stdout.splitlines()[-1])
         if proof.get('status') != 'deployed' or proof.get('commit') != args.commit or proof['live_proof']['normalized_sha256'] != expected:
             raise ValueError('release did not return matching live proof')

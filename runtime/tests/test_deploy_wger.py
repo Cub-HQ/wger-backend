@@ -18,6 +18,7 @@ class WgerDeployTests(unittest.TestCase):
         spec.loader.exec_module(module)
         errors = (
             (RuntimeError('restored application version endpoint did not become ready'), 'version endpoint'),
+            (RuntimeError('release failed: mount rejected password=secret; rollback failed: recreate rejected token=abc; previous compose running'), 'rollback failed: recreate rejected'),
             (OSError('socket unavailable'), 'socket unavailable'),
             (ValueError('password=secret token: abc Authorization: Bearer xyz https://user:pass@host/path?key=private'), '[REDACTED]'),
             (subprocess.CalledProcessError(17, ['docker', '--password', 'hidden'], output=b'private output', stderr=b'private error'), 'exit status 17'),
