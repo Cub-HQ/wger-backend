@@ -9,6 +9,8 @@ import sys
 import tempfile
 import time
 import unittest
+import http.server
+import threading
 
 ROOT = pathlib.Path(__file__).parent
 
@@ -94,6 +96,8 @@ elif "compose" in args and "cp" in args:
     Path(destination).write_bytes((Path(os.environ["STATIC_ROOT"]) / relative).read_bytes())
 elif "showmigrations" in args: print("[X] manager.0029")
 elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
+elif "config" in args and "--format" in args:
+    print(json.dumps({"services":{name:{} for name in ("web","celery_worker","celery_beat","powersync","db","cache","nginx")}}))
 elif "sha256sum" in args:
     path = Path(os.environ["STATIC_ROOT"]) / Path(args[-1]).relative_to("/wger/static")
     print(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + args[-1])
@@ -103,21 +107,67 @@ elif "sha256sum" in args:
                 served_file = root / 'static' / served_name
                 served_file.parent.mkdir(parents=True)
                 served_file.write_bytes(bundle.replace(b'main.js.map', b'main.js.92e5bc28799b.map'))
+                class Handler(http.server.BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        self.send_response(200)
+                        self.send_header('Last-Modified', 'Fri, 25 Sep 2026 00:00:00 GMT')
+                        self.end_headers()
+                        if self.path.startswith('/static/'):
+                            self.wfile.write(b'stale public cache' if (root / 'stale-http').exists() else served_file.read_bytes())
+                        else:
+                            self.wfile.write(('<script src="/static/' + served_name + '"></script>').encode())
+                    def log_message(self, *args):
+                        pass
+                server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                self.addCleanup(server.server_close)
+                self.addCleanup(server.shutdown)
                 manifest = root / 'staticfiles.json'
                 manifest.write_text(json.dumps({'paths': {'node/@wger-project/react-components/build/main.js': served_name}}))
                 env = {**os.environ, 'HOME': str(home), 'PATH': str(binary.parent) + ':' + os.environ['PATH'],
                        'DOCKER_LOG': str(docker_log), 'WGER_DEPLOY_DIR': str(deploy),
                        'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history),
+                       'WGER_PUBLIC_URL': 'http://127.0.0.1:' + str(server.server_port),
                        'STATIC_ROOT': str(root / 'static'), 'STATIC_MANIFEST': str(manifest)}
                 result = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((overrides / 'react-main.js').read_bytes(), bundle)
+                proof = json.loads(result.stdout.splitlines()[-1])['live_proof']
+                self.assertEqual(proof['expected_sha256'], hashlib.sha256(bundle).hexdigest())
+                self.assertEqual(proof['normalized_sha256'], proof['expected_sha256'])
+                self.assertNotEqual(proof['served_sha256'], proof['expected_sha256'])
+                self.assertTrue(proof['date'])
+                self.assertEqual(proof['last_modified'], 'Fri, 25 Sep 2026 00:00:00 GMT')
                 for name in ('template.html', 'corresponding-source.json'):
                     self.assertEqual((overrides / name).read_text(), f'new {name}\n')
                 commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
                 self.assertTrue(any(str(deploy / 'compose.yaml') in command for command in map(' '.join, commands)))
                 self.assertTrue(any('cp nginx:/wger/static/' + served_name in ' '.join(command) for command in commands))
+                candidate = root / 'candidate'
+                (candidate / 'config').mkdir(parents=True)
+                (candidate / 'overrides').mkdir()
+                stage_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
+                for name in stage_names:
+                    (candidate / name).write_text('new ' + name)
+                    (deploy / name).write_text('old ' + name)
+                for name in ('react-main.js', 'template.html', 'corresponding-source.json'):
+                    (candidate / 'overrides' / (name + '.next')).write_bytes((overrides / (name + '.next')).read_bytes())
+                private_before = (config / 'private.env').read_bytes()
+                staged_env = {**env, 'WGER_SOURCE_DEPLOY': str(candidate)}
+                (root / 'stale-http').touch()
+                rejected = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn('fork release failed', rejected.stderr)
+                for name in stage_names:
+                    self.assertEqual((deploy / name).read_text(), 'old ' + name)
+                self.assertEqual((config / 'private.env').read_bytes(), private_before)
+                (root / 'stale-http').unlink()
+                staged = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
+                self.assertEqual(staged.returncode, 0, staged.stderr)
+                for name in stage_names:
+                    self.assertEqual((deploy / name).read_text(), 'new ' + name)
+                self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 served_file.write_text('stale collected browser bundle\n')
                 mismatch = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                           text=True, capture_output=True)

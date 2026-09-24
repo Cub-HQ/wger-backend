@@ -1,0 +1,145 @@
+import copy
+import hashlib
+import json
+from pathlib import Path
+import socket
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import wger_preflight as gate
+
+
+class PreflightTest(unittest.TestCase):
+    def exercise(self, fault=None):
+        source = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            destination = home / 'fitness-coach-migration'
+            destination.mkdir(mode=0o700)
+            (home / '.colima').mkdir()
+            sock = socket.socket(socket.AF_UNIX)
+            sock.bind(str(home / '.colima/docker.sock'))
+            self.addCleanup(sock.close)
+            (home / '.colima/default').mkdir()
+            alternate = socket.socket(socket.AF_UNIX)
+            alternate.bind(str(home / '.colima/default/docker.sock'))
+            self.addCleanup(alternate.close)
+            deploy = home / 'fitness-wger'
+            deploy.mkdir()
+            for name in ('writer', 'history'):
+                (home / name).touch()
+            env = {'WGER_WRITER_LOCK': str(home / 'writer'), 'WGER_HISTORY_LOCK': str(home / 'history')}
+            env['WGER_DOCKER_HOST'] = 'unix://' + str(home / '.colima/default/docker.sock')
+            counts = {'users': 5, 'sessions': 387, 'logs': 4564, 'videos': 0}
+            before = {'database': {'counts': counts, 'schema': [['manager', '0029']]},
+                      'media': (b'', 0), 'containers': {name: {'Image': name, 'state': ('running', 'healthy')}
+                       for name in ('web', 'powersync', 'celery_worker', 'celery_beat')}}
+            after = copy.deepcopy(before)
+            if fault == 'live':
+                after['database']['counts']['users'] += 1
+            restored = {'counts': counts, 'schema': [['manager', '0029'], ['manager', '0030_workoutlog_cardio_metrics'], ['exercises', '0041_exercisevideo_source_url']]}
+            if fault == 'counts':
+                restored['counts'] = {**counts, 'logs': 0}
+            if fault == 'schema':
+                restored['schema'] = [['manager', '0029']]
+            project = 'wger-restore-1234567890'
+            calls = []
+            residue = False
+
+            def command(args, environment):
+                nonlocal residue
+                args = [str(arg) for arg in args]
+                calls.append(args)
+                if 'info' in args:
+                    return b'wrong-daemon' if fault == 'daemon' and 'default/' in args[2] else b'same-daemon'
+                script = Path(args[1]).name if len(args) > 1 else ''
+                if script == 'backup.py':
+                    snapshot = destination / 'wger-20260925T000000000000Z'
+                    snapshot.mkdir()
+                    files = {'database.dump': b'database', 'media.tar': b'media', 'deployment.tar': b'deploy',
+                             'media-sha256.txt': b'', 'images.json': json.dumps({name: {'image': name, 'status': 'running', 'health': 'healthy'} for name in before['containers']}).encode()}
+                    for name, data in files.items():
+                        (snapshot / name).write_bytes(data)
+                    manifest = {'format': 2, 'includes_powersync_storage': True, 'powersync_storage_source': 'database.dump',
+                                'files': {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}}
+                    (snapshot / 'manifest.json').write_text(json.dumps(manifest))
+                    if fault == 'checksum':
+                        (snapshot / 'database.dump').write_bytes(b'corrupt')
+                    return json.dumps({'snapshot': str(snapshot)}).encode()
+                if script == 'restore-drill.py':
+                    work = destination / project
+                    work.mkdir()
+                    receipt = {'snapshot': args[2], 'project': project, 'port': 18197,
+                               'created_containers': [project + '-' + n for n in ('db', 'web', 'nginx')],
+                               'volumes': [project + '-' + n for n in ('db', 'media', 'static')],
+                               'networks': [project, project + '-front'],
+                               'state': 'restored-awaiting-independent-application-check'}
+                    (work / 'receipt.json').write_text(json.dumps(receipt))
+                    residue = True
+                    if fault == 'restore':
+                        raise RuntimeError('restore failed after ownership receipt')
+                    return json.dumps({'receipt': str(work / 'receipt.json')}).encode()
+                if script == 'cleanup-drill.py':
+                    if fault == 'cleanup':
+                        raise RuntimeError('cleanup failed')
+                    receipt = Path(args[2])
+                    data = json.loads(receipt.read_text())
+                    data['state'] = 'drill resources cleaned; original snapshots retained'
+                    receipt.write_text(json.dumps(data))
+                    residue = fault == 'residue'
+                    return b''
+                if 'migrate' in args:
+                    return b''
+                raise AssertionError(args)
+
+            def resources(*args):
+                return {'container': [project] if residue else [], 'volume': [], 'network': []}
+
+            with patch.object(gate.Path, 'home', return_value=home), \
+                    patch.object(gate, '_command', side_effect=command), \
+                    patch.object(gate, '_baseline', side_effect=[before, after]) as baseline, \
+                    patch.object(gate, '_resources', side_effect=resources), \
+                    patch.object(gate, '_database', return_value=restored), \
+                    patch.object(gate, '_media', return_value=(b'wrong', 1) if fault == 'media' else (b'', 0)), \
+                    patch.object(gate, '_application', side_effect=RuntimeError('HTTP failure') if fault == 'http' else None,
+                                 return_value={'version': '2.7'}):
+                if fault:
+                    with self.assertRaises((RuntimeError, ValueError)):
+                        gate.run(source, deploy, env)
+                else:
+                    result = gate.run(source, deploy, env)
+                    self.assertTrue(result['live_baseline_unchanged'])
+                    self.assertTrue(result['disposable_resources_removed'])
+                    self.assertEqual(result['counts'], counts)
+                self.assertEqual(baseline.call_count, 0 if fault == 'daemon' else 2)
+            scripts = [Path(args[1]).name for args in calls]
+            if fault not in ('checksum', 'daemon'):
+                self.assertEqual(scripts.count('cleanup-drill.py'), 1)
+            else:
+                self.assertNotIn('restore-drill.py', scripts)
+
+    def test_success_and_fail_closed_proof_matrix(self):
+        for fault in (None, 'checksum', 'counts', 'schema', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
+            with self.subTest(fault=fault):
+                self.exercise(fault)
+
+    def test_media_uses_raw_inventory_and_independent_count(self):
+        with patch.object(gate, '_command', side_effect=[b'hash  ./a\n', b'1\n']):
+            self.assertEqual(gate._media(['docker'], 'owned-media', {}), (b'hash  ./a\n', 1))
+
+    def test_application_rejects_empty_http_success(self):
+        class Response:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return b'{}'
+        with patch.object(gate.urllib.request, 'urlopen', return_value=Response()), patch.object(gate.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'version endpoint'):
+                gate._application(18197)
+
+
+if __name__ == '__main__':
+    unittest.main()
