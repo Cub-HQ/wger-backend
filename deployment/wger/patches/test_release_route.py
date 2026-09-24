@@ -168,10 +168,15 @@ elif "sha256sum" in args:
                 candidate = root / 'candidate'
                 (candidate / 'config').mkdir(parents=True)
                 (candidate / 'overrides').mkdir()
-                stage_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
+                stage_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
                 for name in stage_names:
-                    (candidate / name).write_text('new ' + name)
-                    (deploy / name).write_text('old ' + name)
+                    candidate_path = candidate / name
+                    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+                    candidate_path.write_text('new ' + name)
+                    if name != 'formats/en_AU/formats.py':
+                        deploy_path = deploy / name
+                        deploy_path.parent.mkdir(parents=True, exist_ok=True)
+                        deploy_path.write_text('old ' + name)
                 for name in ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json'):
                     (candidate / 'overrides' / (name + '.next')).write_bytes((overrides / (name + '.next')).read_bytes())
                 private_before = (config / 'private.env').read_bytes()
@@ -181,7 +186,10 @@ elif "sha256sum" in args:
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertIn('fork release failed', rejected.stderr)
                 for name in stage_names:
-                    self.assertEqual((deploy / name).read_text(), 'old ' + name)
+                    if name == 'formats/en_AU/formats.py':
+                        self.assertFalse((deploy / name).exists())
+                    else:
+                        self.assertEqual((deploy / name).read_text(), 'old ' + name)
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 (root / 'stale-http').unlink()
                 (root / 'malformed-http').touch()
@@ -191,7 +199,10 @@ elif "sha256sum" in args:
                 self.assertNotEqual(malformed.returncode, 0)
                 self.assertIn('fork release failed', malformed.stderr)
                 for name in stage_names:
-                    self.assertEqual((deploy / name).read_text(), 'old ' + name)
+                    if name == 'formats/en_AU/formats.py':
+                        self.assertFalse((deploy / name).exists())
+                    else:
+                        self.assertEqual((deploy / name).read_text(), 'old ' + name)
                 self.assertEqual((overrides / 'react-main.js').read_bytes(), b'prior browser bundle')
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 recovery = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]

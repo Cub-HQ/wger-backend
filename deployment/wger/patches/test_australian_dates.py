@@ -34,6 +34,15 @@ class AustralianDatesTest(unittest.TestCase):
         self.assertEqual(namespace['DATE_INPUT_FORMATS'][0], '%Y-%m-%d')
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertIn("COPY --chown=wger:wger formats/en_AU/formats.py /home/wger/src/wger/formats/en_AU/formats.py", dockerfile)
+        deploy_bridge = (ROOT.parents[1] / "runtime" / "deploy_wger.py").read_text()
+        for name in (
+            "formats/en_AU/formats.py",
+            "patches/patch_australian_dates.py",
+            "patches/patch_australian_template_dates.py",
+            "patches/patch_australian_pdf.py",
+        ):
+            self.assertIn(repr(name), deploy_bridge)
+
 
     def test_legacy_english_urls_redirect_to_australian_prefix(self):
         config = NGINX.read_text()

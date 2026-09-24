@@ -52,6 +52,23 @@ class WgerDeployTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'DEPLOY_MISSING'):
                 module.check_surfaces(['deployment/wger/patches/' + name])
 
+    def test_every_preparer_dependency_is_a_product_input(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = Path(__file__).resolve().parents[2] / 'deployment/wger'
+        preparer = (source / 'patches/prepare-react.sh').read_text()
+        referenced = {
+            'patches/' + name
+            for name in module.re.findall(r'\$PATCH_DIR/([A-Za-z0-9_.-]+\.py)', preparer)
+        }
+        self.assertTrue(referenced)
+        self.assertTrue(referenced.issubset(module.PRODUCT_FILES))
+        self.assertIn('formats/en_AU/formats.py', module.PRODUCT_FILES)
+        module.check_surfaces(['deployment/wger/' + name for name in referenced | {'formats/en_AU/formats.py'}])
+
+
+
     def test_bundle_comparison_normalizes_only_collectstatic_map(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
         module = importlib.util.module_from_spec(spec)

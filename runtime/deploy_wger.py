@@ -14,10 +14,12 @@ import tempfile
 PREFIX = 'deployment/wger/'
 # Explicit custody: never copy a directory recursively into the live deployment.
 PRODUCT_FILES = (
-    'compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf',
-    'config/powersync.yaml', 'config/sync_rules.yaml',
-    'patches/prepare-react.sh', 'patches/patch_progression_chart.py',
-    'patches/patch_muscle_diagram.py', 'patches/patch_footer.py',
+    'compose.yaml', 'Dockerfile', 'settings-main.py', 'formats/en_AU/formats.py',
+    'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml',
+    'patches/prepare-react.sh', 'patches/patch_australian_dates.py',
+    'patches/patch_australian_template_dates.py', 'patches/patch_australian_pdf.py',
+    'patches/patch_progression_chart.py', 'patches/patch_muscle_diagram.py',
+    'patches/patch_footer.py',
 )
 MACHINERY = ('patches/release-web.sh', 'patches/release_web.py', 'patches/release_env.py',
              'patches/setup-powersync-storage.py')
