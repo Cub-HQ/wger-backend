@@ -23,14 +23,21 @@ PRODUCT_FILES = (
 )
 MACHINERY = ('patches/release-web.sh', 'patches/release_web.py', 'patches/release_env.py',
              'patches/setup-powersync-storage.py')
-OPERATIONS = ('operations/backup.py', 'operations/snapshot.py', 'operations/restore-drill.py',
-              'operations/cleanup-drill.py', 'operations/recovery-drill.py',
-              'operations/cleanup-recovery.py', 'operations/com.cortana.fitness-wger.backup.plist',
+# These are executed from the merged source by wger_preflight before release. They
+# are not copied into the live deployment, but a change to them is exercised by
+# this route rather than requiring a separate operations activation.
+PREFLIGHT_FILES = ('operations/backup.py', 'operations/snapshot.py',
+                   'operations/restore-drill.py', 'operations/cleanup-drill.py')
+OPERATIONS = ('operations/recovery-drill.py', 'operations/cleanup-recovery.py',
+              'operations/com.cortana.fitness-wger.backup.plist',
               'com.cortana.fitness-wger.vm.plist')
 EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.env.example',
                   'patches/test_release_route.py', 'patches/test_patch_progression_chart.py',
                   'patches/test_patch_ux_wave1.py', 'patches/test_patch_ux_wave3.py',
+                  'patches/test_australian_dates.py', 'patches/check_pinned_artifacts.py',
                   'operations/test_backup_route.py')
+RETIRED_FILES = ('patches/patch_server_wave3.py', 'patches/patch_ux_wave1.py',
+                 'patches/patch_ux_wave3.py')
 
 
 def normalize_bundle(data):
@@ -43,9 +50,11 @@ def check_surfaces(paths):
         if not path.startswith(PREFIX):
             raise ValueError('DEPLOY_MISSING: non-gym surface ' + path)
         relative = path[len(PREFIX):]
-        if relative not in PRODUCT_FILES + MACHINERY + EVIDENCE_FILES:
-            # Operations/launchd/private environment require separately reviewed activation.
-            kind = 'operations activation' if relative in OPERATIONS else 'unsupported surface'
+        if relative not in PRODUCT_FILES + MACHINERY + PREFLIGHT_FILES + EVIDENCE_FILES:
+            # Scheduler/recovery activation remains separate. Retired release
+            # inputs stay explicitly classified but cannot silently deploy.
+            kind = ('operations activation' if relative in OPERATIONS else
+                    'retired release input' if relative in RETIRED_FILES else 'unsupported surface')
             raise ValueError('DEPLOY_MISSING: ' + kind + ': ' + path)
 
 
