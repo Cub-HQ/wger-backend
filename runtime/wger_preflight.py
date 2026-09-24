@@ -82,6 +82,15 @@ def _baseline(docker, deploy, env):
             'media': _media(docker, 'fitness-wger_media', env)}
 
 
+def _release_identity(baseline):
+    """Deployment identity excludes restart metadata and ongoing athlete writes."""
+    return {
+        'bundle_sha256': baseline['files']['overrides/react-main.js'][0],
+        'migrations': sorted(baseline['database']['schema']),
+        'images': {service: record['Image'] for service, record in baseline['containers'].items()},
+    }
+
+
 def _application(port):
     url = f'http://127.0.0.1:{port}/api/v2/version/'
     for attempt in range(60):
@@ -200,8 +209,11 @@ def run(source: Path, deploy: Path, env: dict) -> dict:
         except Exception:
             failures.append('disposable residue accounting unavailable')
         try:
-            if _baseline(docker, deploy, env) != before:
-                failures.append('live baseline changed during backup/restore preflight')
+            before_identity = _release_identity(before)
+            after_identity = _release_identity(_baseline(docker, deploy, env))
+            changed = [key for key in before_identity if before_identity[key] != after_identity[key]]
+            if changed:
+                failures.append('live release identity changed during backup/restore preflight: ' + ', '.join(changed))
         except Exception:
             failures.append('live baseline comparison unavailable')
         if failures:
