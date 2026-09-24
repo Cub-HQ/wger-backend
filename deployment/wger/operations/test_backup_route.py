@@ -9,7 +9,7 @@ import backup
 
 class BackupRouteTest(unittest.TestCase):
     def test_snapshot_recovers_proxy_after_writer_restart_even_on_capture_failure(self):
-        for fault in (None, 'capture', 'reload'):
+        for fault in (None, 'capture', 'reload', 'powersync', 'powersync+reload'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 home=pathlib.Path(directory); destination=home/'fitness-coach-migration'
                 destination.mkdir(mode=0o700); destination.chmod(0o700)
@@ -24,18 +24,22 @@ class BackupRouteTest(unittest.TestCase):
                         return b''
                     if args==('exec','-T','nginx','nginx','-t'):return b''
                     if args==('exec','-T','nginx','nginx','-s','reload'):
-                        if fault=='reload':raise RuntimeError('reload failed')
+                        if fault in ('reload','powersync+reload'):raise RuntimeError('reload failed')
                         proxy['address']=proxy['web'];return b''
                     raise AssertionError(args)
                 def docker(*args,**kwargs):
                     actions.append(args)
                     if args[0]=='start':proxy['web']='new'
                     return b''
-                with patch.object(backup.pathlib.Path,'home',return_value=home), patch.object(backup,'DEPLOY',home), patch.object(backup.pathlib.Path,'is_socket',return_value=True), patch.object(backup,'acquire_custody',return_value=[]), patch.object(backup,'compose',side_effect=compose), patch.object(backup,'docker',side_effect=docker), patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident]), patch.object(backup,'media_inventory',return_value=b''), patch.object(backup.subprocess,'run'), patch.object(backup,'write_manifest'):
+                def wait_for_state(ident, expected):
+                    if fault in ('powersync','powersync+reload') and ident=='powersync':raise RuntimeError('powersync failed')
+                    self.assertEqual(states[ident],expected)
+                with patch.object(backup.pathlib.Path,'home',return_value=home), patch.object(backup,'DEPLOY',home), patch.object(backup.pathlib.Path,'is_socket',return_value=True), patch.object(backup,'acquire_custody',return_value=[]), patch.object(backup,'compose',side_effect=compose), patch.object(backup,'docker',side_effect=docker), patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident]), patch.object(backup,'wait_for_state',side_effect=wait_for_state), patch.object(backup,'media_inventory',return_value=b''), patch.object(backup.subprocess,'run'), patch.object(backup,'write_manifest'):
                     if fault:
-                        with self.assertRaisesRegex(RuntimeError,fault+' failed'):backup.snapshot(destination)
+                        with self.assertRaisesRegex(RuntimeError,fault.split('+')[0]+' failed') as caught:backup.snapshot(destination)
+                        if fault=='powersync+reload':self.assertIn('nginx recovery also failed: reload failed',caught.exception.__notes__)
                     else:backup.snapshot(destination)
-                if fault!='reload':self.assertEqual(proxy['address'],proxy['web'])
+                if fault not in ('reload','powersync+reload'):self.assertEqual(proxy['address'],proxy['web'])
                 self.assertLess(next(i for i,a in enumerate(actions) if a[0]=='start'),actions.index(('exec','-T','nginx','nginx','-s','reload')))
                 self.assertEqual((destination/'latest.json').exists(),fault is None)
                 self.assertEqual((next(destination.glob('wger-*'))/'INCOMPLETE').exists(),fault is not None)
@@ -95,6 +99,7 @@ class BackupRouteTest(unittest.TestCase):
             def compose(*args,**kwargs):
                 if args[:3]==('ps','-a','-q'):return ids[args[3]].encode()
                 if args[:3]==('exec','-T','db'):raise RuntimeError('primary capture failure')
+                if args[:4]==('exec','-T','nginx','nginx'):return b''
                 raise AssertionError(args)
             def docker(*args,**kwargs):
                 if args[0] in {'stop','start'}:return b''
