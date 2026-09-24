@@ -130,6 +130,16 @@ class PreflightTest(unittest.TestCase):
         with patch.object(gate, '_command', side_effect=[b'hash  ./a\n', b'1\n']):
             self.assertEqual(gate._media(['docker'], 'owned-media', {}), (b'hash  ./a\n', 1))
 
+    def test_application_accepts_real_string_and_legacy_object(self):
+        class Response:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return json.dumps(payload).encode()
+        for payload in ('2.7.0', {'version': '2.7.0'}):
+            with self.subTest(payload=payload), patch.object(gate.urllib.request, 'urlopen', return_value=Response()), patch.object(gate.time, 'sleep'):
+                self.assertEqual(gate._application(18197), {'version': '2.7.0'})
+
     def test_application_rejects_empty_http_success(self):
         class Response:
             status = 200

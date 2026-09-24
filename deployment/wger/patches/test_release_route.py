@@ -78,6 +78,9 @@ import hashlib, json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 with Path(os.environ["DOCKER_LOG"]).open("a") as log: log.write(json.dumps(args) + "\\n")
+proxy = Path(os.environ['DOCKER_LOG']).with_suffix('.proxy')
+if 'up' in args and ('web' in args or 'powersync' in args): proxy.write_text('stale')
+if args[-3:] == ['nginx', '-s', 'reload']: proxy.write_text('ready')
 if "compose" in args and "ps" in args and "-q" in args:
     services = args[args.index("-q") + 1:]
     print("\\n".join({"web":"id-web", "celery_worker":"id-worker", "celery_beat":"id-beat", "powersync":"id-powersync"}[service] for service in services))
@@ -109,6 +112,8 @@ elif "sha256sum" in args:
                 served_file.write_bytes(bundle.replace(b'main.js.map', b'main.js.92e5bc28799b.map'))
                 class Handler(http.server.BaseHTTPRequestHandler):
                     def do_GET(self):
+                        if docker_log.with_suffix('.proxy').read_text() != 'ready':
+                            self.send_error(502, 'nginx retained old upstream');return
                         self.send_response(200)
                         self.send_header('Last-Modified', 'Fri, 25 Sep 2026 00:00:00 GMT')
                         self.end_headers()
@@ -178,6 +183,7 @@ elif "sha256sum" in args:
                 self.assertTrue(any('showmigrations' in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
                 for service in ('web', 'celery_worker', 'celery_beat', 'powersync'):
                     self.assertTrue(any('up' in command and service in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
+                self.assertEqual(docker_log.with_suffix('.proxy').read_text(), 'ready')
                 (root / 'malformed-http').unlink()
                 staged = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertEqual(staged.returncode, 0, staged.stderr)

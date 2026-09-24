@@ -8,23 +8,37 @@ import backup
 
 
 class BackupRouteTest(unittest.TestCase):
-    def test_native_colima_closed_writer_snapshot_order_and_custody(self):
-        source=pathlib.Path(backup.__file__).read_text()
-        self.assertNotIn('limactl',source);self.assertIn('.colima/docker.sock',source)
-        snapshot=source[source.index('def snapshot('):]
-        for token in ('WGER_WRITER_LOCK','WGER_HISTORY_LOCK'):self.assertIn(token,snapshot)
-        self.assertIn('fcntl.flock(handle,operation)',source);self.assertIn('fcntl.lockf(handle,operation)',source)
-        stop=snapshot.index("docker('stop',*running_ids)")
-        capture=[snapshot.index(token) for token in ("'pg_dump --format=custom","'media.tar'","'deployment.tar'","'images.json'")]
-        resume=snapshot.index("docker('start',*running_ids")
-        self.assertTrue(all(stop<item<resume for item in capture))
-
-    def test_exact_existing_containers_resume_before_latest_publication(self):
-        source=pathlib.Path(backup.__file__).read_text();snapshot=source[source.index('def snapshot('):]
-        self.assertIn("compose('ps','-a','-q',service)",snapshot);self.assertNotIn("compose('up'",snapshot)
-        self.assertIn('wait_for_state(ident,writer_states[service])',snapshot)
-        self.assertLess(snapshot.index('wait_for_state('),snapshot.index("latest.json"))
-        self.assertIn("(root/'INCOMPLETE').touch()",snapshot)
+    def test_snapshot_recovers_proxy_after_writer_restart_even_on_capture_failure(self):
+        for fault in (None, 'capture', 'reload'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                home=pathlib.Path(directory); destination=home/'fitness-coach-migration'
+                destination.mkdir(mode=0o700); destination.chmod(0o700)
+                (home/'compose.yaml').touch()
+                actions=[]; proxy={'address':'old', 'web':'old'}
+                states={service:{'image':service,'status':'running','health':'healthy'} for service in backup.WRITERS}
+                def compose(*args,**kwargs):
+                    actions.append(args)
+                    if args[:3]==('ps','-a','-q'):return args[3].encode()
+                    if args[:3]==('exec','-T','db'):
+                        if fault=='capture':raise RuntimeError('capture failed')
+                        return b''
+                    if args==('exec','-T','nginx','nginx','-t'):return b''
+                    if args==('exec','-T','nginx','nginx','-s','reload'):
+                        if fault=='reload':raise RuntimeError('reload failed')
+                        proxy['address']=proxy['web'];return b''
+                    raise AssertionError(args)
+                def docker(*args,**kwargs):
+                    actions.append(args)
+                    if args[0]=='start':proxy['web']='new'
+                    return b''
+                with patch.object(backup.pathlib.Path,'home',return_value=home), patch.object(backup,'DEPLOY',home), patch.object(backup.pathlib.Path,'is_socket',return_value=True), patch.object(backup,'acquire_custody',return_value=[]), patch.object(backup,'compose',side_effect=compose), patch.object(backup,'docker',side_effect=docker), patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident]), patch.object(backup,'media_inventory',return_value=b''), patch.object(backup.subprocess,'run'), patch.object(backup,'write_manifest'):
+                    if fault:
+                        with self.assertRaisesRegex(RuntimeError,fault+' failed'):backup.snapshot(destination)
+                    else:backup.snapshot(destination)
+                if fault!='reload':self.assertEqual(proxy['address'],proxy['web'])
+                self.assertLess(next(i for i,a in enumerate(actions) if a[0]=='start'),actions.index(('exec','-T','nginx','nginx','-s','reload')))
+                self.assertEqual((destination/'latest.json').exists(),fault is None)
+                self.assertEqual((next(destination.glob('wger-*'))/'INCOMPLETE').exists(),fault is not None)
 
     def test_writer_inspection_failure_prevents_capture_and_latest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -58,6 +72,7 @@ class BackupRouteTest(unittest.TestCase):
             def compose(*args,**kwargs):
                 if args[:3]==('ps','-a','-q'):return ids[args[3]].encode()
                 if args[:3]==('exec','-T','db'):raise RuntimeError('forced capture failure')
+                if args[:4]==('exec','-T','nginx','nginx'):return b''
                 raise AssertionError(args)
             starts=[]
             def docker(*args,**kwargs):
@@ -66,7 +81,8 @@ class BackupRouteTest(unittest.TestCase):
                 raise AssertionError(args)
             with patch.object(backup.pathlib.Path,'home',return_value=home),patch.object(backup,'DEPLOY',home),patch.object(backup,'DOCKER_HOST','unix:///tmp/proof.sock'),patch.object(backup.pathlib.Path,'is_socket',return_value=True),patch.object(backup,'compose',side_effect=compose),patch.object(backup,'docker',side_effect=docker),patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident.removeprefix('id-')]),patch.object(backup,'media_inventory',return_value=b''),patch.dict(os.environ,{'WGER_WRITER_LOCK':str(native),'WGER_HISTORY_LOCK':str(state)}):
                 (home/'compose.yaml').touch()
-                with self.assertRaises(RuntimeError):backup.snapshot(destination)
+                with self.assertRaisesRegex(RuntimeError,'forced capture failure') as caught:backup.snapshot(destination)
+            self.assertFalse(getattr(caught.exception,'__notes__',[]))
             self.assertEqual(set(starts),set(ids.values()))
             snapshots=list(destination.glob('wger-*'));self.assertEqual(len(snapshots),1)
             self.assertTrue((snapshots[0]/'INCOMPLETE').exists());self.assertFalse((destination/'latest.json').exists())

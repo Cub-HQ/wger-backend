@@ -108,6 +108,20 @@ def deploy(args):
         return proof
 
 
+def failure_reason(error):
+    # Subprocess exception text includes argv; stdout/stderr can contain configuration.
+    if isinstance(error, subprocess.CalledProcessError):
+        message = f'command failed with exit status {error.returncode}'
+    elif isinstance(error, subprocess.TimeoutExpired):
+        message = f'command timed out after {error.timeout} seconds'
+    else:
+        message = str(error)
+    message = re.sub(r'https?://[^\s\"\'<>]+', '[REDACTED]', message)
+    message = re.sub(r'(?i)\b(?:authorization\s*[:=]\s*)?(?:bearer|basic)\s+\S+', '[REDACTED]', message)
+    message = re.sub(r'''(?ix)([\w-]*(?:password|passwd|secret|token|api[_-]?key|authorization)[\w-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)''', r'\1[REDACTED]', message)
+    return f'{type(error).__name__}: ' + ' '.join(message.split())[:1000]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', required=True)
@@ -117,9 +131,8 @@ def main():
     args = parser.parse_args()
     try:
         proof = deploy(args)
-    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
-        # Never include subprocess output: Docker/config commands may contain secrets.
-        reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+    except Exception as error:
+        reason = failure_reason(error)
         print(json.dumps({'status': 'DEPLOY_MISSING', 'adapter': 'wger', 'commit': args.commit, 'reason': reason}))
         return 1
     print(json.dumps(proof))

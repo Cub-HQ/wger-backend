@@ -88,7 +88,9 @@ def _application(port):
         try:
             with urllib.request.urlopen(url, timeout=5) as response:
                 proof = json.load(response)
-                if response.status == 200 and isinstance(proof, dict) and proof.get('version'):
+                if isinstance(proof, str):
+                    proof = {'version': proof.strip()}
+                if response.status == 200 and isinstance(proof, dict) and isinstance(proof.get('version'), str) and proof['version'].strip():
                     return proof
         except (OSError, ValueError, urllib.error.URLError):
             pass

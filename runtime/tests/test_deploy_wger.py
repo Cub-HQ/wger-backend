@@ -1,15 +1,36 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ADAPTER = Path(__file__).resolve().parents[1] / 'deploy_wger.py'
 
 
 class WgerDeployTests(unittest.TestCase):
+    def test_failure_receipts_keep_diagnostics_without_credentials(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        errors = (
+            (RuntimeError('restored application version endpoint did not become ready'), 'version endpoint'),
+            (OSError('socket unavailable'), 'socket unavailable'),
+            (ValueError('password=secret token: abc Authorization: Bearer xyz https://user:pass@host/path?key=private'), '[REDACTED]'),
+            (subprocess.CalledProcessError(17, ['docker', '--password', 'hidden'], output=b'private output', stderr=b'private error'), 'exit status 17'),
+            (subprocess.TimeoutExpired(['docker', '--password', 'hidden'], 30, output=b'private output'), 'timed out after 30'),
+        )
+        for error, diagnostic in errors:
+            with self.subTest(error=type(error).__name__), patch.object(module, 'deploy', side_effect=error), patch.object(sys, 'argv', ['deploy_wger', '--source', '/unused', '--commit', 'a'*40]), patch('sys.stdout', new_callable=io.StringIO) as output:
+                self.assertEqual(module.main(), 1)
+                receipt=json.loads(output.getvalue())
+                self.assertIn(diagnostic, receipt['reason'])
+                for secret in ('secret', 'abc', 'xyz', 'user:pass', 'private', 'hidden'):
+                    self.assertNotIn(secret, receipt['reason'])
+
     def test_unknown_surface_refuses_without_touching_live(self):
         with tempfile.TemporaryDirectory() as directory:
             live = Path(directory) / 'live'

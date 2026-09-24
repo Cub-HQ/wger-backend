@@ -134,6 +134,10 @@ def snapshot(destination):
                 for service,ident in writer_ids.items():wait_for_state(ident,writer_states[service])
                 resumed={service:inspect_state(ident) for service,ident in writer_ids.items()}
                 if resumed != writer_states:raise RuntimeError('snapshot did not restore exact gym writer container/image/state/health')
+                if writer_ids.get('web') in running_ids:
+                    # Restarting an existing container can change its IP; nginx caches it.
+                    compose('exec','-T','nginx','nginx','-t')
+                    compose('exec','-T','nginx','nginx','-s','reload')
         except Exception as error:
             resume_error=error;(root/'INCOMPLETE').touch()
         finally:
