@@ -9,6 +9,46 @@ import shutil
 import subprocess
 import tempfile
 import time
+import hashlib
+import json
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
+import signal
+
+
+def interrupted(signum, frame):
+    raise OSError('release interrupted')
+
+
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
+
+source_deploy = Path(os.environ['WGER_SOURCE_DEPLOY']).resolve() if os.environ.get('WGER_SOURCE_DEPLOY') else None
+config_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
+public_url = os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098').rstrip('/')
+
+
+def http_bundle(expected):
+    with urlopen(Request(public_url + '/en-au/user/login', headers={'Cache-Control': 'no-cache'}), timeout=30) as response:
+        html = response.read().decode('utf-8')
+    names = re.findall(r'''(?:src=["'])([^"']*/static/node/@wger-project/react-components/build/main\.[0-9a-f]+\.js)(?:["'])''', html)
+    if not names:
+        raise OSError('public login does not reference a hashed browser bundle')
+    url = urljoin(public_url + '/', names[-1])
+    if not url.startswith(public_url + '/'):
+        raise OSError('browser bundle escaped public origin')
+    with urlopen(Request(url, headers={'Cache-Control': 'no-cache', 'Accept-Encoding': 'identity'}), timeout=60) as response:
+        actual = response.read()
+        date, modified = response.headers.get('Date'), response.headers.get('Last-Modified')
+    normalized = re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', b'sourceMappingURL=main.js.map', actual)
+    if normalized != expected or not date or not modified:
+        raise OSError('public browser bundle/date does not match staged release')
+    digest = hashlib.sha256(expected).hexdigest()
+    if os.environ.get('WGER_EXPECTED_SHA256', digest) != digest:
+        raise OSError('staged bundle changed after preparation')
+    return {'url': url, 'date': date, 'last_modified': modified, 'expected_sha256': digest,
+            'served_sha256': hashlib.sha256(actual).hexdigest(), 'normalized_sha256': hashlib.sha256(normalized).hexdigest(),
+            'markers': {marker: marker.encode() in actual for marker in ('muscular_system_back.svg', 'sourceMappingURL=')}}
 
 patch_dir = Path(__file__).resolve().parent
 deploy_dir = Path(os.environ.get('WGER_DEPLOY_DIR', patch_dir.parent)).resolve()
@@ -54,7 +94,7 @@ def compose(*args, capture=False, files=()):
     return run(*command, *args, capture=capture)
 
 
-def wait_healthy(container, attempts=60):
+def wait_healthy(container, attempts=450):
     for _ in range(attempts):
         state = run('docker', '-H', docker_host, 'inspect', '-f', '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}', container, capture=True)
         if state == 'healthy':
@@ -71,7 +111,7 @@ if docker_host != expected_host or not Path(docker_host.removeprefix('unix://'))
 
 names = ('react-main.js', 'template.html', 'corresponding-source.json')
 for name in names:
-    if not (deploy_dir / 'overrides' / f'{name}.next').is_file():
+    if not ((source_deploy or deploy_dir) / 'overrides' / f'{name}.next').is_file():
         raise SystemExit(f'missing staged override: {name}.next')
 
 services = ('web', 'celery_worker', 'celery_beat')
@@ -96,7 +136,20 @@ if prior_powersync_state != 'running':
     raise SystemExit('PowerSync must be running before release')
 prior_images = {service: run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True) for service, container in zip(services, container_ids)}
 prior_schema = compose('exec', '-T', 'web', 'python3', 'manage.py', 'showmigrations', '--plan', capture=True)
-compose('build', *services)
+# Non-web service/topology changes have no reviewed activation in this route.
+if source_deploy:
+    def rendered_config(path):
+        return json.loads(run('docker', '-H', docker_host, 'compose', '--project-directory', str(deploy_dir), '-f', str(path), 'config', '--format', 'json', capture=True))
+    before_config = rendered_config(deploy_dir / 'compose.yaml')
+    next_config = rendered_config(source_deploy / 'compose.yaml')
+    for key in ('name', 'volumes', 'networks'):
+        if before_config.get(key) != next_config.get(key):
+            raise SystemExit('DEPLOY_MISSING: compose topology change requires a reviewed route')
+    if set(before_config['services']) != set(next_config['services']):
+        raise SystemExit('DEPLOY_MISSING: service set changed')
+    for service in ('db', 'cache', 'nginx'):
+        if before_config['services'][service] != next_config['services'][service]:
+            raise SystemExit('DEPLOY_MISSING: unsupported service change: ' + service)
 
 with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-rollback.') as temporary:
     rollback = Path(temporary)
@@ -111,12 +164,28 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         if current.exists():
             shutil.copy2(current, rollback / name)
     snapshot_complete = False
+    previous_config = {}
+    if source_deploy:
+        for name in config_names:
+            if any(parent.is_symlink() for parent in (deploy_dir / name).parents):
+                raise SystemExit('DEPLOY_MISSING: symlink deployment ancestor')
+            current = deploy_dir / name
+            if current.is_symlink():
+                raise SystemExit('DEPLOY_MISSING: symlink deployment target')
+            previous_config[name] = current.read_bytes() if current.exists() else None
+    if not source_deploy:
+        compose('build', *services)
     try:
         compose('stop', 'powersync', *services)
         stream_to(database_backup, 'docker', '-H', docker_host, 'compose', '-f', str(deploy_dir / 'compose.yaml'), 'exec', '-T', 'db', 'pg_dump', '-Fc', '-U', db_user, db_name)
         snapshot_complete = True
+        if source_deploy:
+            for name in config_names:
+                # Preserve mounted-file inode; never copy private.env or private directories.
+                shutil.copyfile(source_deploy / name, deploy_dir / name)
+            compose('config', '--quiet')
         for name in names:
-            shutil.copy2(deploy_dir / 'overrides' / f'{name}.next', deploy_dir / 'overrides' / name)
+            shutil.copy2((source_deploy or deploy_dir) / 'overrides' / f'{name}.next', deploy_dir / 'overrides' / name)
         compose('up', '-d', '--no-deps', '--force-recreate', *services)
         compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--no-input')
         wait_healthy(compose('ps', '-q', 'web', capture=True))
@@ -139,7 +208,19 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         resumed_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', resumed, capture=True)
         if resumed_image != prior_powersync_image or resumed_state != prior_powersync_state:
             raise subprocess.CalledProcessError(1, ('resume', 'powersync'))
-    except (subprocess.CalledProcessError, OSError):
+        # nginx resolves upstream addresses at reload, after recreated services exist.
+        compose('exec', '-T', 'nginx', 'nginx', '-t')
+        compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
+        live_proof = http_bundle(expected)
+    except Exception:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for name, content in previous_config.items():
+            current = deploy_dir / name
+            if content is None:
+                current.unlink(missing_ok=True)
+            else:
+                current.write_bytes(content)
         for name in names:
             current, old = deploy_dir / 'overrides' / name, rollback / name
             if old.exists(): shutil.copy2(old, current)
@@ -160,5 +241,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         resumed_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', resumed, capture=True)
         if resumed_image != prior_powersync_image or resumed_state != prior_powersync_state:
             raise SystemExit('rollback restored the app but not exact PowerSync image/state')
+        compose('exec', '-T', 'nginx', 'nginx', '-t')
+        compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
         raise SystemExit('fork release failed; prior writer states, overrides, database schema/data and exact images restored') from None
-print('reviewed fork image installed; closed-window migrations completed and all writers resumed')
+print(json.dumps({'status': 'deployed', 'adapter': 'wger', 'commit': os.environ.get('WGER_RELEASE_COMMIT'), 'live_proof': live_proof}))
