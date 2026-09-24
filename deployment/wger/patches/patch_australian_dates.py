@@ -21,6 +21,19 @@ def replace_all(path: str, old: str, new: str, count: int) -> None:
         raise SystemExit(f"Expected {count} Australian-date anchors in {path}, found {text.count(old)}")
     target.write_text(text.replace(old, new))
 
+def replace_in_function(path: str, function: str, old: str, new: str) -> None:
+    target = root / path
+    text = target.read_text()
+    marker = f"export function {function}("
+    if text.count(marker) != 1:
+        raise SystemExit(f"Expected one {function} function in {path}, found {text.count(marker)}")
+    start = text.index(marker)
+    end = text.index("\n}\n", start) + 3
+    block = text[start:end]
+    if block.count(old) != 1:
+        raise SystemExit(f"Expected one Australian-date locale anchor in {function}, found {block.count(old)}")
+    target.write_text(text[:start] + block.replace(old, new) + text[end:])
+
 
 dates = "src/core/lib/date.ts"
 replace(
@@ -28,14 +41,10 @@ replace(
     "export const DAY_MS = 24 * 60 * 60 * 1000;",
     "export const DAY_MS = 24 * 60 * 60 * 1000;\nconst DISPLAY_LOCALE = 'en-AU';",
 )
+for function in ("dateTimeToLocale", "luxonDateTimeToLocale", "dateToLocale"):
+    replace_in_function(dates, function, "    locale = locale ?? i18n.language;", "    locale = DISPLAY_LOCALE;")
 target = root / dates
 text = target.read_text()
-old_locale = "    locale = locale ?? i18n.language;"
-if text.count(old_locale) != 4:
-    raise SystemExit(f"Expected four shared date/time locale anchors in {dates}, found {text.count(old_locale)}")
-# Keep the time-only helper caller-selectable; force every helper that draws a date.
-text = text.replace(old_locale, "    locale = DISPLAY_LOCALE;")
-text = text.replace("    locale = DISPLAY_LOCALE;", old_locale, 1)
 old_year_option = "year: '2-digit'"
 if text.count(old_year_option) != 2:
     raise SystemExit(f"Expected two shared numeric year option anchors in {dates}, found {text.count(old_year_option)}")

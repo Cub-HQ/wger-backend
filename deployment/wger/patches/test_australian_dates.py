@@ -118,17 +118,17 @@ with TemporaryDirectory() as directory:
                 "src/core/lib/date.ts": '''import i18n from 'i18next';
 import { DateTime, DateTimeFormatOptions } from "luxon";
 export const DAY_MS = 24 * 60 * 60 * 1000;
-export function dateTimeToLocaleHHMM(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions) {
-    if (dateTime == null) return null;
-    locale = locale ?? i18n.language;
-    options = options ?? { hour: '2-digit', minute: '2-digit' };
-    return dateTime.toLocaleTimeString(locale ? [locale] : [], options);
-}
 export function dateTimeToLocale(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions,) {
     if (dateTime == null) return '';
     locale = locale ?? i18n.language;
     options = options ?? { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
     return dateTime.toLocaleString(locale ? [locale] : [], options);
+}
+export function dateTimeToLocaleHHMM(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions) {
+    if (dateTime == null) return null;
+    locale = locale ?? i18n.language;
+    options = options ?? { hour: '2-digit', minute: '2-digit' };
+    return dateTime.toLocaleTimeString(locale ? [locale] : [], options);
 }
 export function luxonDateTimeToLocale(dateTime: DateTime | null, locale?: string, options?: DateTimeFormatOptions,) {
     if (dateTime == null) return '';
@@ -210,7 +210,8 @@ const timeEndFormatted = timeEnd.toLocaleString(DateTime.TIME_SIMPLE, { locale: 
             )
 
         display_locale = re.search(r"const DISPLAY_LOCALE = .*?;", source).group()
-        date_time = source[source.index("export function dateTimeToLocale("):source.index("export function luxonDateTimeToLocale(")]
+        date_time = source[source.index("export function dateTimeToLocale("):source.index("export function dateTimeToLocaleHHMM(")]
+        time_only = source[source.index("export function dateTimeToLocaleHHMM("):source.index("export function luxonDateTimeToLocale(")]
         luxon = source[source.index("export function luxonDateTimeToLocale("):source.index("export function dateToLocale(")]
         date_only = source[source.index("export function dateToLocale("):]
         javascript = display_locale + "\n" + date_time + luxon + date_only
@@ -241,6 +242,8 @@ console.log(JSON.stringify([
         )
         self.assertEqual(json.loads(output.stdout), ["21/09/2026"] * 4)
         self.assertEqual(source.count("locale = DISPLAY_LOCALE;"), 3)
+        self.assertIn("locale = locale ?? i18n.language;", time_only)
+        self.assertNotIn("locale = DISPLAY_LOCALE;", time_only)
         self.assertIn("dateToLocale(entry.date)", measurement)
         self.assertNotIn("adapterLocale={i18n.language}", picker_sources)
         self.assertEqual(picker_sources.count('adapterLocale="en-AU"'), 10)

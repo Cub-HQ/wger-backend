@@ -118,7 +118,9 @@ def verify_binds(config, staged=False):
                 continue
             path = Path(mount['source'])
             file_targets = {'/home/wger/src/settings/main.py', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js',
-                            '/home/wger/src/wger/core/templates/template.html', '/config/powersync.yaml', '/config/sync_rules.yaml', '/etc/nginx/conf.d/default.conf'}
+                            '/home/wger/src/wger/core/templates/template.html', '/home/wger/src/wger/exercises/templates/history/overview.html',
+                            '/home/wger/src/wger/core/templates/user/api_key.html', '/home/wger/src/wger/utils/pdf.py',
+                            '/config/powersync.yaml', '/config/sync_rules.yaml', '/etc/nginx/conf.d/default.conf'}
             directory_targets = {'/home/wger/media', '/home/wger/static', '/wger/media', '/wger/static'}
             if mount['target'] not in file_targets | directory_targets:
                 raise RuntimeError('unreviewed bind target type: ' + mount['target'])

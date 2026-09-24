@@ -35,7 +35,7 @@ EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.
                   'patches/test_release_route.py', 'patches/test_patch_progression_chart.py',
                   'patches/test_patch_ux_wave1.py', 'patches/test_patch_ux_wave3.py',
                   'patches/test_australian_dates.py', 'patches/check_pinned_artifacts.py',
-                  'operations/test_backup_route.py')
+                  'patches/test_powersync_storage.py', 'operations/test_backup_route.py')
 RETIRED_FILES = ('patches/patch_server_wave3.py', 'patches/patch_ux_wave1.py',
                  'patches/patch_ux_wave3.py')
 

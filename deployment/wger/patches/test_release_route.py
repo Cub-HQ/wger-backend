@@ -69,6 +69,8 @@ class ReleaseRouteTest(unittest.TestCase):
                 (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
                 for name in ('template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json'):
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
+                    if name in {'history-overview.html', 'api-key.html', 'pdf.py'}:
+                        (overrides / name).write_text(f'old {name}\n')
                 bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
                 (overrides / 'react-main.js.next').write_bytes(bundle)
                 writer, history = root / 'writer.lock', root / 'history.lock'
@@ -112,7 +114,12 @@ elif "showmigrations" in args: print("[X] manager.0029")
 elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
 elif "config" in args and "--format" in args:
     services={name:{} for name in ('web','celery_worker','celery_beat','powersync','db','cache','nginx')}
-    if fault=='missing':services['web']['volumes']=[{'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'}]
+    services['web']['volumes']=[
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/history-overview.html'),'target':'/home/wger/src/wger/exercises/templates/history/overview.html'},
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/api-key.html'),'target':'/home/wger/src/wger/core/templates/user/api_key.html'},
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/pdf.py'),'target':'/home/wger/src/wger/utils/pdf.py'},
+    ]
+    if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
     for arg in args:
         if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
             print('services.web.build must be a string',file=sys.stderr);sys.exit(1)
