@@ -118,7 +118,7 @@ def failure_reason(error):
         message = f'command timed out after {error.timeout} seconds'
     else:
         message = str(error)
-    message = re.sub(r'https?://[^\s\"\'<>]+', '[REDACTED]', message)
+    message = re.sub(r'[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"\'<>]+', '[REDACTED]', message)
     message = re.sub(r'(?i)\b(?:authorization\s*[:=]\s*)?(?:bearer|basic)\s+\S+', '[REDACTED]', message)
     message = re.sub(r'''(?ix)([\w-]*(?:password|passwd|secret|token|api[_-]?key|authorization)[\w-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)''', r'\1[REDACTED]', message)
     return f'{type(error).__name__}: ' + ' '.join(message.split())[:1000]

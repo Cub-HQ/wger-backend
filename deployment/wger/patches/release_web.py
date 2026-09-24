@@ -291,6 +291,12 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
                 compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services)
                 wait_healthy(compose('ps', '-q', 'web', capture=True))
                 compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync')
+                for service, image in rollback_images.items():
+                    container = compose('ps', '-q', service, capture=True)
+                    actual_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True)
+                    actual_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', container, capture=True)
+                    if actual_image != image or actual_state != 'running':
+                        raise RuntimeError('final restore did not recover prior image/running state: ' + service)
                 compose('exec', '-T', 'nginx', 'nginx', '-t')
                 compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
                 with urlopen(public_url + '/en-au/user/login', timeout=30) as response:

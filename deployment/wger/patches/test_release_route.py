@@ -82,17 +82,18 @@ proxy = Path(os.environ['DOCKER_LOG']).with_suffix('.proxy')
 if 'up' in args and ('web' in args or 'powersync' in args): proxy.write_text('stale')
 if args[-3:] == ['nginx', '-s', 'reload']: proxy.write_text('ready')
 fault=os.environ.get('RELEASE_FAULT','')
-if fault=='double' and 'migrate' in args:
+if fault.startswith('double') and 'migrate' in args:
     print('release migration rejected',file=sys.stderr);sys.exit(9)
-if fault=='double' and 'up' in args and any('compose.rollback.yaml' in arg for arg in args):
+if fault.startswith('double') and 'up' in args and any('compose.rollback.yaml' in arg for arg in args):
     print('rollback recreate rejected',file=sys.stderr);sys.exit(8)
+if fault=='double-dead-sync' and 'up' in args and args[-1]=='powersync':proxy.with_suffix('.dead-sync').touch()
 if "compose" in args and "ps" in args and "-q" in args:
     services = args[args.index("-q") + 1:]
     print("\\n".join({"web":"id-web", "celery_worker":"id-worker", "celery_beat":"id-beat", "powersync":"id-powersync"}[service] for service in services))
 elif "inspect" in args:
     template, target = args[args.index("-f") + 1], args[-1]
     if template == "{{.Image}}": print("image-" + target)
-    elif template == "{{.State.Status}}": print("running")
+    elif template == "{{.State.Status}}": print('exited' if target=='id-powersync' and proxy.with_suffix('.dead-sync').exists() else 'running')
     else: print("healthy")
 elif any("stored_name" in arg for arg in args):
     manifest = json.loads(Path(os.environ["STATIC_MANIFEST"]).read_text())
@@ -216,6 +217,11 @@ elif "sha256sum" in args:
                 self.assertIn('rollback recreate rejected',double.stderr)
                 self.assertIn('previous compose running; public login 200',double.stderr)
                 self.assertEqual(docker_log.with_suffix('.proxy').read_text(),'ready')
+                dead = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double-dead-sync'},text=True,capture_output=True)
+                self.assertNotEqual(dead.returncode,0)
+                self.assertIn('final restore did not recover prior image/running state: powersync',dead.stderr)
+                self.assertNotIn('previous compose running;',dead.stderr)
+                docker_log.with_suffix('.dead-sync').unlink()
                 served_file.write_text('stale collected browser bundle\n')
                 mismatch = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                           text=True, capture_output=True)

@@ -19,6 +19,7 @@ class WgerDeployTests(unittest.TestCase):
         errors = (
             (RuntimeError('restored application version endpoint did not become ready'), 'version endpoint'),
             (RuntimeError('release failed: mount rejected password=secret; rollback failed: recreate rejected token=abc; previous compose running'), 'rollback failed: recreate rejected'),
+            (RuntimeError('rollback failed PS_DATABASE_URI=postgres://fitness_wger:secret@db/app REDIS_URL=redis://:abc@cache/0'), 'rollback failed'),
             (OSError('socket unavailable'), 'socket unavailable'),
             (ValueError('password=secret token: abc Authorization: Bearer xyz https://user:pass@host/path?key=private'), '[REDACTED]'),
             (subprocess.CalledProcessError(17, ['docker', '--password', 'hidden'], output=b'private output', stderr=b'private error'), 'exit status 17'),
