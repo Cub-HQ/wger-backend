@@ -35,6 +35,12 @@ python3 "$PATCH_DIR/patch_muscle_diagram.py" "$BUILD_DIR/build/main.js" "$DEPLOY
 curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/core/templates/template.html" --output "$BUILD_DIR/template.html"
 python3 "$PATCH_DIR/patch_footer.py" "$BUILD_DIR/template.html" "$DEPLOY_DIR/overrides/template.html.next"
 
+curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/exercises/templates/history/overview.html" --output "$BUILD_DIR/history-overview.html"
+python3 "$PATCH_DIR/patch_australian_template_dates.py" history-overview "$BUILD_DIR/history-overview.html" "$DEPLOY_DIR/overrides/history-overview.html.next"
+
+curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/core/templates/user/api_key.html" --output "$BUILD_DIR/api-key.html"
+python3 "$PATCH_DIR/patch_australian_template_dates.py" api-key "$BUILD_DIR/api-key.html" "$DEPLOY_DIR/overrides/api-key.html.next"
+
 cat > "$DEPLOY_DIR/overrides/corresponding-source.json.next" <<EOF
 {"license":"AGPL-3.0","server":{"repository":"$WGER_REPO","commit":"$WGER_COMMIT"},"frontend":{"repository":"$REACT_REPO","commit":"$REACT_COMMIT","upstream_commit":"89d234a800ba0f2097162f1d91444c7e3a5ccc5c"}}
 EOF

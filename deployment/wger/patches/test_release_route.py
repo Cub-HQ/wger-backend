@@ -25,6 +25,8 @@ class ReleaseRouteTest(unittest.TestCase):
         self.assertIn('135d8569a3eb27c9f0f74e865d56372421a61294', script)
         self.assertIn('react-main.js.next', script)
         self.assertIn('template.html.next', script)
+        self.assertIn('history-overview.html.next', script)
+        self.assertIn('api-key.html.next', script)
         self.assertNotIn('compose up', script)
     def test_release_refuses_without_both_writer_locks_and_restores_exact_runtime(self):
         wrapper = (ROOT / 'release-web.sh').read_text()
@@ -64,7 +66,7 @@ class ReleaseRouteTest(unittest.TestCase):
                 config.mkdir()
                 (deploy / 'compose.yaml').write_text('services: {}\n')
                 (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
-                for name in ('template.html', 'corresponding-source.json'):
+                for name in ('template.html', 'history-overview.html', 'api-key.html', 'corresponding-source.json'):
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
                 bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
                 (overrides / 'react-main.js.next').write_bytes(bundle)
@@ -157,7 +159,7 @@ elif "sha256sum" in args:
                 self.assertNotEqual(proof['served_sha256'], proof['expected_sha256'])
                 self.assertTrue(proof['date'])
                 self.assertEqual(proof['last_modified'], 'Fri, 25 Sep 2026 00:00:00 GMT')
-                for name in ('template.html', 'corresponding-source.json'):
+                for name in ('template.html', 'history-overview.html', 'api-key.html', 'corresponding-source.json'):
                     self.assertEqual((overrides / name).read_text(), f'new {name}\n')
                 commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
                 self.assertTrue(any(str(deploy / 'compose.yaml') in command for command in map(' '.join, commands)))

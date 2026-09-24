@@ -59,10 +59,32 @@ class PinnedArtifactsTest(unittest.TestCase):
             ], check=True)
             self.check_gate(template, "patch_footer.py", "Pinned wger template changed")
 
-    def check_gate(self, source, patch_name, refusal):
+            history = root / "history-overview.html"
+            subprocess.run([
+                "curl", "--fail", "--location", "--silent", "--show-error",
+                f"{pins['WGER_REPO']}/raw/{pins['WGER_COMMIT']}/wger/exercises/templates/history/overview.html",
+                "--output", str(history),
+            ], check=True)
+            self.check_gate(
+                history, "patch_australian_template_dates.py",
+                "Pinned wger history-overview template changed", ("history-overview",),
+            )
+
+            api_key = root / "api-key.html"
+            subprocess.run([
+                "curl", "--fail", "--location", "--silent", "--show-error",
+                f"{pins['WGER_REPO']}/raw/{pins['WGER_COMMIT']}/wger/core/templates/user/api_key.html",
+                "--output", str(api_key),
+            ], check=True)
+            self.check_gate(
+                api_key, "patch_australian_template_dates.py",
+                "Pinned wger api-key template changed", ("api-key",),
+            )
+
+    def check_gate(self, source, patch_name, refusal, patch_args=()):
         patch = PATCH_DIR / patch_name
         target = source.with_name(source.name + ".next")
-        subprocess.run([sys.executable, str(patch), str(source), str(target)], check=True)
+        subprocess.run([sys.executable, str(patch), *patch_args, str(source), str(target)], check=True)
         self.assertTrue(target.is_file(), "Accepted artifact must produce a deployable override")
 
         # Mutate only the recorded digest, never the actual built/pinned artifact.
@@ -73,7 +95,7 @@ class PinnedArtifactsTest(unittest.TestCase):
         corrupted.write_text(code.replace(digest, "0" * 64))
         rejected_target = source.with_name(source.name + ".rejected")
         result = subprocess.run([
-            sys.executable, str(corrupted), str(source), str(rejected_target),
+            sys.executable, str(corrupted), *patch_args, str(source), str(rejected_target),
         ], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0, "Corrupt recorded digest must reject the real artifact")
         self.assertIn(refusal, result.stderr)
