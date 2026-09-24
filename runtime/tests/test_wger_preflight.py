@@ -37,9 +37,20 @@ class PreflightTest(unittest.TestCase):
             before = {'database': {'counts': counts, 'schema': [['manager', '0029']]},
                       'media': (b'', 0), 'containers': {name: {'Image': name, 'state': ('running', 'healthy')}
                        for name in ('web', 'powersync', 'celery_worker', 'celery_beat')}}
+            before['files'] = {'overrides/react-main.js': ('bundle-digest', 0o644)}
             after = copy.deepcopy(before)
             if fault == 'live':
-                after['database']['counts']['users'] += 1
+                after['containers']['web']['Image'] = 'changed-image'
+            if fault == 'bundle':
+                after['files']['overrides/react-main.js'] = ('changed-bundle', 0o644)
+            if fault == 'migration':
+                after['database']['schema'].append(['manager', '0030'])
+            if fault == 'reload':
+                after['database']['counts']['logs'] += 1
+                after['media'] = (b'new athlete media', 1)
+                after['containers']['web'].update(Id='recreated-id', RestartCount=1, HostConfig={'transient': 'changed'})
+                after['files']['overrides/react-main.js'] = ('bundle-digest', 0o600)
+                after['files']['overrides/transient.next'] = ('temporary', 0o600)
             restored = {'counts': counts, 'schema': [['manager', '0029'], ['manager', '0030_workoutlog_cardio_metrics'], ['exercises', '0041_exercisevideo_source_url']]}
             if fault == 'counts':
                 restored['counts'] = {**counts, 'logs': 0}
@@ -106,9 +117,12 @@ class PreflightTest(unittest.TestCase):
                     patch.object(gate, '_media', return_value=(b'wrong', 1) if fault == 'media' else (b'', 0)), \
                     patch.object(gate, '_application', side_effect=RuntimeError('HTTP failure') if fault == 'http' else None,
                                  return_value={'version': '2.7'}):
-                if fault:
-                    with self.assertRaises((RuntimeError, ValueError)):
+                if fault and fault != 'reload':
+                    with self.assertRaises((RuntimeError, ValueError)) as caught:
                         gate.run(source, deploy, env)
+                    category = {'bundle': 'bundle_sha256', 'migration': 'migrations', 'live': 'images'}.get(fault)
+                    if category:
+                        self.assertEqual(str(caught.exception), 'live release identity changed during backup/restore preflight: ' + category)
                 else:
                     result = gate.run(source, deploy, env)
                     self.assertTrue(result['live_baseline_unchanged'])
@@ -122,9 +136,38 @@ class PreflightTest(unittest.TestCase):
                 self.assertNotIn('restore-drill.py', scripts)
 
     def test_success_and_fail_closed_proof_matrix(self):
-        for fault in (None, 'checksum', 'counts', 'schema', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
+        for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'schema', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
             with self.subTest(fault=fault):
                 self.exercise(fault)
+
+    def test_real_baseline_identity_ignores_restart_but_detects_bundle_bytes(self):
+        services = ('web', 'celery_worker', 'celery_beat', 'powersync', 'db', 'cache', 'nginx')
+        records = [{'Id': name, 'Image': 'sha256:' + name,
+                    'Config': {'Labels': {'com.docker.compose.service': name}},
+                    'HostConfig': {}, 'Mounts': [], 'RestartCount': 0,
+                    'State': {'Status': 'running', 'Health': {'Status': 'healthy'}}} for name in services]
+        database = {'counts': {'users': 1, 'sessions': 2, 'logs': 3, 'videos': 0}, 'schema': [['manager', '0029']]}
+        def command(args, env):
+            return json.dumps(records).encode() if 'inspect' in args else b'web worker beat powersync db cache nginx'
+        with tempfile.TemporaryDirectory() as temporary:
+            deploy = Path(temporary)
+            (deploy / 'config').mkdir(); (deploy / 'overrides').mkdir()
+            (deploy / 'config/private.env').write_text('private fixture')
+            (deploy / 'compose.yaml').write_text('fixture')
+            bundle = deploy / 'overrides/react-main.js'; bundle.write_bytes(b'original bundle')
+            with patch.object(gate, '_command', side_effect=command), patch.object(gate, '_database', side_effect=lambda *args: copy.deepcopy(database)), patch.object(gate, '_media', return_value=(b'', 0)):
+                before = gate._release_identity(gate._baseline(['docker'], deploy, {}))
+                records[0]['RestartCount'] += 1
+                records[0]['State']['StartedAt'] = 'later'
+                records[0]['NetworkSettings'] = {'IPAddress': 'new'}
+                database['counts']['logs'] += 1
+                (deploy / 'overrides/transient.next').write_text('temporary')
+                self.assertEqual(gate._release_identity(gate._baseline(['docker'], deploy, {})), before)
+                bundle.write_bytes(b'changed bundle')
+                self.assertNotEqual(gate._release_identity(gate._baseline(['docker'], deploy, {})), before)
+                records[0]['State']['Health']['Status'] = 'unhealthy'
+                with self.assertRaisesRegex(RuntimeError, 'not healthy'):
+                    gate._baseline(['docker'], deploy, {})
 
     def test_media_uses_raw_inventory_and_independent_count(self):
         with patch.object(gate, '_command', side_effect=[b'hash  ./a\n', b'1\n']):
