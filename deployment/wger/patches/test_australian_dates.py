@@ -211,27 +211,35 @@ const timeEndFormatted = timeEnd.toLocaleString(DateTime.TIME_SIMPLE, { locale: 
 
         display_locale = re.search(r"const DISPLAY_LOCALE = .*?;", source).group()
         date_time = source[source.index("export function dateTimeToLocale("):source.index("export function luxonDateTimeToLocale(")]
+        luxon = source[source.index("export function luxonDateTimeToLocale("):source.index("export function dateToLocale(")]
         date_only = source[source.index("export function dateToLocale("):]
-        javascript = display_locale + "\n" + date_time + date_only
+        javascript = display_locale + "\n" + date_time + luxon + date_only
         javascript = javascript.replace(
             "export function dateTimeToLocale(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions,)",
             "function dateTimeToLocale(dateTime, locale, options)",
+        ).replace(
+            "export function luxonDateTimeToLocale(dateTime: DateTime | null, locale?: string, options?: DateTimeFormatOptions,)",
+            "function luxonDateTimeToLocale(dateTime, locale, options)",
         ).replace(
             "export function dateToLocale(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions)",
             "function dateToLocale(dateTime, locale, options)",
         )
         javascript += '''
+const DateTime = { fromJSDate: (value) => ({
+    toLocaleString: (options, config) => value.toLocaleDateString(config.locale, options),
+}) };
 const date = new Date(2026, 8, 21, 15, 24);
 console.log(JSON.stringify([
     dateToLocale(date),
     dateTimeToLocale(date).split(',')[0],
+    luxonDateTimeToLocale(DateTime.fromJSDate(date)),
     dateToLocale(date, 'en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }),
 ]));
 '''
         output = subprocess.run(
             ["node", "-e", javascript], check=True, text=True, capture_output=True
         )
-        self.assertEqual(json.loads(output.stdout), ["21/09/26", "21/09/26", "21/09/2026"])
+        self.assertEqual(json.loads(output.stdout), ["21/09/2026"] * 4)
         self.assertEqual(source.count("locale = DISPLAY_LOCALE;"), 3)
         self.assertIn("dateToLocale(entry.date)", measurement)
         self.assertNotIn("adapterLocale={i18n.language}", picker_sources)

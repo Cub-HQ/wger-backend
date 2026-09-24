@@ -33,9 +33,16 @@ text = target.read_text()
 old_locale = "    locale = locale ?? i18n.language;"
 if text.count(old_locale) != 4:
     raise SystemExit(f"Expected four shared date/time locale anchors in {dates}, found {text.count(old_locale)}")
-# Keep the time-only helper caller-selectable; force all three helpers that draw a date.
+# Keep the time-only helper caller-selectable; force every helper that draws a date.
 text = text.replace(old_locale, "    locale = DISPLAY_LOCALE;")
 text = text.replace("    locale = DISPLAY_LOCALE;", old_locale, 1)
+old_year_option = "year: '2-digit'"
+if text.count(old_year_option) != 2:
+    raise SystemExit(f"Expected two shared numeric year option anchors in {dates}, found {text.count(old_year_option)}")
+text = text.replace(old_year_option, "year: 'numeric'")
+if text.count("options = options ?? DateTime.DATE_MED;") != 1:
+    raise SystemExit(f"Expected one Luxon date option anchor in {dates}")
+text = text.replace("options = options ?? DateTime.DATE_MED;", "options = options ?? DateTime.DATE_SHORT;")
 target.write_text(text)
 replace(
     "src/components/Dashboard/MeasurementCard.tsx",
@@ -89,12 +96,12 @@ replace(
 """,
     """    describe(\"test date utility\", () => {
 
-        test('every shared display helper uses Australian day/month/year order', () => {
+        test('every shared display helper uses Australian DD/MM/YYYY', () => {
             const date = new Date(2026, 8, 21, 15, 24);
-            expect(dateToLocale(date)).toBe('21/09/26');
-            expect(dateTimeToLocale(date).startsWith('21/09/26')).toBe(true);
+            expect(dateToLocale(date)).toBe('21/09/2026');
+            expect(dateTimeToLocale(date).startsWith('21/09/2026')).toBe(true);
             expect(dateToLocale(date, 'en-US', { year: 'numeric', month: '2-digit', day: '2-digit' })).toBe('21/09/2026');
-            expect(luxonDateTimeToLocale(DateTime.fromJSDate(date)).startsWith('21 Sept 2026')).toBe(true);
+            expect(luxonDateTimeToLocale(DateTime.fromJSDate(date))).toBe('21/09/2026');
         });
 """,
 )
