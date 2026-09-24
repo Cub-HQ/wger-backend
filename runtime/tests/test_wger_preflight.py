@@ -118,8 +118,11 @@ class PreflightTest(unittest.TestCase):
                     patch.object(gate, '_application', side_effect=RuntimeError('HTTP failure') if fault == 'http' else None,
                                  return_value={'version': '2.7'}):
                 if fault and fault != 'reload':
-                    with self.assertRaises((RuntimeError, ValueError)):
+                    with self.assertRaises((RuntimeError, ValueError)) as caught:
                         gate.run(source, deploy, env)
+                    category = {'bundle': 'bundle_sha256', 'migration': 'migrations', 'live': 'images'}.get(fault)
+                    if category:
+                        self.assertEqual(str(caught.exception), 'live release identity changed during backup/restore preflight: ' + category)
                 else:
                     result = gate.run(source, deploy, env)
                     self.assertTrue(result['live_baseline_unchanged'])
