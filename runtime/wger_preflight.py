@@ -51,10 +51,18 @@ def _resources(docker, env, project=None):
 
 
 def _baseline(docker, deploy, env):
+    host = docker[docker.index('-H') + 1].removeprefix('unix://') if '-H' in docker else 'default'
+    target = f'socket={host} compose={deploy / "compose.yaml"}'
     ids = _command([*docker, 'compose', '-f', deploy / 'compose.yaml', 'ps', '-a', '-q'], env).decode().split()
     if not ids:
-        raise RuntimeError('live gym containers unavailable')
+        raise RuntimeError('live gym containers unavailable: ' + target)
     records = json.loads(_command([*docker, 'inspect', *ids], env))
+    states = {obj['Config']['Labels'].get('com.docker.compose.service'): {
+        'project': obj['Config']['Labels'].get('com.docker.compose.project'),
+        'status': obj['State']['Status'], 'health': obj['State'].get('Health', {}).get('Status'),
+        'exit': obj['State'].get('ExitCode'), 'restarts': obj['RestartCount'],
+    } for obj in records}
+    print('wger liveness: ' + target + ' services=' + json.dumps(states, sort_keys=True), file=sys.stderr)
     containers = {}
     web = None
     for obj in records:
@@ -65,11 +73,12 @@ def _baseline(docker, deploy, env):
         if service == 'web':
             web = obj['Id']
     if not {'web', 'celery_worker', 'celery_beat', 'powersync', 'db', 'cache', 'nginx'} <= containers.keys():
-        raise RuntimeError('incomplete live container baseline')
-    if any(containers[name]['state'][0] != 'running' for name in containers):
-        raise RuntimeError('live gym is not running')
+        raise RuntimeError('incomplete live container baseline: ' + target + ' services=' + json.dumps(states, sort_keys=True))
+    stopped = {name: states[name] for name in containers if containers[name]['state'][0] != 'running'}
+    if stopped:
+        raise RuntimeError('live gym is not running: ' + target + ' services=' + json.dumps(stopped, sort_keys=True))
     if containers['web']['state'][1] != 'healthy':
-        raise RuntimeError('live web is not healthy')
+        raise RuntimeError('live web is not healthy: ' + target + ' web=' + json.dumps(states['web'], sort_keys=True))
     files = {}
     for folder in ('config', 'overrides'):
         for path in sorted((deploy / folder).rglob('*')):

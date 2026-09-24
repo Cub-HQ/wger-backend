@@ -82,6 +82,8 @@ proxy = Path(os.environ['DOCKER_LOG']).with_suffix('.proxy')
 if 'up' in args and ('web' in args or 'powersync' in args): proxy.write_text('stale')
 if args[-3:] == ['nginx', '-s', 'reload']: proxy.write_text('ready')
 fault=os.environ.get('RELEASE_FAULT','')
+if fault=='double-storage' and 'exec(sys.stdin.read())' in ' '.join(args):
+    print('storage setup rejected',file=sys.stderr);sys.exit(7)
 if fault.startswith('double') and 'migrate' in args:
     print('release migration rejected',file=sys.stderr);sys.exit(9)
 if fault.startswith('double') and 'up' in args and any('compose.rollback.yaml' in arg for arg in args):
@@ -216,6 +218,11 @@ elif "sha256sum" in args:
                 self.assertIn('release migration rejected',double.stderr)
                 self.assertIn('rollback recreate rejected',double.stderr)
                 self.assertIn('previous compose running; public login 200',double.stderr)
+                self.assertEqual(docker_log.with_suffix('.proxy').read_text(),'ready')
+                storage = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double-storage'},text=True,capture_output=True)
+                self.assertNotEqual(storage.returncode,0)
+                self.assertIn('storage setup rejected',storage.stderr)
+                self.assertNotIn('previous compose running;',storage.stderr)
                 self.assertEqual(docker_log.with_suffix('.proxy').read_text(),'ready')
                 dead = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double-dead-sync'},text=True,capture_output=True)
                 self.assertNotEqual(dead.returncode,0)
