@@ -149,52 +149,19 @@ export function dateToLocale(dateTime: Date | null, locale?: string, options?: I
                 "src/components/Dashboard/MeasurementCard.tsx": '''import { makeLink, WgerLink } from "@/core/lib/url";
 <TableCell>{entry.date.toLocaleDateString()}</TableCell>
 ''',
-                "src/components/Routines/widgets/forms/SessionForm.tsx": '''<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<DatePicker value={selectedDate} />
-</LocalizationProvider>
-<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<TimePicker value={timeStart} />
-</LocalizationProvider>
-<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<TimePicker value={timeEnd} />
-</LocalizationProvider>
-''',
-                "src/components/Routines/widgets/forms/RoutineForm.tsx": '''<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<DatePicker value={startDate} />
-</LocalizationProvider>
-<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<DatePicker value={endDate} />
-</LocalizationProvider>
-''',
-                "src/components/Measurements/widgets/EntryDateTimeField.tsx": '''<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<DateTimePicker value={value} />
-</LocalizationProvider>
-''',
-                "src/components/Nutrition/widgets/forms/MealForm.tsx": '''<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<TimePicker value={value} />
-</LocalizationProvider>
-''',
-                "src/components/Nutrition/widgets/forms/NutritionDiaryEntryForm.tsx": '''<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<DateTimePicker
-    format="yyyy-MM-dd HH:mm"
-    value={dateValue}
-/>
-</LocalizationProvider>
-''',
-                "src/components/Nutrition/widgets/forms/PlanForm.tsx": '''<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<DatePicker format="yyyy-MM-dd" value={startDateValue} />
-</LocalizationProvider>
-<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>
-<DatePicker format="yyyy-MM-dd" value={endDateValue} />
-</LocalizationProvider>
-''',
-                "src/components/Routines/widgets/forms/SessionForm.test.tsx": '''const formattedDate = new Date().toLocaleDateString(
+                "src/components/Routines/widgets/forms/SessionForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n' * 3,
+                "src/components/Routines/widgets/forms/RoutineForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n' * 2,
+                "src/components/Measurements/widgets/EntryDateTimeField.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n',
+                "src/components/Nutrition/widgets/forms/MealForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n',
+                "src/components/Nutrition/widgets/forms/NutritionDiaryEntryForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n<DateTimePicker format="yyyy-MM-dd HH:mm" />\n',
+                "src/components/Nutrition/widgets/forms/PlanForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n<DatePicker format="yyyy-MM-dd" />\n' * 2,
+                "src/components/Routines/widgets/forms/SessionForm.test.tsx": """const formattedDate = new Date().toLocaleDateString(
             'en-us',
             { year: 'numeric', month: '2-digit', day: '2-digit' }
         );
 const timeStartFormatted = timeStart.toLocaleString(DateTime.TIME_SIMPLE, { locale: 'en-us' });
 const timeEndFormatted = timeEnd.toLocaleString(DateTime.TIME_SIMPLE, { locale: 'en-us' });
-''',
+""",
             }
             for relative, content in fixtures.items():
                 target = root / relative
