@@ -19,7 +19,8 @@ PRODUCT_FILES = (
     'patches/prepare-react.sh', 'patches/patch_progression_chart.py',
     'patches/patch_muscle_diagram.py', 'patches/patch_footer.py',
 )
-MACHINERY = ('patches/release-web.sh', 'patches/release_web.py', 'patches/release_env.py')
+MACHINERY = ('patches/release-web.sh', 'patches/release_web.py', 'patches/release_env.py',
+             'patches/setup-powersync-storage.py')
 OPERATIONS = ('operations/backup.py', 'operations/snapshot.py', 'operations/restore-drill.py',
               'operations/cleanup-drill.py', 'operations/recovery-drill.py',
               'operations/cleanup-recovery.py', 'operations/com.cortana.fitness-wger.backup.plist',

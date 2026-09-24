@@ -96,6 +96,14 @@ def compose(*args, capture=False, files=()):
     return run(*command, *args, capture=capture)
 
 
+def setup_powersync_storage():
+    # Use reviewed release machinery, not the possibly older restored image's command.
+    stream_from(patch_dir / 'setup-powersync-storage.py', 'docker', '-H', docker_host,
+                'compose', '-f', str(deploy_dir / 'compose.yaml'), 'exec', '-T', 'web',
+                'python3', 'manage.py', 'shell', '-c',
+                'import sys; exec(sys.stdin.read()); Command().handle(schema=Command.DEFAULT_SCHEMA)')
+
+
 def rendered_config(path, files=()):
     command = ['docker', '-H', docker_host, 'compose', '--project-directory', str(deploy_dir), '-f', str(path)]
     for file in files:
@@ -277,6 +285,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             restored_schema = compose('exec', '-T', 'web', 'python3', 'manage.py', 'showmigrations', '--plan', capture=True, files=(rollback_override,))
             if snapshot_complete and restored_schema != prior_schema:
                 raise RuntimeError('rollback restored services but not the prior database schema')
+            setup_powersync_storage()
             compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync', files=(rollback_override,))
             resumed = compose('ps', '-q', 'powersync', capture=True, files=(rollback_override,))
             resumed_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', resumed, capture=True)
@@ -290,15 +299,18 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
                 verify_binds(rendered_config(deploy_dir / 'compose.yaml'))
                 compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services)
                 wait_healthy(compose('ps', '-q', 'web', capture=True))
-                compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync')
-                for service, image in rollback_images.items():
-                    container = compose('ps', '-q', service, capture=True)
-                    actual_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True)
-                    actual_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', container, capture=True)
-                    if actual_image != image or actual_state != 'running':
-                        raise RuntimeError('final restore did not recover prior image/running state: ' + service)
-                compose('exec', '-T', 'nginx', 'nginx', '-t')
-                compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
+                try:
+                    setup_powersync_storage()
+                    compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync')
+                    for service, image in rollback_images.items():
+                        container = compose('ps', '-q', service, capture=True)
+                        actual_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True)
+                        actual_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', container, capture=True)
+                        if actual_image != image or actual_state != 'running':
+                            raise RuntimeError('final restore did not recover prior image/running state: ' + service)
+                finally:
+                    compose('exec', '-T', 'nginx', 'nginx', '-t')
+                    compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
                 with urlopen(public_url + '/en-au/user/login', timeout=30) as response:
                     if response.status != 200:raise RuntimeError('fallback public login did not return 200')
                 fallback = 'previous compose running; public login 200; database recovery unproven'

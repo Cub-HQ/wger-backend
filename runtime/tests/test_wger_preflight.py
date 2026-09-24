@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import wger_preflight as gate
+from deploy_wger import failure_reason
 
 
 class PreflightTest(unittest.TestCase):
@@ -168,6 +169,31 @@ class PreflightTest(unittest.TestCase):
                 records[0]['State']['Health']['Status'] = 'unhealthy'
                 with self.assertRaisesRegex(RuntimeError, 'not healthy'):
                     gate._baseline(['docker'], deploy, {})
+
+    def test_liveness_refusal_names_checked_target_and_failed_service(self):
+        services = ('web', 'celery_worker', 'celery_beat', 'powersync', 'db', 'cache', 'nginx')
+        records = [{'Id': name, 'Image': 'sha256:' + name,
+                    'Config': {'Env': ['PASSWORD=never-print-private-env'],
+                               'Labels': {'com.docker.compose.service': name,
+                                          'com.docker.compose.project': 'fitness-wger'}},
+                    'HostConfig': {}, 'Mounts': [], 'RestartCount': 0,
+                    'State': {'Status': 'running', 'Health': {'Status': 'healthy'}, 'ExitCode': 0}}
+                   for name in services]
+        for state in ('restarting', 'exited'):
+            with self.subTest(state=state):
+                records[3]['State'].update(Status=state, ExitCode=150)
+                records[3]['RestartCount'] = 140
+                with patch.object(gate, '_command', side_effect=[b'container-ids', json.dumps(records).encode()]), \
+                        patch.object(gate, '_database') as database, patch.object(gate, '_media') as media:
+                    with self.assertRaises(RuntimeError) as caught:
+                        gate._baseline(['docker', '-H', 'unix:///reviewed/docker.sock'], Path('/live/fitness-wger'), {})
+                    message = failure_reason(caught.exception)
+                    for expected in ('live gym is not running', '/reviewed/docker.sock', '/live/fitness-wger/compose.yaml',
+                                     'fitness-wger', 'powersync', state, '150', '140'):
+                        self.assertIn(expected, message)
+                    self.assertNotIn('never-print-private-env', message)
+                    database.assert_not_called()
+                    media.assert_not_called()
 
     def test_media_uses_raw_inventory_and_independent_count(self):
         with patch.object(gate, '_command', side_effect=[b'hash  ./a\n', b'1\n']):
