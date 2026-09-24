@@ -115,7 +115,7 @@ elif "sha256sum" in args:
                         if self.path.startswith('/static/'):
                             self.wfile.write(b'stale public cache' if (root / 'stale-http').exists() else served_file.read_bytes())
                         else:
-                            self.wfile.write(('<script src="/static/' + served_name + '"></script>').encode())
+                            self.wfile.write(b'\xff' if (root / 'malformed-http').exists() else ('<script src="/static/' + served_name + '"></script>').encode())
                     def log_message(self, *args):
                         pass
                 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -163,6 +163,22 @@ elif "sha256sum" in args:
                     self.assertEqual((deploy / name).read_text(), 'old ' + name)
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 (root / 'stale-http').unlink()
+                (root / 'malformed-http').touch()
+                (overrides / 'react-main.js').write_bytes(b'prior browser bundle')
+                offset = len(docker_log.read_text().splitlines())
+                malformed = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
+                self.assertNotEqual(malformed.returncode, 0)
+                self.assertIn('fork release failed', malformed.stderr)
+                for name in stage_names:
+                    self.assertEqual((deploy / name).read_text(), 'old ' + name)
+                self.assertEqual((overrides / 'react-main.js').read_bytes(), b'prior browser bundle')
+                self.assertEqual((config / 'private.env').read_bytes(), private_before)
+                recovery = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
+                self.assertTrue(any('pg_restore' in command for command in recovery))
+                self.assertTrue(any('showmigrations' in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
+                for service in ('web', 'celery_worker', 'celery_beat', 'powersync'):
+                    self.assertTrue(any('up' in command and service in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
+                (root / 'malformed-http').unlink()
                 staged = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertEqual(staged.returncode, 0, staged.stderr)
                 for name in stage_names:

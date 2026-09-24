@@ -212,7 +212,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         compose('exec', '-T', 'nginx', 'nginx', '-t')
         compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
         live_proof = http_bundle(expected)
-    except (subprocess.CalledProcessError, OSError):
+    except Exception:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         for name, content in previous_config.items():
