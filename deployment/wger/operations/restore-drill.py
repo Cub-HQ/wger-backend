@@ -19,6 +19,19 @@ def wait_for_database(name, *, attempts=60, delay=1):
         except subprocess.CalledProcessError:
             time.sleep(delay)
     raise RuntimeError('disposable database did not become ready')
+def web_override_mounts(work):
+    mounts = (
+        ('overrides/react-main.js', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js'),
+        ('overrides/template.html', '/home/wger/src/wger/core/templates/template.html'),
+        ('overrides/history-overview.html', '/home/wger/src/wger/exercises/templates/history/overview.html'),
+        ('overrides/api-key.html', '/home/wger/src/wger/core/templates/user/api_key.html'),
+        ('overrides/pdf.py', '/home/wger/src/wger/utils/pdf.py'),
+        ('settings-main.py', '/home/wger/src/settings/main.py'),
+        ('formats/en_AU/formats.py', '/home/wger/src/wger/formats/en_AU/formats.py'),
+    )
+    return tuple(str(work / source) + ':' + target + ':ro' for source, target in mounts)
+
+
 
 
 def main():
@@ -50,7 +63,8 @@ def main():
     wait_for_database(name)
     run('exec','-i',name+'-db','pg_restore','--exit-on-error','--no-owner','--no-acl','-U','restore','-d','wger',data=(src/'database.dump').read_bytes())
     run('run','--rm','-i',*labels,'--network','none','--memory','128m','--cpus','0.25','--entrypoint','tar','-v',name+'-media:/home/wger/media',WEB,'-C','/home/wger/media','-xf','-',data=(src/'media.tar').read_bytes())
-    run('run','-d','--name',name+'-web',*labels,'--network',name,'--memory','512m','--cpus','0.5','--env-file',str(env),'-v',name+'-media:/home/wger/media','-v',name+'-static:/home/wger/static','-v',str(work/'overrides/react-main.js')+':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro','-v',str(work/'overrides/template.html')+':/home/wger/src/wger/core/templates/template.html:ro','--entrypoint','/bin/sh',WEB,'-c','python3 manage.py migrate --no-input >/tmp/restore-migrate.log 2>&1 && python3 manage.py collectstatic --no-input >/tmp/restore-static.log 2>&1 && gunicorn wger.wsgi:application --workers 1 --bind 0.0.0.0:8000')
+    override_mounts=sum((('-v',mount) for mount in web_override_mounts(work)),())
+    run('run','-d','--name',name+'-web',*labels,'--network',name,'--memory','512m','--cpus','0.5','--env-file',str(env),'-v',name+'-media:/home/wger/media','-v',name+'-static:/home/wger/static',*override_mounts,'--entrypoint','/bin/sh',WEB,'-c','python3 manage.py migrate --no-input >/tmp/restore-migrate.log 2>&1 && python3 manage.py collectstatic --no-input >/tmp/restore-static.log 2>&1 && gunicorn wger.wsgi:application --workers 1 --bind 0.0.0.0:8000')
     nginx=work/'restore-nginx.conf';nginx.write_text('server { listen 80; location / { proxy_pass http://'+name+'-web:8000; proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto http; } location /static/ { alias /wger/static/; } location /media/ { alias /wger/media/; } }\n')
     run('run','-d','--name',name+'-nginx',*labels,'--network',name+'-front','--network',name,'--memory','64m','--cpus','0.25','-p',f'127.0.0.1:{args.port}:80','-v',str(nginx)+':/etc/nginx/conf.d/default.conf:ro','-v',name+'-media:/wger/media:ro','-v',name+'-static:/wger/static:ro',NGINX)
     receipt['state']='restored-awaiting-independent-application-check';path.write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps({'receipt':str(path),'project':name,'port':args.port}))

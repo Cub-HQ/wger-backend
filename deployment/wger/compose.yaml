@@ -26,6 +26,7 @@ services:
       - ./overrides/template.html:/home/wger/src/wger/core/templates/template.html:ro
       - ./overrides/history-overview.html:/home/wger/src/wger/exercises/templates/history/overview.html:ro
       - ./overrides/api-key.html:/home/wger/src/wger/core/templates/user/api_key.html:ro
+      - ./overrides/pdf.py:/home/wger/src/wger/utils/pdf.py:ro
       - ./settings-main.py:/home/wger/src/settings/main.py:ro
     expose: ['8000']
     stop_grace_period: 60s

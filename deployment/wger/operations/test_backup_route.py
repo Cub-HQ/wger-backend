@@ -1,10 +1,17 @@
+import importlib.util
 import os
 import pathlib
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import backup
+RESTORE_MODULE = pathlib.Path(__file__).with_name('restore-drill.py')
+RESTORE_SPEC = importlib.util.spec_from_file_location('restore_drill', RESTORE_MODULE)
+restore_drill = importlib.util.module_from_spec(RESTORE_SPEC)
+RESTORE_SPEC.loader.exec_module(restore_drill)
+
 
 
 class BackupRouteTest(unittest.TestCase):
@@ -138,6 +145,40 @@ class BackupRouteTest(unittest.TestCase):
 
     def test_destination_is_established_private_directory_only(self):
         with self.assertRaises(ValueError):backup.snapshot('/tmp/not-approved')
+    def test_snapshot_and_restore_keep_all_australian_date_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            deploy = root / 'deploy'
+            (deploy / 'config').mkdir(parents=True)
+            (deploy / 'overrides').mkdir()
+            (deploy / 'formats' / 'en_AU').mkdir(parents=True)
+            (deploy / 'compose.yaml').write_text('services: {}\n')
+            (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
+            (deploy / 'overrides' / 'history-overview.html').write_text('history\n')
+            (deploy / 'overrides' / 'api-key.html').write_text('api key\n')
+            (deploy / 'overrides' / 'pdf.py').write_text('pdf\n')
+            (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-au'\n")
+            (deploy / 'formats' / 'en_AU' / 'formats.py').write_text("DATE_FORMAT = 'd/m/Y'\n")
+            archive = root / 'deployment.tar'
+
+            backup.write_deployment_archive(archive, deploy=deploy)
+
+            with tarfile.open(archive) as captured:
+                names = set(captured.getnames())
+            self.assertTrue({
+                'settings-main.py',
+                'formats/en_AU/formats.py',
+                'overrides/history-overview.html',
+                'overrides/api-key.html',
+                'overrides/pdf.py',
+            } <= names)
+            mounts = restore_drill.web_override_mounts(deploy)
+            self.assertIn(str(deploy / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro', mounts)
+            self.assertIn(str(deploy / 'formats/en_AU/formats.py') + ':/home/wger/src/wger/formats/en_AU/formats.py:ro', mounts)
+            self.assertIn(str(deploy / 'overrides/history-overview.html') + ':/home/wger/src/wger/exercises/templates/history/overview.html:ro', mounts)
+            self.assertIn(str(deploy / 'overrides/api-key.html') + ':/home/wger/src/wger/core/templates/user/api_key.html:ro', mounts)
+            self.assertIn(str(deploy / 'overrides/pdf.py') + ':/home/wger/src/wger/utils/pdf.py:ro', mounts)
+
 
 
 class DrillRouteTest(unittest.TestCase):

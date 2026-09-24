@@ -11,6 +11,7 @@ ROOT = Path(__file__).parents[1]
 PATCH = Path(__file__).with_name("patch_australian_dates.py")
 NGINX = ROOT / "config" / "nginx.conf"
 TEMPLATE_PATCH = Path(__file__).with_name("patch_australian_template_dates.py")
+PDF_PATCH = Path(__file__).with_name("patch_australian_pdf.py")
 
 
 class AustralianDatesTest(unittest.TestCase):
@@ -89,6 +90,17 @@ with TemporaryDirectory() as directory:
         self.assertEqual(result.returncode, 0, result.stderr)
         rendered = result.stdout.strip()
         self.assertEqual(rendered, "21/09/2026|21/09/2026 15:24")
+    def test_pinned_pdf_footer_uses_australian_numeric_date(self):
+        spec = importlib.util.spec_from_file_location("patch_australian_pdf", PDF_PATCH)
+        patch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(patch)
+
+        source = "date = datetime.date.today().strftime('%d.%m.%Y')"
+        self.assertEqual(
+            patch.patch_text(source),
+            "date = datetime.date.today().strftime('%d/%m/%Y')",
+        )
+
 
     def test_shared_react_helpers_and_pickers_use_australian_dates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -225,6 +237,7 @@ console.log(JSON.stringify([
         self.assertLess(script.index("patch_australian_dates.py"), script.index("npm run typecheck"))
         self.assertIn("history-overview.html.next", script)
         self.assertIn("api-key.html.next", script)
+        self.assertIn("pdf.py.next", script)
 
 
 if __name__ == "__main__":

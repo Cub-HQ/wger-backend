@@ -80,6 +80,17 @@ class PinnedArtifactsTest(unittest.TestCase):
                 api_key, "patch_australian_template_dates.py",
                 "Pinned wger api-key template changed", ("api-key",),
             )
+            pdf = root / "pdf.py"
+            subprocess.run([
+                "curl", "--fail", "--location", "--silent", "--show-error",
+                f"{pins['WGER_REPO']}/raw/{pins['WGER_COMMIT']}/wger/utils/pdf.py",
+                "--output", str(pdf),
+            ], check=True)
+            self.check_gate(
+                pdf, "patch_australian_pdf.py",
+                "Pinned wger PDF utility changed",
+            )
+
 
     def check_gate(self, source, patch_name, refusal, patch_args=()):
         patch = PATCH_DIR / patch_name

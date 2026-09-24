@@ -148,7 +148,7 @@ expected_host = f'unix://{Path.home()}/.colima/default/docker.sock'
 if docker_host != expected_host or not Path(docker_host.removeprefix('unix://')).is_socket():
     raise SystemExit('Docker is not the reviewed Colima socket')
 
-names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'corresponding-source.json')
+names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json')
 for name in names:
     if not ((source_deploy or deploy_dir) / 'overrides' / f'{name}.next').is_file():
         raise SystemExit(f'missing staged override: {name}.next')
