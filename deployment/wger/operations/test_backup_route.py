@@ -145,6 +145,39 @@ class BackupRouteTest(unittest.TestCase):
 
     def test_destination_is_established_private_directory_only(self):
         with self.assertRaises(ValueError):backup.snapshot('/tmp/not-approved')
+    def test_pre_release_snapshot_and_restore_skip_not_yet_installed_date_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            deploy = root / 'deploy'
+            (deploy / 'config').mkdir(parents=True)
+            (deploy / 'overrides').mkdir()
+            (deploy / 'compose.yaml').write_text('services: {}\n')
+            (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
+            (deploy / 'overrides' / 'react-main.js').write_text('browser bundle\n')
+            (deploy / 'overrides' / 'template.html').write_text('template\n')
+            (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-gb'\n")
+            archive = root / 'deployment.tar'
+
+            backup.write_deployment_archive(archive, deploy=deploy)
+
+            restored = root / 'restored'
+            restored.mkdir()
+            with tarfile.open(archive) as captured:
+                captured.extractall(restored, filter='data')
+                names = set(captured.getnames())
+            self.assertNotIn('formats/en_AU/formats.py', names)
+            self.assertFalse(any(name in names for name in (
+                'overrides/history-overview.html',
+                'overrides/api-key.html',
+                'overrides/pdf.py',
+            )))
+            mounts = restore_drill.web_override_mounts(restored)
+            self.assertEqual(mounts, (
+                str(restored / 'overrides/react-main.js') + ':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro',
+                str(restored / 'overrides/template.html') + ':/home/wger/src/wger/core/templates/template.html:ro',
+                str(restored / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro',
+            ))
+
     def test_snapshot_and_restore_keep_all_australian_date_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

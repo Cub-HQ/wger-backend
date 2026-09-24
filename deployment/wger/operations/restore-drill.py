@@ -20,7 +20,7 @@ def wait_for_database(name, *, attempts=60, delay=1):
             time.sleep(delay)
     raise RuntimeError('disposable database did not become ready')
 def web_override_mounts(work):
-    mounts = (
+    reviewed = (
         ('overrides/react-main.js', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js'),
         ('overrides/template.html', '/home/wger/src/wger/core/templates/template.html'),
         ('overrides/history-overview.html', '/home/wger/src/wger/exercises/templates/history/overview.html'),
@@ -29,7 +29,15 @@ def web_override_mounts(work):
         ('settings-main.py', '/home/wger/src/settings/main.py'),
         ('formats/en_AU/formats.py', '/home/wger/src/wger/formats/en_AU/formats.py'),
     )
-    return tuple(str(work / source) + ':' + target + ':ro' for source, target in mounts)
+    mounts = []
+    for source, target in reviewed:
+        path = work / source
+        if not path.exists():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f'restored bind source has wrong type: {path}')
+        mounts.append(str(path) + ':' + target + ':ro')
+    return tuple(mounts)
 
 
 
