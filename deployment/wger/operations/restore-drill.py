@@ -32,10 +32,10 @@ def web_override_mounts(work):
     mounts = []
     for source, target in reviewed:
         path = work / source
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError(f'restored bind source has wrong type: {path}')
         if not path.exists():
             continue
-        if path.is_symlink() or not path.is_file():
-            raise RuntimeError(f'restored bind source has wrong type: {path}')
         mounts.append(str(path) + ':' + target + ':ro')
     return tuple(mounts)
 

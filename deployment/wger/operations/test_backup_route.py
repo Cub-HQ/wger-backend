@@ -12,6 +12,16 @@ RESTORE_SPEC = importlib.util.spec_from_file_location('restore_drill', RESTORE_M
 restore_drill = importlib.util.module_from_spec(RESTORE_SPEC)
 RESTORE_SPEC.loader.exec_module(restore_drill)
 
+REVIEWED_MOUNTS = (
+    ('overrides/react-main.js', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js'),
+    ('overrides/template.html', '/home/wger/src/wger/core/templates/template.html'),
+    ('overrides/history-overview.html', '/home/wger/src/wger/exercises/templates/history/overview.html'),
+    ('overrides/api-key.html', '/home/wger/src/wger/core/templates/user/api_key.html'),
+    ('overrides/pdf.py', '/home/wger/src/wger/utils/pdf.py'),
+    ('settings-main.py', '/home/wger/src/settings/main.py'),
+    ('formats/en_AU/formats.py', '/home/wger/src/wger/formats/en_AU/formats.py'),
+)
+
 
 
 class BackupRouteTest(unittest.TestCase):
@@ -146,16 +156,58 @@ class BackupRouteTest(unittest.TestCase):
     def test_destination_is_established_private_directory_only(self):
         with self.assertRaises(ValueError):backup.snapshot('/tmp/not-approved')
     def test_pre_release_snapshot_and_restore_skip_not_yet_installed_date_overrides(self):
+        for settings_present in (False, True):
+            with self.subTest(settings_present=settings_present), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                deploy = root / 'deploy'
+                (deploy / 'config').mkdir(parents=True)
+                (deploy / 'overrides').mkdir()
+                (deploy / 'compose.yaml').write_text('services: {}\n')
+                (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
+                (deploy / 'overrides' / 'react-main.js').write_text('browser bundle\n')
+                if settings_present:
+                    (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-gb'\n")
+                archive = root / 'deployment.tar'
+
+                backup.write_deployment_archive(archive, deploy=deploy)
+
+                restored = root / 'restored'
+                restored.mkdir()
+                with tarfile.open(archive) as captured:
+                    captured.extractall(restored, filter='data')
+                    names = set(captured.getnames())
+                self.assertTrue({'compose.yaml', 'config/private.env', 'overrides/react-main.js'} <= names)
+                self.assertEqual('settings-main.py' in names, settings_present)
+                self.assertTrue({
+                    'formats/en_AU/formats.py',
+                    'overrides/template.html',
+                    'overrides/history-overview.html',
+                    'overrides/api-key.html',
+                    'overrides/pdf.py',
+                }.isdisjoint(names))
+                expected = (
+                    str(restored / 'overrides/react-main.js') + ':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro',
+                )
+                if settings_present:
+                    expected += (str(restored / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro',)
+                    self.assertEqual((restored / 'settings-main.py').read_text(), "LANGUAGE_CODE = 'en-gb'\n")
+                self.assertEqual(restore_drill.web_override_mounts(restored), expected)
+
+    def test_snapshot_and_restore_keep_all_australian_date_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             deploy = root / 'deploy'
             (deploy / 'config').mkdir(parents=True)
-            (deploy / 'overrides').mkdir()
             (deploy / 'compose.yaml').write_text('services: {}\n')
             (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
-            (deploy / 'overrides' / 'react-main.js').write_text('browser bundle\n')
-            (deploy / 'overrides' / 'template.html').write_text('template\n')
-            (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-gb'\n")
+            contents = {source: source + '\n' for source, _ in REVIEWED_MOUNTS}
+            contents['settings-main.py'] = "LANGUAGE_CODE = 'en-au'\n"
+            contents['formats/en_AU/formats.py'] = "DATE_FORMAT = 'd/m/Y'\n"
+            for source, content in contents.items():
+                path = deploy / source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            (deploy / 'overrides' / 'unreviewed.py').write_text('not a reviewed mount\n')
             archive = root / 'deployment.tar'
 
             backup.write_deployment_archive(archive, deploy=deploy)
@@ -164,53 +216,55 @@ class BackupRouteTest(unittest.TestCase):
             restored.mkdir()
             with tarfile.open(archive) as captured:
                 captured.extractall(restored, filter='data')
-                names = set(captured.getnames())
-            self.assertNotIn('formats/en_AU/formats.py', names)
-            self.assertFalse(any(name in names for name in (
-                'overrides/history-overview.html',
-                'overrides/api-key.html',
-                'overrides/pdf.py',
-            )))
-            mounts = restore_drill.web_override_mounts(restored)
-            self.assertEqual(mounts, (
-                str(restored / 'overrides/react-main.js') + ':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro',
-                str(restored / 'overrides/template.html') + ':/home/wger/src/wger/core/templates/template.html:ro',
-                str(restored / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro',
+                self.assertTrue(set(contents) <= set(captured.getnames()))
+            for source, content in contents.items():
+                self.assertEqual((restored / source).read_text(), content)
+            self.assertTrue((restored / 'overrides' / 'unreviewed.py').is_file())
+            self.assertEqual(restore_drill.web_override_mounts(restored), tuple(
+                str(restored / source) + ':' + target + ':ro'
+                for source, target in REVIEWED_MOUNTS
             ))
 
-    def test_snapshot_and_restore_keep_all_australian_date_overrides(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            deploy = root / 'deploy'
-            (deploy / 'config').mkdir(parents=True)
-            (deploy / 'overrides').mkdir()
-            (deploy / 'formats' / 'en_AU').mkdir(parents=True)
-            (deploy / 'compose.yaml').write_text('services: {}\n')
-            (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
-            (deploy / 'overrides' / 'history-overview.html').write_text('history\n')
-            (deploy / 'overrides' / 'api-key.html').write_text('api key\n')
-            (deploy / 'overrides' / 'pdf.py').write_text('pdf\n')
-            (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-au'\n")
-            (deploy / 'formats' / 'en_AU' / 'formats.py').write_text("DATE_FORMAT = 'd/m/Y'\n")
-            archive = root / 'deployment.tar'
+    def test_optional_archive_members_reject_wrong_types(self):
+        for source in ('settings-main.py', 'formats/en_AU/formats.py'):
+            for kind in ('directory', 'symlink', 'dangling-symlink'):
+                with self.subTest(source=source, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    deploy = root / 'deploy'
+                    (deploy / 'config').mkdir(parents=True)
+                    (deploy / 'overrides').mkdir()
+                    (deploy / 'compose.yaml').write_text('services: {}\n')
+                    path = deploy / source
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == 'directory':
+                        path.mkdir()
+                    else:
+                        target = root / 'target'
+                        if kind == 'symlink':
+                            target.write_text('regular file\n')
+                        path.symlink_to(target)
+                    archive = root / 'deployment.tar'
+                    with self.assertRaises(RuntimeError):
+                        backup.write_deployment_archive(archive, deploy=deploy)
+                    self.assertFalse(archive.exists())
 
-            backup.write_deployment_archive(archive, deploy=deploy)
-
-            with tarfile.open(archive) as captured:
-                names = set(captured.getnames())
-            self.assertTrue({
-                'settings-main.py',
-                'formats/en_AU/formats.py',
-                'overrides/history-overview.html',
-                'overrides/api-key.html',
-                'overrides/pdf.py',
-            } <= names)
-            mounts = restore_drill.web_override_mounts(deploy)
-            self.assertIn(str(deploy / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro', mounts)
-            self.assertIn(str(deploy / 'formats/en_AU/formats.py') + ':/home/wger/src/wger/formats/en_AU/formats.py:ro', mounts)
-            self.assertIn(str(deploy / 'overrides/history-overview.html') + ':/home/wger/src/wger/exercises/templates/history/overview.html:ro', mounts)
-            self.assertIn(str(deploy / 'overrides/api-key.html') + ':/home/wger/src/wger/core/templates/user/api_key.html:ro', mounts)
-            self.assertIn(str(deploy / 'overrides/pdf.py') + ':/home/wger/src/wger/utils/pdf.py:ro', mounts)
+    def test_reviewed_restore_mounts_reject_wrong_types(self):
+        for source, _ in REVIEWED_MOUNTS:
+            for kind in ('directory', 'symlink', 'dangling-symlink'):
+                with self.subTest(source=source, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    work = root / 'restored'
+                    path = work / source
+                    path.parent.mkdir(parents=True)
+                    if kind == 'directory':
+                        path.mkdir()
+                    else:
+                        target = root / 'target'
+                        if kind == 'symlink':
+                            target.write_text('regular file\n')
+                        path.symlink_to(target)
+                    with self.assertRaises(RuntimeError):
+                        restore_drill.web_override_mounts(work)
 
 
 
