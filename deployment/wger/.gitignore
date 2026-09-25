@@ -2,4 +2,6 @@ config/private.env
 *.key
 *.pem
 backups/
-overrides/
+overrides/*
+!overrides/settings-main.py
+!overrides/manager-urls.py

@@ -14,7 +14,8 @@ import tempfile
 PREFIX = 'deployment/wger/'
 # Explicit custody: never copy a directory recursively into the live deployment.
 PRODUCT_FILES = (
-    'compose.yaml', 'Dockerfile', 'settings-main.py', 'formats/en_AU/formats.py',
+    'compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py',
+    'formats/en_AU/formats.py',
     'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml',
     'patches/prepare-react.sh', 'patches/patch_australian_dates.py',
     'patches/patch_australian_template_dates.py', 'patches/patch_australian_pdf.py',
@@ -28,7 +29,9 @@ MACHINERY = ('patches/release-web.sh', 'patches/release_web.py', 'patches/releas
 # this route rather than requiring a separate operations activation.
 PREFLIGHT_FILES = ('operations/backup.py', 'operations/snapshot.py',
                    'operations/restore-drill.py', 'operations/cleanup-drill.py')
-OPERATIONS = ('operations/recovery-drill.py', 'operations/cleanup-recovery.py',
+# Operator-invoked source only: never copied or executed by the release adapter.
+SOURCE_ONLY_FILES = ('operations/recovery-drill.py',)
+OPERATIONS = ('operations/cleanup-recovery.py',
               'operations/com.cortana.fitness-wger.backup.plist',
               'com.cortana.fitness-wger.vm.plist')
 EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.env.example',
@@ -38,6 +41,7 @@ EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.
                   'patches/test_powersync_storage.py', 'operations/test_backup_route.py')
 RETIRED_FILES = ('patches/patch_server_wave3.py', 'patches/patch_ux_wave1.py',
                  'patches/patch_ux_wave3.py')
+REMOVED_FILES = ('Dockerfile', 'settings-main.py')
 
 
 def normalize_bundle(data):
@@ -45,13 +49,17 @@ def normalize_bundle(data):
                   b'sourceMappingURL=main.js.map', data)
 
 
-def check_surfaces(paths):
+def check_surfaces(paths, source=None):
     for path in paths:
         if not path.startswith(PREFIX):
             raise ValueError('DEPLOY_MISSING: non-gym surface ' + path)
         relative = path[len(PREFIX):]
-        if relative not in PRODUCT_FILES + MACHINERY + PREFLIGHT_FILES + EVIDENCE_FILES:
-            # Scheduler/recovery activation remains separate. Retired release
+        if relative in REMOVED_FILES and source is not None:
+            removed = Path(source) / path
+            if not removed.exists() and not removed.is_symlink():
+                continue
+        if relative not in PRODUCT_FILES + MACHINERY + PREFLIGHT_FILES + SOURCE_ONLY_FILES + EVIDENCE_FILES:
+            # Scheduler/cleanup activation remains separate. Retired release
             # inputs stay explicitly classified but cannot silently deploy.
             kind = ('operations activation' if relative in OPERATIONS else
                     'retired release input' if relative in RETIRED_FILES else 'unsupported surface')
@@ -72,8 +80,8 @@ def existing_locks():
 
 
 def deploy(args):
-    check_surfaces(args.changed_file)
     source = Path(args.source).resolve()
+    check_surfaces(args.changed_file, source)
     revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
     if not re.fullmatch('[0-9a-f]{40}', args.commit) or revision != args.commit:
         raise ValueError('DEPLOY_MISSING: source HEAD does not match requested revision')
@@ -86,7 +94,7 @@ def deploy(args):
            'WGER_DOCKER_HOST': f'unix://{Path.home()}/.colima/default/docker.sock',
            'WGER_PUBLIC_URL': os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098')}
     machinery = Path(__file__).resolve().parents[1]
-    # Build in isolation before backup: a digest/toolchain failure cannot alter the gym.
+    # Prepare in isolation before backup: a digest/toolchain failure cannot alter the gym.
     with tempfile.TemporaryDirectory(prefix='wger-product-') as directory:
         candidate = Path(directory)
         for name in PRODUCT_FILES:
@@ -96,11 +104,6 @@ def deploy(args):
             destination = candidate / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original, destination)
-        # Build the pinned fork before prepare-react extracts its upstream inputs.
-        image = re.search(r'^IMAGE=(\S+)$', (candidate / 'patches/prepare-react.sh').read_text(), re.MULTILINE)
-        if not image:
-            raise ValueError('DEPLOY_MISSING: prepare-react image pin unavailable')
-        subprocess.run(['docker', '-H', env['WGER_DOCKER_HOST'], 'build', '--tag', image[1], str(candidate)], env=env, check=True)
         subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh')], env=env, check=True)
         expected = hashlib.sha256((candidate / 'overrides/react-main.js.next').read_bytes()).hexdigest()
         from wger_preflight import run

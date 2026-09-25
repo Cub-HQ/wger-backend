@@ -3,11 +3,7 @@ x-logging: &logging
   driver: json-file
   options: {max-size: 10m, max-file: '3'}
 x-wger: &wger
-  image: ghcr.io/cubatica/fitness-wger:135d8569a3eb27c9f0f74e865d56372421a61294
-  build:
-    context: .
-    dockerfile: Dockerfile
-    args: {WGER_COMMIT: 135d8569a3eb27c9f0f74e865d56372421a61294}
+  image: docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
   env_file: [./config/private.env]
   restart: unless-stopped
   logging: *logging
@@ -27,7 +23,9 @@ services:
       - ./overrides/history-overview.html:/home/wger/src/wger/exercises/templates/history/overview.html:ro
       - ./overrides/api-key.html:/home/wger/src/wger/core/templates/user/api_key.html:ro
       - ./overrides/pdf.py:/home/wger/src/wger/utils/pdf.py:ro
-      - ./settings-main.py:/home/wger/src/settings/main.py:ro
+      - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
+      - ./overrides/manager-urls.py:/home/wger/src/wger/manager/urls.py:ro
+      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
     expose: ['8000']
     stop_grace_period: 60s
     healthcheck:

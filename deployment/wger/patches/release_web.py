@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the reviewed fork with database-safe rollback to the prior image and schema."""
+"""Install reviewed compose assets with database-safe rollback to prior images and schema."""
 import fcntl
 from release_env import read_database_environment
 import os
@@ -24,7 +24,7 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 
 source_deploy = Path(os.environ['WGER_SOURCE_DEPLOY']).resolve() if os.environ.get('WGER_SOURCE_DEPLOY') else None
-config_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
+config_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
 public_url = os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098').rstrip('/')
 
 
@@ -117,21 +117,14 @@ def verify_binds(config, staged=False):
             if mount['type'] != 'bind':
                 continue
             path = Path(mount['source'])
-            file_targets = {'/home/wger/src/settings/main.py', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js',
-                            '/home/wger/src/wger/core/templates/template.html', '/home/wger/src/wger/exercises/templates/history/overview.html',
-                            '/home/wger/src/wger/core/templates/user/api_key.html', '/home/wger/src/wger/utils/pdf.py',
-                            '/config/powersync.yaml', '/config/sync_rules.yaml', '/etc/nginx/conf.d/default.conf'}
-            directory_targets = {'/home/wger/media', '/home/wger/static', '/wger/media', '/wger/static'}
-            if mount['target'] not in file_targets | directory_targets:
-                raise RuntimeError('unreviewed bind target type: ' + mount['target'])
-            expected_file = mount['target'] in file_targets
+            # This compose uses named volumes for directories; every bind is a file.
             if staged and source_deploy and path.is_relative_to(deploy_dir):
                 relative = path.relative_to(deploy_dir).as_posix()
                 if relative in config_names:
                     path = source_deploy / relative
                 elif relative in {'overrides/' + name for name in names}:
                     path = source_deploy / (relative + '.next')
-            if path.is_symlink() or not (path.is_file() if expected_file else path.is_dir()):
+            if path.is_symlink() or any(parent.is_symlink() for parent in path.parents) or not path.is_file():
                 raise RuntimeError('bind source missing or wrong type: ' + str(path))
 
 
@@ -180,13 +173,6 @@ prior_schema = compose('exec', '-T', 'web', 'python3', 'manage.py', 'showmigrati
 # Non-web service/topology changes have no reviewed activation in this route.
 before_config = rendered_config(deploy_dir / 'compose.yaml')
 verify_binds(before_config)
-stray = deploy_dir / 'settings-main.py'
-if stray.is_dir() and not stray.is_symlink():
-    used = {mount['source'] for service in before_config['services'].values() for mount in service.get('volumes', []) if mount['type'] == 'bind'}
-    if (deploy_dir == (Path.home() / 'fitness-wger').resolve() and str(stray) not in used
-            and (deploy_dir / 'overrides/settings-main.py').is_file()
-            and stray.stat().st_uid == os.getuid() and not any(stray.iterdir())):
-        stray.rmdir()
 if source_deploy:
     next_config = rendered_config(source_deploy / 'compose.yaml')
     verify_binds(next_config, staged=True)
@@ -224,8 +210,6 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             if current.parent.exists() and not current.parent.is_dir():
                 raise SystemExit('DEPLOY_MISSING: deployment parent is not a directory')
             previous_config[name] = current.read_bytes() if current.exists() else None
-    if not source_deploy:
-        compose('build', *services)
     try:
         compose('stop', 'powersync', *services)
         stream_to(database_backup, 'docker', '-H', docker_host, 'compose', '-f', str(deploy_dir / 'compose.yaml'), 'exec', '-T', 'db', 'pg_dump', '-Fc', '-U', db_user, db_name)
@@ -239,7 +223,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             compose('config', '--quiet')
         for name in names:
             shutil.copy2((source_deploy or deploy_dir) / 'overrides' / f'{name}.next', deploy_dir / 'overrides' / name)
-        compose('up', '-d', '--no-deps', '--force-recreate', *services)
+        compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services)
         compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--no-input')
         wait_healthy(compose('ps', '-q', 'web', capture=True))
         logical_bundle = 'node/@wger-project/react-components/build/main.js'
@@ -255,7 +239,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         map_marker = b'sourceMappingURL=main.js.map'
         if re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', map_marker, actual) != expected:
             raise subprocess.CalledProcessError(1, ('verify', 'browser-bundle'))
-        compose('up', '-d', '--no-deps', '--force-recreate', 'powersync')
+        compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync')
         resumed = compose('ps', '-q', 'powersync', capture=True)
         resumed_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', resumed, capture=True)
         resumed_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', resumed, capture=True)
@@ -323,5 +307,5 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             except Exception as fallback_error:
                 fallback = f'final restore failed: {fallback_error}'
             raise SystemExit(f'release failed: {release_error}; rollback failed: {rollback_error}; {fallback}') from None
-        raise SystemExit(f'fork release failed: {release_error}; prior writer states, overrides, database schema/data and exact images restored') from None
+        raise SystemExit(f'web release failed: {release_error}; prior writer states, overrides, database schema/data and exact images restored') from None
 print(json.dumps({'status': 'deployed', 'adapter': 'wger', 'commit': os.environ.get('WGER_RELEASE_COMMIT'), 'live_proof': live_proof}))

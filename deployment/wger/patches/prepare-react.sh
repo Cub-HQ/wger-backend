@@ -6,7 +6,6 @@ set -euo pipefail
 PATCH_DIR=$(cd "$(dirname "$0")" && pwd)
 DEPLOY_DIR=$(cd "$PATCH_DIR/.." && pwd)
 DOCKER_HOST=${WGER_DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}
-IMAGE=ghcr.io/cubatica/fitness-wger:135d8569a3eb27c9f0f74e865d56372421a61294
 REACT_REPO=https://github.com/Cubatica/react
 REACT_COMMIT=3066f7693ac00632ad14ea0ef025371156f91d0d
 WGER_REPO=https://github.com/Cubatica/wger
@@ -22,6 +21,7 @@ trap cleanup EXIT
 [ "$DOCKER_HOST" = "unix://$HOME/.colima/default/docker.sock" ] || { echo 'wrong Docker host' >&2; exit 1; }
 [ -S "${DOCKER_HOST#unix://}" ] || { echo 'reviewed Colima socket is unavailable' >&2; exit 1; }
 mkdir -p "$DEPLOY_DIR/overrides"
+IMAGE=$(docker -H "$DOCKER_HOST" compose -f "$DEPLOY_DIR/compose.yaml" config --no-env-resolution --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["web"]["image"])')
 
 docker -H "$DOCKER_HOST" create --name "$EXTRACTOR" --entrypoint /bin/true "$IMAGE" >/dev/null
 docker -H "$DOCKER_HOST" cp "$EXTRACTOR:/home/wger/src/node_modules/@wger-project/react-components/build/main.js" "$DEPLOY_DIR/overrides/react-original-main.js"

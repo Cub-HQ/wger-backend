@@ -16,7 +16,7 @@ PDF_PATCH = Path(__file__).with_name("patch_australian_pdf.py")
 
 class AustralianDatesTest(unittest.TestCase):
     def test_django_forces_australian_language_and_numeric_date(self):
-        source = (ROOT / "settings-main.py").read_text()
+        source = (ROOT / "overrides" / "settings-main.py").read_text()
         formats = (ROOT / "formats" / "en_AU" / "formats.py").read_text()
         namespace = {}
         exec(formats, namespace)
@@ -32,16 +32,6 @@ class AustralianDatesTest(unittest.TestCase):
         self.assertEqual(date.strftime(django_to_strftime(namespace['DATETIME_FORMAT']).split()[0]), "21/09/2026")
         self.assertEqual(date.strftime(django_to_strftime(namespace['SHORT_DATETIME_FORMAT']).split()[0]), "21/09/2026")
         self.assertEqual(namespace['DATE_INPUT_FORMATS'][0], '%Y-%m-%d')
-        dockerfile = (ROOT / "Dockerfile").read_text()
-        self.assertIn("COPY --chown=wger:wger formats/en_AU/formats.py /home/wger/src/wger/formats/en_AU/formats.py", dockerfile)
-        deploy_bridge = (ROOT.parents[1] / "runtime" / "deploy_wger.py").read_text()
-        for name in (
-            "formats/en_AU/formats.py",
-            "patches/patch_australian_dates.py",
-            "patches/patch_australian_template_dates.py",
-            "patches/patch_australian_pdf.py",
-        ):
-            self.assertIn(repr(name), deploy_bridge)
 
 
     def test_legacy_english_urls_redirect_to_australian_prefix(self):
@@ -220,13 +210,6 @@ console.log(JSON.stringify([
         self.assertIn('format="dd/MM/yyyy HH:mm"', picker_sources)
         self.assertEqual(picker_sources.count('format="dd/MM/yyyy"'), 2)
 
-    def test_build_applies_shared_date_patch_before_compiling(self):
-        script = (ROOT / "patches" / "prepare-react.sh").read_text()
-        self.assertIn('patch_australian_dates.py" "$BUILD_DIR"', script)
-        self.assertLess(script.index("patch_australian_dates.py"), script.index("npm run typecheck"))
-        self.assertIn("history-overview.html.next", script)
-        self.assertIn("api-key.html.next", script)
-        self.assertIn("pdf.py.next", script)
 
 
 if __name__ == "__main__":

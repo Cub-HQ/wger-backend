@@ -94,17 +94,68 @@ def encrypt_snapshot(root, output, passphrase_file, *, runner=subprocess.run):
 
 def media_inventory():
     return docker('run','--rm','-v','fitness-wger_media:/media:ro','alpine:3.22','sh','-c','cd /media && find . -type f -exec sha256sum {} + | sort')
+
+def deployment_services(work, docker_command=('docker',)):
+    work = pathlib.Path(work).absolute()
+    deployment_file(work, 'compose.yaml')
+    deployment_file(work, 'config/private.env')
+    result = subprocess.run([*docker_command, 'compose', '--project-directory', str(work),
+                             '-f', str(work / 'compose.yaml'), 'config', '--format', 'json'],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    services = json.loads(result.stdout)['services']
+    for service in services.values():
+        if not isinstance(service.get('image'), str) or not service['image']:
+            raise RuntimeError('snapshot compose service requires an image')
+    return services
+
+
+def deployment_file(work, source):
+    work = pathlib.Path(work).absolute()
+    path = pathlib.Path(source)
+    if not path.is_absolute():
+        path = work / path
+    if '..' in path.parts or not path.is_relative_to(work):
+        raise RuntimeError(f'deployment bind source escapes deployment: {path}')
+    for ancestor in (work, *(work / parent for parent in path.relative_to(work).parents if parent != pathlib.Path('.'))):
+        if ancestor.is_symlink() or not ancestor.is_dir():
+            raise RuntimeError(f'deployment bind source ancestor has wrong type: {ancestor}')
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RuntimeError(f'deployment bind source has wrong type: {path}')
+    if not path.is_file():
+        raise RuntimeError(f'required deployment bind source is missing: {path}')
+    return path
+
+
+def service_bind_mounts(work, service):
+    mounts = []
+    for volume in service.get('volumes', []):
+        if volume['type'] != 'bind':
+            continue
+        source = deployment_file(work, volume['source'])
+        target = volume['target']
+        if not target.startswith('/') or ':' in target or ':' in str(source):
+            raise RuntimeError('unsupported deployment bind path')
+        mounts.append(f'{source}:{target}' + (':ro' if volume.get('read_only') else ':rw'))
+    return tuple(mounts)
+
 def write_deployment_archive(path, *, deploy=None):
     deploy = DEPLOY if deploy is None else pathlib.Path(deploy)
     required = ('compose.yaml', 'config', 'overrides')
     optional = ('settings-main.py', 'formats/en_AU/formats.py')
     members = list(required)
     for name in optional:
-        source = pathlib.Path(deploy) / name
-        if source.is_symlink() or (source.exists() and not source.is_file()):
-            raise RuntimeError(f'deployment archive member has wrong type: {source}')
+        source = deploy / name
+        if source.exists() or source.is_symlink():
+            deployment_file(deploy, name)
         if source.is_file():
             members.append(name)
+    for name in required:
+        source = deploy / name
+        if source.is_symlink() or (not source.is_file() if name == 'compose.yaml' else not source.is_dir()):
+            raise RuntimeError(f'deployment archive member has wrong type: {source}')
+        for child in source.rglob('*') if source.is_dir() else ():
+            if child.is_symlink() or not (child.is_file() or child.is_dir()):
+                raise RuntimeError(f'deployment archive member has wrong type: {child}')
     with pathlib.Path(path).open('wb') as output:
         subprocess.run([
             '/usr/bin/tar', '-C', str(deploy), '-cf', '-', *members,

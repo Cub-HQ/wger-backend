@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ADAPTER = Path(__file__).resolve().parents[1] / 'deploy_wger.py'
@@ -49,7 +50,9 @@ class WgerDeployTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         cases = {
-            'operations/recovery-drill.py': 'operations activation',
+            'operations/cleanup-recovery.py': 'operations activation',
+            'operations/com.cortana.fitness-wger.backup.plist': 'operations activation',
+            'com.cortana.fitness-wger.vm.plist': 'operations activation',
             'patches/patch_server_wave3.py': 'retired release input',
             'config/unknown.conf': 'unsupported surface',
         }
@@ -57,20 +60,69 @@ class WgerDeployTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, reason):
                 module.check_surfaces(['deployment/wger/' + name])
 
-    def test_every_preparer_dependency_is_a_product_input(self):
+    def test_layout_cutover_accepts_only_absent_retired_inputs(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        source = Path(__file__).resolve().parents[2] / 'deployment/wger'
-        preparer = (source / 'patches/prepare-react.sh').read_text()
-        referenced = {
-            'patches/' + name
-            for name in module.re.findall(r'\$PATCH_DIR/([A-Za-z0-9_.-]+\.py)', preparer)
-        }
-        self.assertTrue(referenced)
-        self.assertTrue(referenced.issubset(module.PRODUCT_FILES))
-        self.assertIn('formats/en_AU/formats.py', module.PRODUCT_FILES)
-        module.check_surfaces(['deployment/wger/' + name for name in referenced | {'formats/en_AU/formats.py'}])
+        changed = [module.PREFIX + name for name in
+                   ('Dockerfile', 'settings-main.py', 'compose.yaml',
+                    'overrides/settings-main.py', 'overrides/manager-urls.py',
+                    'formats/en_AU/formats.py', 'patches/prepare-react.sh',
+                    'patches/release_web.py', 'patches/test_release_route.py',
+                    'patches/check_pinned_artifacts.py',
+                    'operations/backup.py', 'operations/snapshot.py', 'operations/restore-drill.py',
+                    'operations/recovery-drill.py', 'operations/test_backup_route.py')]
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            root = source / module.PREFIX
+            root.mkdir(parents=True)
+            module.check_surfaces(changed, source)
+            for name in ('Dockerfile', 'settings-main.py'):
+                retired = root / name
+                for kind in ('file', 'directory', 'symlink'):
+                    with self.subTest(name=name, kind=kind):
+                        if kind == 'file':
+                            retired.write_text('retired input')
+                        elif kind == 'directory':
+                            retired.mkdir()
+                        else:
+                            retired.symlink_to(root / 'missing-target')
+                        with self.assertRaisesRegex(ValueError, 'unsupported surface'):
+                            module.check_surfaces(changed, source)
+                        if kind == 'directory':
+                            retired.rmdir()
+                        else:
+                            retired.unlink()
+
+    def test_stock_product_stages_bind_sources_without_image_build(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            live = Path(directory)
+            (live / 'config').mkdir()
+            (live / 'config/private.env').write_text('private fixture')
+
+            def prepare(args, **kwargs):
+                self.assertEqual(args[0], 'bash', 'stock image must not be rebuilt')
+                candidate = Path(args[1]).parents[1]
+                for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
+                             'formats/en_AU/formats.py'):
+                    self.assertEqual((candidate / name).read_bytes(),
+                                     (source / module.PREFIX / name).read_bytes())
+                self.assertFalse((candidate / 'Dockerfile').exists())
+                self.assertFalse((candidate / 'operations/recovery-drill.py').exists())
+                raise RuntimeError('stop before backup or live release')
+
+            args = SimpleNamespace(source=str(source), commit='a' * 40,
+                                   deploy_root=str(live),
+                                   changed_file=['deployment/wger/operations/recovery-drill.py'])
+            with patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
+                    patch.object(module, 'existing_locks', return_value={}), \
+                    patch.object(module.subprocess, 'run', side_effect=prepare):
+                with self.assertRaisesRegex(RuntimeError, 'stop before backup or live release'):
+                    module.deploy(args)
 
     def test_every_repository_gym_file_has_an_explicit_surface_class(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
@@ -83,6 +135,7 @@ class WgerDeployTests(unittest.TestCase):
             'product': set(module.PRODUCT_FILES),
             'machinery': set(module.MACHINERY),
             'preflight': set(module.PREFLIGHT_FILES),
+            'source-only': set(module.SOURCE_ONLY_FILES),
             'operations': set(module.OPERATIONS),
             'evidence': set(module.EVIDENCE_FILES),
             'retired': set(module.RETIRED_FILES),
@@ -97,7 +150,7 @@ class WgerDeployTests(unittest.TestCase):
                          'gym files must belong to exactly one surface class')
         module.check_surfaces(['deployment/wger/' + name for name in
                                classes['product'] | classes['machinery'] |
-                               classes['preflight'] | classes['evidence']])
+                               classes['preflight'] | classes['source-only'] | classes['evidence']])
 
     def test_bundle_comparison_normalizes_only_collectstatic_map(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)

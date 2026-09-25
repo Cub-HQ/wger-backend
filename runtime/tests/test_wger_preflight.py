@@ -52,11 +52,11 @@ class PreflightTest(unittest.TestCase):
                 after['containers']['web'].update(Id='recreated-id', RestartCount=1, HostConfig={'transient': 'changed'})
                 after['files']['overrides/react-main.js'] = ('bundle-digest', 0o600)
                 after['files']['overrides/transient.next'] = ('temporary', 0o600)
-            restored = {'counts': counts, 'schema': [['manager', '0029'], ['manager', '0030_workoutlog_cardio_metrics'], ['exercises', '0041_exercisevideo_source_url']]}
+            restored = copy.deepcopy(before['database'])
             if fault == 'counts':
                 restored['counts'] = {**counts, 'logs': 0}
             if fault == 'schema':
-                restored['schema'] = [['manager', '0029']]
+                restored['schema'] = [['manager', '0028']]
             project = 'wger-restore-1234567890'
             calls = []
             residue = False
@@ -104,6 +104,8 @@ class PreflightTest(unittest.TestCase):
                     residue = fault == 'residue'
                     return b''
                 if 'migrate' in args:
+                    if fault == 'pending-migration':
+                        raise RuntimeError('restored application has pending migrations')
                     return b''
                 raise AssertionError(args)
 
@@ -137,7 +139,7 @@ class PreflightTest(unittest.TestCase):
                 self.assertNotIn('restore-drill.py', scripts)
 
     def test_success_and_fail_closed_proof_matrix(self):
-        for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'schema', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
+        for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'schema', 'pending-migration', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
             with self.subTest(fault=fault):
                 self.exercise(fault)
 

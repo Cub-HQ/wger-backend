@@ -15,10 +15,8 @@ import time
 import uuid
 
 from snapshot import verify_snapshot
+from backup import deployment_services, service_bind_mounts
 
-PG = 'docker.io/postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
-WEB = 'ghcr.io/cubatica/fitness-wger:135d8569a3eb27c9f0f74e865d56372421a61294'
-PS = 'docker.io/journeyapps/powersync-service@sha256:39f6a534f757afd1c633e91a19b23fde03186d16b5543b4af0f5c8f09d4cb79d'
 
 
 def run(*args, data=None):
@@ -37,6 +35,9 @@ def main():
     work.mkdir(mode=0o700)
     with tarfile.open(source / 'deployment.tar') as archive:
         archive.extractall(work, filter='data')
+    services = deployment_services(work)
+    service_bind_mounts(work, services['web'])
+    powersync_mounts = sum((('-v', mount) for mount in service_bind_mounts(work, services['powersync'])), ())
     config = {}
     for line in (work / 'config/private.env').read_text().splitlines():
         if line and not line.startswith('#') and '=' in line:
@@ -54,7 +55,7 @@ def main():
                'volumes': [name + '-db', name + '-media'], 'networks': [name], 'live_project_untouched': True, 'state': 'starting'}
     receipt_path = work / 'receipt.json'; receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
     run('docker', 'run', '-d', '--name', name + '-db', *labels, '--network', name, '--network-alias', 'db',
-        '--memory', '384m', '--cpus', '0.25', '--env-file', str(env), '-v', name + '-db:/var/lib/postgresql/data', PG)
+        '--memory', '384m', '--cpus', '0.25', '--env-file', str(env), '-v', name + '-db:/var/lib/postgresql/data', services['db']['image'])
     for _ in range(60):
         try:
             run('docker', 'exec', name + '-db', 'pg_isready', '-h', '127.0.0.1', '-U', 'restore'); break
@@ -64,11 +65,10 @@ def main():
         raise RuntimeError('disposable database did not become ready')
     run('docker', 'exec', '-i', name + '-db', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-U', 'restore', '-d', 'wger', data=(source / 'database.dump').read_bytes())
     run('docker', 'run', '--rm', '-i', *labels, '--network', 'none', '--memory', '128m', '--cpus', '0.25',
-        '--entrypoint', 'tar', '-v', name + '-media:/home/wger/media', WEB, '-C', '/home/wger/media', '-xf', '-', data=(source / 'media.tar').read_bytes())
+        '--entrypoint', 'tar', '-v', name + '-media:/home/wger/media', services['web']['image'], '-C', '/home/wger/media', '-xf', '-', data=(source / 'media.tar').read_bytes())
     run('docker', 'run', '-d', '--name', name + '-powersync', *labels, '--network', name, '--memory', '384m', '--cpus', '0.25',
         '--env-file', str(env), '-e', 'POWERSYNC_CONFIG_PATH=/config/powersync.yaml', '-e', 'PS_JWKS_URL=http://127.0.0.1:9/unavailable',
-        '-v', str(work / 'config/powersync.yaml') + ':/config/powersync.yaml:ro',
-        '-v', str(work / 'config/sync_rules.yaml') + ':/config/sync_rules.yaml:ro', PS, 'start', '-r', 'unified')
+        *powersync_mounts, services['powersync']['image'], 'start', '-r', 'unified')
     time.sleep(5)
     if run('docker', 'inspect', '-f', '{{.State.Running}}', name + '-powersync').decode().strip() != 'true':
         raise RuntimeError('restored PowerSync state did not start')

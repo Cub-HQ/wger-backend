@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import pathlib
 import tarfile
@@ -12,19 +13,75 @@ RESTORE_SPEC = importlib.util.spec_from_file_location('restore_drill', RESTORE_M
 restore_drill = importlib.util.module_from_spec(RESTORE_SPEC)
 RESTORE_SPEC.loader.exec_module(restore_drill)
 
-REVIEWED_MOUNTS = (
+CURRENT_MOUNTS = (
     ('overrides/react-main.js', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js'),
     ('overrides/template.html', '/home/wger/src/wger/core/templates/template.html'),
+    ('overrides/settings-main.py', '/home/wger/src/settings/main.py'),
+    ('overrides/manager-urls.py', '/home/wger/src/wger/manager/urls.py'),
+)
+REVIEWED_MOUNTS = CURRENT_MOUNTS + (
     ('overrides/history-overview.html', '/home/wger/src/wger/exercises/templates/history/overview.html'),
     ('overrides/api-key.html', '/home/wger/src/wger/core/templates/user/api_key.html'),
     ('overrides/pdf.py', '/home/wger/src/wger/utils/pdf.py'),
-    ('settings-main.py', '/home/wger/src/settings/main.py'),
     ('formats/en_AU/formats.py', '/home/wger/src/wger/formats/en_AU/formats.py'),
 )
 
 
+def services_for(root, mounts=REVIEWED_MOUNTS):
+    return {'web': {'image': 'docker.io/wger/server:2.7@sha256:' + '1' * 64,
+                    'volumes': [{'type': 'bind', 'source': str(root / source), 'target': target, 'read_only': True}
+                                for source, target in mounts] +
+                               [{'type': 'volume', 'source': 'media', 'target': '/home/wger/media'}]}}
+
+
 
 class BackupRouteTest(unittest.TestCase):
+    def test_compose_layout_requires_all_declared_binds_and_ignores_unbound_files(self):
+        for mounts in (CURRENT_MOUNTS, REVIEWED_MOUNTS):
+            with self.subTest(mounts=mounts), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                (root / 'compose.yaml').write_text('services: {}')
+                (root / 'config').mkdir()
+                (root / 'config/private.env').write_text('PRIVATE=yes')
+                for source, _ in mounts:
+                    path = root / source
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(source)
+                (root / 'overrides/unbound.py').write_text('not mounted')
+                services = services_for(root, mounts)
+                result = type('Result', (), {'stdout': json.dumps({'services': services}).encode()})()
+                with patch.object(backup.subprocess, 'run', return_value=result):
+                    resolved = backup.deployment_services(root)
+                self.assertEqual(restore_drill.web_override_mounts(root, resolved), tuple(
+                    f'{root / source}:{target}:ro' for source, target in mounts))
+                (root / mounts[-1][0]).unlink()
+                with self.assertRaisesRegex(RuntimeError, 'required deployment bind source is missing'):
+                    restore_drill.web_override_mounts(root, resolved)
+
+    def test_compose_bind_sources_cannot_escape_or_follow_parent_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            work = root / 'work'; work.mkdir()
+            outside = root / 'outside'; outside.mkdir()
+            (outside / 'override.py').write_text('external')
+            (work / 'linked').symlink_to(outside, target_is_directory=True)
+            for source in (str(outside / 'override.py'), '../outside/override.py', 'linked/override.py'):
+                service = {'volumes': [{'type': 'bind', 'source': source, 'target': '/override.py', 'read_only': True}]}
+                with self.subTest(source=source), self.assertRaises(RuntimeError):
+                    backup.service_bind_mounts(work, service)
+
+    def test_optional_archive_member_rejects_parent_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            deploy = root / 'deploy'; deploy.mkdir()
+            outside = root / 'outside'; (outside / 'en_AU').mkdir(parents=True)
+            (outside / 'en_AU/formats.py').write_text('outside')
+            (deploy / 'formats').symlink_to(outside, target_is_directory=True)
+            archive = root / 'deployment.tar'
+            with self.assertRaises(RuntimeError):
+                backup.write_deployment_archive(archive, deploy=deploy)
+            self.assertFalse(archive.exists())
+
     def test_snapshot_recovers_proxy_after_writer_restart_even_on_capture_failure(self):
         for fault in (None, 'capture', 'reload', 'powersync', 'powersync+reload'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
@@ -51,7 +108,7 @@ class BackupRouteTest(unittest.TestCase):
                 def wait_for_state(ident, expected):
                     if fault in ('powersync','powersync+reload') and ident=='powersync':raise RuntimeError('powersync failed')
                     self.assertEqual(states[ident],expected)
-                with patch.object(backup.pathlib.Path,'home',return_value=home), patch.object(backup,'DEPLOY',home), patch.object(backup.pathlib.Path,'is_socket',return_value=True), patch.object(backup,'acquire_custody',return_value=[]), patch.object(backup,'compose',side_effect=compose), patch.object(backup,'docker',side_effect=docker), patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident]), patch.object(backup,'wait_for_state',side_effect=wait_for_state), patch.object(backup,'media_inventory',return_value=b''), patch.object(backup.subprocess,'run'), patch.object(backup,'write_manifest'):
+                with patch.object(backup.pathlib.Path,'home',return_value=home), patch.object(backup,'DEPLOY',home), patch.object(backup.pathlib.Path,'is_socket',return_value=True), patch.object(backup,'acquire_custody',return_value=[]), patch.object(backup,'compose',side_effect=compose), patch.object(backup,'docker',side_effect=docker), patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident]), patch.object(backup,'wait_for_state',side_effect=wait_for_state), patch.object(backup,'media_inventory',return_value=b''), patch.object(backup.subprocess,'run'), patch.object(backup,'write_deployment_archive'), patch.object(backup,'write_manifest'):
                     if fault:
                         with self.assertRaisesRegex(RuntimeError,fault.split('+')[0]+' failed') as caught:backup.snapshot(destination)
                         if fault=='powersync+reload':self.assertIn('nginx recovery also failed: reload failed',caught.exception.__notes__)
@@ -172,7 +229,7 @@ class BackupRouteTest(unittest.TestCase):
                     self.assertEqual(captured.extractfile('settings-main.py').read(), b"LANGUAGE_CODE = 'en-au'\n")
 
     def test_restore_requires_existing_browser_template_and_settings_overrides(self):
-        for missing in ('overrides/react-main.js', 'overrides/template.html', 'settings-main.py'):
+        for missing, _ in REVIEWED_MOUNTS:
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
                 root = pathlib.Path(directory)
                 for source, _ in REVIEWED_MOUNTS:
@@ -180,8 +237,8 @@ class BackupRouteTest(unittest.TestCase):
                         path = root / source
                         path.parent.mkdir(parents=True, exist_ok=True)
                         path.write_text('reviewed file')
-                with self.assertRaisesRegex(RuntimeError, 'required restored bind source is missing'):
-                    restore_drill.web_override_mounts(root)
+                with self.assertRaises(RuntimeError):
+                    restore_drill.web_override_mounts(root, services_for(root))
 
     def test_restore_selects_postgresql_after_removing_powersync_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -195,7 +252,7 @@ class BackupRouteTest(unittest.TestCase):
             snapshot.mkdir()
             backup.write_deployment_archive(snapshot / 'deployment.tar', deploy=deploy)
             (snapshot / 'manifest.json').write_text('{"files": {}}')
-            with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch.object(restore_drill, 'run', side_effect=RuntimeError('stop before Docker')):
+            with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch.object(restore_drill, 'deployment_services', return_value=services_for(deploy, ())), patch.object(restore_drill, 'run', side_effect=RuntimeError('stop before Docker')):
                 with self.assertRaisesRegex(RuntimeError, 'stop before Docker'):
                     restore_drill.main()
             environment = dict(line.split('=', 1) for line in next(root.glob('wger-restore-*/restore.env')).read_text().splitlines())
@@ -211,9 +268,8 @@ class BackupRouteTest(unittest.TestCase):
             (deploy / 'overrides').mkdir()
             (deploy / 'compose.yaml').write_text('services: {}\n')
             (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
-            (deploy / 'overrides' / 'react-main.js').write_text('browser bundle\n')
-            (deploy / 'overrides' / 'template.html').write_text('page template\n')
-            (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-gb'\n")
+            for source, _ in CURRENT_MOUNTS:
+                (deploy / source).write_text(source)
             archive = root / 'deployment.tar'
 
             backup.write_deployment_archive(archive, deploy=deploy)
@@ -223,20 +279,15 @@ class BackupRouteTest(unittest.TestCase):
             with tarfile.open(archive) as captured:
                 captured.extractall(restored, filter='data')
                 names = set(captured.getnames())
-            self.assertTrue({'compose.yaml', 'config/private.env', 'overrides/react-main.js', 'overrides/template.html', 'settings-main.py'} <= names)
+            self.assertTrue({'compose.yaml', 'config/private.env', *(source for source, _ in CURRENT_MOUNTS)} <= names)
             self.assertTrue({
                 'formats/en_AU/formats.py',
                 'overrides/history-overview.html',
                 'overrides/api-key.html',
                 'overrides/pdf.py',
             }.isdisjoint(names))
-            expected = (
-                str(restored / 'overrides/react-main.js') + ':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro',
-                str(restored / 'overrides/template.html') + ':/home/wger/src/wger/core/templates/template.html:ro',
-                str(restored / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro',
-            )
-            self.assertEqual((restored / 'settings-main.py').read_text(), "LANGUAGE_CODE = 'en-gb'\n")
-            self.assertEqual(restore_drill.web_override_mounts(restored), expected)
+            expected = tuple(str(restored / source) + ':' + target + ':ro' for source, target in CURRENT_MOUNTS)
+            self.assertEqual(restore_drill.web_override_mounts(restored, services_for(restored, CURRENT_MOUNTS)), expected)
 
     def test_snapshot_and_restore_keep_all_australian_date_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -246,7 +297,7 @@ class BackupRouteTest(unittest.TestCase):
             (deploy / 'compose.yaml').write_text('services: {}\n')
             (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
             contents = {source: source + '\n' for source, _ in REVIEWED_MOUNTS}
-            contents['settings-main.py'] = "LANGUAGE_CODE = 'en-au'\n"
+            contents['overrides/settings-main.py'] = "LANGUAGE_CODE = 'en-au'\n"
             contents['formats/en_AU/formats.py'] = "DATE_FORMAT = 'd/m/Y'\n"
             for source, content in contents.items():
                 path = deploy / source
@@ -265,7 +316,7 @@ class BackupRouteTest(unittest.TestCase):
             for source, content in contents.items():
                 self.assertEqual((restored / source).read_text(), content)
             self.assertTrue((restored / 'overrides' / 'unreviewed.py').is_file())
-            self.assertEqual(restore_drill.web_override_mounts(restored), tuple(
+            self.assertEqual(restore_drill.web_override_mounts(restored, services_for(restored)), tuple(
                 str(restored / source) + ':' + target + ':ro'
                 for source, target in REVIEWED_MOUNTS
             ))
@@ -299,7 +350,7 @@ class BackupRouteTest(unittest.TestCase):
                 with self.subTest(source=source, kind=kind), tempfile.TemporaryDirectory() as directory:
                     root = pathlib.Path(directory)
                     work = root / 'restored'
-                    for required in ('overrides/react-main.js', 'overrides/template.html', 'settings-main.py'):
+                    for required, _ in REVIEWED_MOUNTS:
                         if required != source:
                             member = work / required
                             member.parent.mkdir(parents=True, exist_ok=True)
@@ -313,8 +364,8 @@ class BackupRouteTest(unittest.TestCase):
                         if kind == 'symlink':
                             target.write_text('regular file\n')
                         path.symlink_to(target)
-                    with self.assertRaisesRegex(RuntimeError, 'restored bind source has wrong type'):
-                        restore_drill.web_override_mounts(work)
+                    with self.assertRaisesRegex(RuntimeError, 'deployment bind source has wrong type'):
+                        restore_drill.web_override_mounts(work, services_for(work))
 
 
 

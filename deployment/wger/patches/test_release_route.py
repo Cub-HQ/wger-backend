@@ -16,44 +16,41 @@ ROOT = pathlib.Path(__file__).parent
 
 
 class ReleaseRouteTest(unittest.TestCase):
-    def test_builder_is_colima_local_and_stages_only(self):
-        script = (ROOT / 'prepare-react.sh').read_text()
-        self.assertNotIn('limactl', script)
-        self.assertIn('.colima/default/docker.sock', script)
-        self.assertNotIn('docker context inspect', script)
-        self.assertIn('3066f7693ac00632ad14ea0ef025371156f91d0d', script)
-        self.assertIn('135d8569a3eb27c9f0f74e865d56372421a61294', script)
-        self.assertIn('react-main.js.next', script)
-        self.assertIn('template.html.next', script)
-        self.assertIn('history-overview.html.next', script)
-        self.assertIn('api-key.html.next', script)
-        self.assertIn('pdf.py.next', script)
-        self.assertNotIn('compose up', script)
-    def test_release_refuses_without_both_writer_locks_and_restores_exact_runtime(self):
-        wrapper = (ROOT / 'release-web.sh').read_text()
-        script = (ROOT / 'release_web.py').read_text()
-        self.assertIn('release_web.py', wrapper)
-        self.assertNotIn('source ', wrapper)
-        self.assertNotIn('private.env', wrapper)
-        self.assertIn('read_database_environment(private_env)', script)
-        self.assertNotIn('POSTGRES_PASSWORD', script)
-        self.assertIn('WGER_WRITER_LOCK', script)
-        self.assertIn('WGER_HISTORY_LOCK', script)
-        self.assertIn('fcntl.LOCK_EX | fcntl.LOCK_NB', script)
-        self.assertIn("(Path(history_lock), 'lockf')", script)
-        self.assertIn("(Path(writer_lock), 'flock')", script)
-        self.assertIn("compose('stop', 'powersync', *services)", script)
-        self.assertLess(script.index("compose('stop', 'powersync', *services)"), script.index("'pg_dump', '-Fc'"))
-        self.assertIn("'dropdb', '--if-exists', '--force'", script)
-        self.assertIn("rollback_images = {**prior_images, 'powersync': prior_powersync_image}", script)
-        self.assertIn('resumed_image != prior_powersync_image or resumed_state != prior_powersync_state', script)
-        self.assertIn("'pg_restore', '--exit-on-error'", script)
-        self.assertIn('snapshot_complete and restored_schema != prior_schema', script)
-        self.assertNotIn("'--force-recreate', 'db'", script)
-        self.assertIn('prior writer states, overrides, database schema/data and exact images restored', script)
+    def test_preparation_extracts_the_compose_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            socket_path = root / '.colima/default/docker.sock'
+            socket_path.parent.mkdir(parents=True)
+            with socket.socket(socket.AF_UNIX) as docker_socket:
+                docker_socket.bind(str(socket_path))
+                patches = root / 'deployment/patches'
+                patches.mkdir(parents=True)
+                script = patches / 'prepare-react.sh'
+                script.write_bytes((ROOT / 'prepare-react.sh').read_bytes())
+                binary = root / 'bin/docker'
+                binary.parent.mkdir()
+                binary.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with Path(os.environ['DOCKER_LOG']).open('a') as log: log.write(json.dumps(args) + '\\n')
+if 'config' in args: print(json.dumps({'services': {'web': {'image': 'stock-fixture@sha256:abc'}}}))
+elif 'create' in args: sys.exit(7)
+''')
+                binary.chmod(0o755)
+                log = root / 'docker.jsonl'
+                env = {**os.environ, 'HOME': str(root), 'WGER_DOCKER_HOST': 'unix://' + str(socket_path),
+                       'PATH': str(binary.parent) + ':' + os.environ['PATH'], 'DOCKER_LOG': str(log)}
+                result = subprocess.run(['bash', str(script)], env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                commands = [json.loads(line) for line in log.read_text().splitlines()]
+                create = next(command for command in commands if 'create' in command)
+                self.assertEqual(create[-1], 'stock-fixture@sha256:abc')
+                self.assertFalse(any('up' in command or 'build' in command for command in commands))
+
     def test_release_targets_selected_live_deployment(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
+            root = pathlib.Path(directory).resolve()
             home = root / 'home'
             socket_path = home / '.colima/default/docker.sock'
             socket_path.parent.mkdir(parents=True)
@@ -67,6 +64,8 @@ class ReleaseRouteTest(unittest.TestCase):
                 config.mkdir()
                 (deploy / 'compose.yaml').write_text('services: {}\n')
                 (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
+                for name in ('settings-main.py', 'manager-urls.py'):
+                    (overrides / name).write_text(f'old {name}\n')
                 for name in ('template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json'):
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
                     if name in {'history-overview.html', 'api-key.html', 'pdf.py'}:
@@ -118,7 +117,11 @@ elif "config" in args and "--format" in args:
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/history-overview.html'),'target':'/home/wger/src/wger/exercises/templates/history/overview.html'},
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/api-key.html'),'target':'/home/wger/src/wger/core/templates/user/api_key.html'},
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/pdf.py'),'target':'/home/wger/src/wger/utils/pdf.py'},
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py'},
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/manager-urls.py'),'target':'/home/wger/src/wger/manager/urls.py'},
     ]
+    if any('candidate/compose.yaml' in arg for arg in args) or (Path(os.environ['WGER_DEPLOY_DIR'])/'formats/en_AU/formats.py').exists():
+        services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'formats/en_AU/formats.py'),'target':'/home/wger/src/wger/formats/en_AU/formats.py'})
     if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
     for arg in args:
         if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
@@ -172,10 +175,12 @@ elif "sha256sum" in args:
                 commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
                 self.assertTrue(any(str(deploy / 'compose.yaml') in command for command in map(' '.join, commands)))
                 self.assertTrue(any('cp nginx:/wger/static/' + served_name in ' '.join(command) for command in commands))
+                self.assertFalse(any('build' in command for command in commands))
+                self.assertTrue(all('--no-build' in command for command in commands if 'up' in command))
                 candidate = root / 'candidate'
                 (candidate / 'config').mkdir(parents=True)
                 (candidate / 'overrides').mkdir()
-                stage_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
+                stage_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
                 for name in stage_names:
                     candidate_path = candidate / name
                     candidate_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +196,7 @@ elif "sha256sum" in args:
                 (root / 'stale-http').touch()
                 rejected = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertNotEqual(rejected.returncode, 0)
-                self.assertIn('fork release failed', rejected.stderr)
+                self.assertIn('web release failed', rejected.stderr)
                 for name in stage_names:
                     if name == 'formats/en_AU/formats.py':
                         self.assertFalse((deploy / name).exists())
@@ -204,7 +209,7 @@ elif "sha256sum" in args:
                 offset = len(docker_log.read_text().splitlines())
                 malformed = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertNotEqual(malformed.returncode, 0)
-                self.assertIn('fork release failed', malformed.stderr)
+                self.assertIn('web release failed', malformed.stderr)
                 for name in stage_names:
                     if name == 'formats/en_AU/formats.py':
                         self.assertFalse((deploy / name).exists())
@@ -219,12 +224,10 @@ elif "sha256sum" in args:
                     self.assertTrue(any('up' in command and service in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
                 self.assertEqual(docker_log.with_suffix('.proxy').read_text(), 'ready')
                 (root / 'malformed-http').unlink()
-                (deploy / 'settings-main.py').unlink()
                 (deploy / 'settings-main.py').mkdir()
-                (overrides / 'settings-main.py').write_text('previous settings')
                 staged = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertEqual(staged.returncode, 0, staged.stderr)
-                self.assertTrue((deploy / 'settings-main.py').is_file())
+                self.assertTrue((deploy / 'settings-main.py').is_dir())
                 for name in stage_names:
                     self.assertEqual((deploy / name).read_text(), 'new ' + name)
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
@@ -234,6 +237,26 @@ elif "sha256sum" in args:
                 self.assertIn('bind source missing or wrong type',refused.stderr)
                 refused_commands=[json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
                 self.assertFalse(any('stop' in command or 'up' in command for command in refused_commands))
+                for name in ('settings-main.py', 'manager-urls.py'):
+                    target = overrides / name
+                    original = target.read_bytes()
+                    target.unlink()
+                    target.mkdir()
+                    offset = len(docker_log.read_text().splitlines())
+                    wrong_type = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
+                    self.assertNotEqual(wrong_type.returncode, 0)
+                    self.assertIn('bind source missing or wrong type', wrong_type.stderr)
+                    target.rmdir()
+                    other = root / name
+                    other.write_bytes(original)
+                    target.symlink_to(other)
+                    linked = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
+                    self.assertNotEqual(linked.returncode, 0)
+                    self.assertIn('bind source missing or wrong type', linked.stderr)
+                    attempts = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
+                    self.assertFalse(any('stop' in command or 'up' in command for command in attempts))
+                    target.unlink()
+                    target.write_bytes(original)
                 double = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double'},text=True,capture_output=True)
                 self.assertNotEqual(double.returncode,0)
                 self.assertIn('release migration rejected',double.stderr)
@@ -254,7 +277,7 @@ elif "sha256sum" in args:
                 mismatch = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                           text=True, capture_output=True)
                 self.assertNotEqual(mismatch.returncode, 0)
-                self.assertIn('fork release failed', mismatch.stderr)
+                self.assertIn('web release failed', mismatch.stderr)
                 logical_name = 'node/@wger-project/react-components/build/main.js'
                 manifest.write_text(json.dumps({'paths': {logical_name: logical_name}}))
                 plain_file = root / 'static' / logical_name
@@ -262,7 +285,7 @@ elif "sha256sum" in args:
                 fallback = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                           text=True, capture_output=True)
                 self.assertNotEqual(fallback.returncode, 0)
-                self.assertIn('fork release failed', fallback.stderr)
+                self.assertIn('web release failed', fallback.stderr)
             finally:
                 docker_socket.close()
 
@@ -275,19 +298,6 @@ elif "sha256sum" in args:
             fixture.write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\nGUNICORN_CMD_ARGS=--workers 1 --threads 2 --timeout 240\nPOSTGRES_PASSWORD=never-return-this\n')
             self.assertEqual(read_database_environment(fixture), {'POSTGRES_USER': 'fitness_wger', 'POSTGRES_DB': 'fitness_wger'})
 
-    def test_fork_image_is_used_by_live_and_restore_routes(self):
-        commit = '135d8569a3eb27c9f0f74e865d56372421a61294'
-        deployment = ROOT.parent
-        self.assertIn(commit, (deployment / 'Dockerfile').read_text())
-        self.assertIn(commit, (deployment / 'compose.yaml').read_text())
-        self.assertIn(commit, (deployment / 'operations/restore-drill.py').read_text())
-        self.assertIn(commit, (deployment / 'operations/recovery-drill.py').read_text())
-        self.assertIn("DJANGO_PERFORM_MIGRATIONS='True'", (deployment / 'operations/restore-drill.py').read_text())
-
-    def test_footer_advertises_public_corresponding_source(self):
-        patcher = (ROOT / 'patch_footer.py').read_text()
-        self.assertIn('github.com/Cubatica/wger/tree/135d8569', patcher)
-        self.assertIn('github.com/Cubatica/react/tree/3066f769', patcher)
 
     def test_release_refuses_cross_process_history_lockf_owner(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -190,9 +190,7 @@ def run(source: Path, deploy: Path, env: dict) -> dict:
         restored = _database(docker, receipt['project'] + '-web', env)
         schema = {tuple(row) for row in restored['schema']}
         if (restored['counts'] != before['database']['counts']
-                or not {tuple(row) for row in before['database']['schema']} <= schema
-                or not {('manager', '0030_workoutlog_cardio_metrics'),
-                        ('exercises', '0041_exercisevideo_source_url')} <= schema):
+                or not {tuple(row) for row in before['database']['schema']} <= schema):
             raise RuntimeError('restored counts or applied migration proof mismatch')
         _command([*docker, 'exec', receipt['project'] + '-web', 'python3', 'manage.py', 'migrate', '--check'], env)
         if _media(docker, receipt['project'] + '-media', env) != before['media']:

@@ -1,5 +1,5 @@
 # This file is part of wger Workout Manager under the GNU AGPL v3 or later.
-# Production settings for the pinned Cubatica/wger release.
+# Production settings for the pinned stock wger release.
 
 import hashlib
 import ipaddress
