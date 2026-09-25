@@ -88,15 +88,20 @@ export const filterProgressionChartData = <T extends { date: Date }>(
     return data.filter(entry => entry.date >= cutoff && entry.date <= now);
 };
 ''')
-
-
 widgets = "src/components/Routines/widgets/LogWidgets.tsx"
 replace(widgets, 'import { dateToLocale, luxonDateTimeToLocale } from "@/core/lib/date";', 'import { dateToLocale, luxonDateTimeToLocale } from "@/core/lib/date";\nimport { filterProgressionChartData } from "@/components/Routines/widgets/progressionChartRange";')
 replace(
     widgets,
     "export const ExerciseLog = (props: { exercise: Exercise, routineId: number, logEntries: WorkoutLog[] | undefined }) => {",
-    "export const ExerciseLog = (props: { exercise: Exercise, routineId: number, logEntries: WorkoutLog[] | undefined, chartEntries?: WorkoutLog[] }) => {",
+    "export const ExerciseLog = (props: { exercise: Exercise, routineId: number, logEntries: WorkoutLog[] | undefined, chartEntries?: WorkoutLog[], displayDate?: Date, displayDates?: Map<string, Date> }) => {",
 )
+replace(widgets, "        date: logEntry.date,", "        date: props.displayDates?.has(logEntry.id) ? new Date(props.displayDates.get(logEntry.id)!.getTime()) : props.displayDate ? new Date(props.displayDate.getTime()) : logEntry.date,")
+replace(
+    widgets,
+    "    const processRowUpdate = (newRow: GridRowModel) => {",
+    "    const processRowUpdate = (newRow: GridRowModel, oldRow: GridRowModel) => {",
+)
+replace(widgets, "            log.date = newRow.date;", "            if (newRow.date.getTime() !== oldRow.date.getTime()) log.date = newRow.date;")
 replace(
     widgets,
     "<TimeSeriesChart data={logEntries} key={props.exercise.id} />",
@@ -125,6 +130,64 @@ replace(
     });""",
 )
 replace(widgets, 'name={key?.toString()}', 'name={`Set ${key}`}')
+overview = "src/components/Routines/screens/Detail/WorkoutLogs.tsx"
+replace(
+    overview,
+    "    // Group by exercise\n    let groupedWorkoutLogs: Map<number, WorkoutLog[]> = new Map();",
+    """    const withWorkoutDate = (log: WorkoutLog, date: Date) => Object.assign(Object.create(Object.getPrototypeOf(log)), log, { date: new Date(date.getTime()) }) as WorkoutLog;
+
+    // Group by exercise
+    let groupedWorkoutLogs: Map<number, WorkoutLog[]> = new Map();
+    const groupedWorkoutChartLogs: Map<number, WorkoutLog[]> = new Map();
+    const workoutDates = new Map<string, Date>();""",
+)
+replace(
+    overview,
+    """        routineLogData.logs.forEach(log => {
+            const exerciseId = log.exerciseId;
+            r.set(exerciseId, r.get(exerciseId) || []);
+            r.get(exerciseId)!.push(log);
+        });""",
+    """        routineLogData.logs.forEach(log => {
+            const exerciseId = log.exerciseId;
+            const workoutDate = routineLogData.session.datetimeStart;
+            r.set(exerciseId, r.get(exerciseId) || []);
+            r.get(exerciseId)!.push(log);
+            groupedWorkoutChartLogs.set(exerciseId, groupedWorkoutChartLogs.get(exerciseId) || []);
+            groupedWorkoutChartLogs.get(exerciseId)!.push(withWorkoutDate(log, workoutDate));
+            workoutDates.set(log.id, workoutDate);
+        });""",
+)
+replace(
+    overview,
+    """    }, groupedWorkoutLogs);
+
+    const plannedDays""",
+    """    }, groupedWorkoutLogs);
+
+    for (const logs of groupedWorkoutChartLogs.values()) logs.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    const plannedDays""",
+)
+replace(
+    overview,
+    """                                logEntries={groupedWorkoutLogs.get(exercise.id!)!}
+                            />""",
+    """                                logEntries={groupedWorkoutLogs.get(exercise.id!)!}
+                                displayDates={workoutDates}
+                                chartEntries={groupedWorkoutChartLogs.get(exercise.id!)}
+                            />""",
+)
+replace(
+    overview,
+    """                        logEntries={groupedWorkoutLogs.get(exercise.id!)}
+                    />""",
+    """                        logEntries={groupedWorkoutLogs.get(exercise.id!)}
+                        displayDates={workoutDates}
+                        chartEntries={groupedWorkoutChartLogs.get(exercise.id!)}
+                    />""",
+)
+
 
 index = "src/index.tsx"
 replace(
@@ -140,6 +203,7 @@ replace(
 )
 
 wave = "src/components/Routines/widgets/WaveOne.tsx"
+replace(wave, 'const present = (value: number | null) =>', 'const withDate = (log: WorkoutLog, date: Date) => Object.assign(Object.create(Object.getPrototypeOf(log)), log, { date: new Date(date.getTime()) }) as WorkoutLog;\nconst present = (value: number | null) =>')
 replace(
     wave,
     """                <ExerciseLog exercise={logs[0].exerciseObj!} routineId={session.routineId} logEntries={logs} />""",
@@ -147,10 +211,20 @@ replace(
                     exercise={logs[0].exerciseObj!}
                     routineId={session.routineId}
                     logEntries={logs}
-                    chartEntries={(sessionsQuery.data ?? []).flatMap(candidate => candidate.routineId === session.routineId
-                        ? candidate.logs.filter(log => log.exerciseId === logs[0].exerciseId)
-                        : []).sort((a, b) => a.date.getTime() - b.date.getTime())}
+                    displayDate={session.datetimeStart}
+                    chartEntries={(sessionsQuery.data ?? []).flatMap(candidate =>
+                        candidate.logs.filter(log => log.exerciseId === logs[0].exerciseId)
+                            .map(log => withDate(log, candidate.datetimeStart))
+                    ).sort((a, b) => a.date.getTime() - b.date.getTime())}
                 />""",
+)
+replace(
+    wave,
+    """    const logs = useMemo(() => (sessionsQuery.data ?? []).flatMap(session => session.logs)
+        .filter(log => log.exerciseId === exerciseId)""",
+    """    const logs = useMemo(() => (sessionsQuery.data ?? []).flatMap(session => session.logs
+        .map(log => withDate(log, session.datetimeStart)))
+        .filter(log => log.exerciseId === exerciseId)"""
 )
 
 print("Applied per-set block progression chart patch")

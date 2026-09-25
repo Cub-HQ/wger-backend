@@ -40,15 +40,15 @@ class PinnedArtifactsTest(unittest.TestCase):
             subprocess.run(["npm", "test", "--", "src/core/lib/date.test.ts"], cwd=root, check=True)
             subprocess.run(["npm", "run", "typecheck"], cwd=root, check=True)
             subprocess.run(["npm", "run", "build"], cwd=root, check=True)
-            australian_digest = re.search(
-                r"^AUSTRALIAN_DATES_SHA256 = '([0-9a-f]{64})'$",
+            current_digest = re.search(
+                r"^BLOCK_PROGRESSION_SHA256 = '([0-9a-f]{64})'$",
                 (PATCH_DIR / "patch_muscle_diagram.py").read_text(), re.MULTILINE,
             )
-            self.assertIsNotNone(australian_digest, "Expected the named Australian-date digest")
+            self.assertIsNotNone(current_digest, "Expected the named current-build digest")
             self.assertEqual(
                 hashlib.sha256((root / "build/main.js").read_bytes()).hexdigest(),
-                australian_digest.group(1),
-                "Current build must match the Australian-date digest, not a historical allowlist entry",
+                current_digest.group(1),
+                "Current build must match the current-build digest, not a historical allowlist entry",
             )
             self.check_gate(root / "build/main.js", "patch_muscle_diagram.py", "Pinned React source changed")
 
