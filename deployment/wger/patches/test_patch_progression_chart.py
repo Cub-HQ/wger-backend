@@ -64,6 +64,32 @@ const formatData = (data: WorkoutLog[]) =>
         r.get(a.repetitions)!.push(a);
         return r;
     }, new Map());
+                    tickFormatter={unixTime => luxonDateTimeToLocale(DateTime.fromMillis(unixTime))}
+                    unit="kg"
+                        const formattedData = formatData(value);
+                <Tooltip content={ExerciseLogTooltip} />
+const ExerciseLogTooltip = ({ active, payload }: TooltipContentProps<ValueType, NameType>) => {
+    if (active) {
+        // TODO: translate rir
+        let rir = '';
+        if (payload?.[1].payload?.entry.rir) {
+            rir = `, ${payload?.[1].payload?.entry.rir} RiR`;
+        }
+
+        return <Card>
+            <CardContent>
+                <Typography variant="body1">
+                    {luxonDateTimeToLocale(DateTime.fromMillis(payload?.[0].value as number))}
+                </Typography>
+
+                <Typography variant="body2">
+                    {payload?.[1].payload?.entry.repetitions} × {payload?.[1].value}{payload?.[1].unit}{rir}
+                </Typography>
+            </CardContent>
+        </Card>;
+    }
+    return null;
+};
 name={key?.toString()}''',
     "src/components/Routines/widgets/WaveOne.tsx": wave_one_source(),
     "src/components/Routines/screens/Detail/WorkoutLogs.tsx": '''import { ExerciseLog } from "@/components/Routines/widgets/LogWidgets";
@@ -363,7 +389,7 @@ console.log(JSON.stringify({{
         spec = importlib.util.spec_from_file_location("muscle_patch_for_real_build", MUSCLE_PATCH)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        real_build_digest = "c40983f4741f1a6be901e42d51415ce45b3e8014af8d2264f22783a35a221f96"
+        real_build_digest = "5b86d77381357d4e40c45b7f2646268237cb8aaf9a0387e77012a7879eec70f9"
         self.assertIn(real_build_digest, module.APPROVED_SHA256)
         for rejected_digest in (
             "9af475d575a2ccafb8af916a3e8689086dd95c079b5551c1e222776a827387be",

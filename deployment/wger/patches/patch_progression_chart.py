@@ -89,7 +89,7 @@ export const filterProgressionChartData = <T extends { date: Date }>(
 };
 ''')
 widgets = "src/components/Routines/widgets/LogWidgets.tsx"
-replace(widgets, 'import { dateToLocale, luxonDateTimeToLocale } from "@/core/lib/date";', 'import { dateToLocale, luxonDateTimeToLocale } from "@/core/lib/date";\nimport { filterProgressionChartData } from "@/components/Routines/widgets/progressionChartRange";')
+replace(widgets, 'import { dateToLocale, luxonDateTimeToLocale } from "@/core/lib/date";', 'import { dateToLocale } from "@/core/lib/date";\nimport { filterProgressionChartData } from "@/components/Routines/widgets/progressionChartRange";')
 replace(
     widgets,
     "export const ExerciseLog = (props: { exercise: Exercise, routineId: number, logEntries: WorkoutLog[] | undefined }) => {",
@@ -127,7 +127,65 @@ replace(
         const setNumber = (counters.get(session) ?? 0) + 1;
         counters.set(session, setNumber);
         result.set(setNumber, [...(result.get(setNumber) ?? []), log]);
-    });""",
+    });
+    // Every set of one workout shares that workout's date, so hovering one dot lists them all.
+    const sets = new Map<number, [number, WorkoutLog][]>();
+    result.forEach((logs, set) => logs.forEach(log => sets.set(log.date.getTime(), [...(sets.get(log.date.getTime()) ?? []), [set, log]])));
+    const ticks = [...sets.keys()].sort((a, b) => a - b);
+    // Bodyweight moves (e.g. superman) log reps only, so chart reps when no set carries weight.
+    const byReps = !chartData.some(log => log.weight !== null && log.weight !== 0);""",
+)
+replace(widgets, "const formatData = (data: WorkoutLog[]) =>", "const formatData = (data: WorkoutLog[], byReps = false) =>")
+replace(widgets, "            value: log.weight,", "            value: byReps ? log.repetitions : log.weight,")
+replace(widgets, "const formattedData = formatData(value);", "const formattedData = formatData(value, byReps);")
+replace(widgets, 'unit="kg"', 'unit={byReps ? " reps" : "kg"}')
+replace(
+    widgets,
+    "                    tickFormatter={unixTime => luxonDateTimeToLocale(DateTime.fromMillis(unixTime))}",
+    """                    ticks={ticks}
+                    interval={0}
+                    padding={{ left: 16, right: 16 }}
+                    tickFormatter={unixTime => DateTime.fromMillis(unixTime).toFormat('dd/MM/yy')}""",
+)
+replace(widgets, "<Tooltip content={ExerciseLogTooltip} />", "<Tooltip content={exerciseLogTooltip(sets)} />")
+replace(
+    widgets,
+    """const ExerciseLogTooltip = ({ active, payload }: TooltipContentProps<ValueType, NameType>) => {
+    if (active) {
+        // TODO: translate rir
+        let rir = '';
+        if (payload?.[1].payload?.entry.rir) {
+            rir = `, ${payload?.[1].payload?.entry.rir} RiR`;
+        }
+
+        return <Card>
+            <CardContent>
+                <Typography variant="body1">
+                    {luxonDateTimeToLocale(DateTime.fromMillis(payload?.[0].value as number))}
+                </Typography>
+
+                <Typography variant="body2">
+                    {payload?.[1].payload?.entry.repetitions} × {payload?.[1].value}{payload?.[1].unit}{rir}
+                </Typography>
+            </CardContent>
+        </Card>;
+    }
+    return null;
+};""",
+    """const exerciseLogTooltip = (sets: Map<number, [number, WorkoutLog][]>) => ({ active, payload }: TooltipContentProps<ValueType, NameType>) => {
+    const time = payload?.[0]?.payload?.time as number | undefined;
+    if (!active || time === undefined) {
+        return null;
+    }
+    return <Card>
+        <CardContent>
+            <Typography variant="body1">{DateTime.fromMillis(time).toFormat('dd/MM/yy')}</Typography>
+            {(sets.get(time) ?? []).map(([set, log]) => <Typography variant="body2" key={log.id}>
+                Set {set}: {log.weight ? `${log.repetitions} × ${log.weight}kg` : `${log.repetitions} reps`}{log.rir ? `, ${log.rir} RiR` : ''}
+            </Typography>)}
+        </CardContent>
+    </Card>;
+};""",
 )
 replace(widgets, 'name={key?.toString()}', 'name={`Set ${key}`}')
 overview = "src/components/Routines/screens/Detail/WorkoutLogs.tsx"

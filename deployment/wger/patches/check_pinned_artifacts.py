@@ -41,7 +41,7 @@ class PinnedArtifactsTest(unittest.TestCase):
             subprocess.run(["npm", "run", "typecheck"], cwd=root, check=True)
             subprocess.run(["npm", "run", "build"], cwd=root, check=True)
             current_digest = re.search(
-                r"^BLOCK_PROGRESSION_SHA256 = '([0-9a-f]{64})'$",
+                r"^CHART_HOVER_SHA256 = '([0-9a-f]{64})'$",
                 (PATCH_DIR / "patch_muscle_diagram.py").read_text(), re.MULTILINE,
             )
             self.assertIsNotNone(current_digest, "Expected the named current-build digest")
