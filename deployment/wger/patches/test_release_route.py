@@ -16,6 +16,59 @@ ROOT = pathlib.Path(__file__).parent
 
 
 class ReleaseRouteTest(unittest.TestCase):
+    def test_public_readiness_retries_only_transient_transport_failures(self):
+        import ast
+        from unittest.mock import Mock, patch
+        from urllib.error import HTTPError, URLError
+        import ssl
+        tree = ast.parse((ROOT / 'release_web.py').read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'public_response')
+        namespace = {'HTTPError': HTTPError, 'URLError': URLError, 'time': time}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<public_response>', 'exec'), namespace)
+        response = object()
+        for error in (HTTPError('url', 502, 'upstream', {}, None), HTTPError('url', 503, 'upstream', {}, None),
+                      HTTPError('url', 504, 'upstream', {}, None), URLError(ConnectionRefusedError()),
+                      ConnectionResetError(), TimeoutError()):
+            with self.subTest(transient=type(error).__name__), patch.object(time, 'sleep'):
+                opener = namespace['urlopen'] = Mock(side_effect=[error, response])
+                self.assertIs(namespace['public_response']('url', timeout=30), response)
+                self.assertEqual(opener.call_count, 2)
+        for error in (HTTPError('url', 403, 'denied', {}, None), URLError(ssl.SSLCertVerificationError()),
+                      OSError('unknown transport failure'), ValueError('invalid response')):
+            with self.subTest(permanent=type(error).__name__), patch.object(time, 'sleep'):
+                opener = namespace['urlopen'] = Mock(side_effect=error)
+                with self.assertRaises(type(error)):
+                    namespace['public_response']('url', timeout=30)
+                self.assertEqual(opener.call_count, 1)
+                if isinstance(error, HTTPError): error.close()
+        with patch.object(time, 'sleep'):
+            opener = namespace['urlopen'] = Mock(side_effect=HTTPError('url', 502, 'upstream', {}, None))
+            with self.assertRaises(HTTPError):
+                namespace['public_response']('url', timeout=30)
+            self.assertEqual(opener.call_count, 10)
+            opener.side_effect.close()
+        with patch.object(time, 'sleep'), patch.object(time, 'monotonic', side_effect=[0, 0, 30]):
+            error = HTTPError('url', 502, 'upstream', {}, None)
+            opener = namespace['urlopen'] = Mock(side_effect=error)
+            with self.assertRaises(HTTPError):
+                namespace['public_response']('url', timeout=30)
+            self.assertEqual(opener.call_count, 1)
+            error.close()
+        import io
+        import re
+        from urllib.parse import urljoin
+        from urllib.request import Request
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'http_bundle')
+        namespace.update({'public_url': 'https://gym.invalid', 'Request': Request, 'urljoin': urljoin, 're': re})
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<http_bundle>', 'exec'), namespace)
+        login = io.BytesIO(b'<script src="/static/node/@wger-project/react-components/build/main.abc123.js"></script>')
+        bundle = io.BytesIO(b'wrong bundle')
+        bundle.headers = {'Date': 'today', 'Last-Modified': 'yesterday'}
+        namespace['public_response'] = Mock(side_effect=[login, bundle])
+        with self.assertRaisesRegex(OSError, 'does not match staged release'):
+            namespace['http_bundle'](b'correct bundle')
+        self.assertEqual(namespace['public_response'].call_count, 2)
+
     def test_preparation_extracts_the_compose_image(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory).resolve()
@@ -84,22 +137,48 @@ args = sys.argv[1:]
 with Path(os.environ["DOCKER_LOG"]).open("a") as log: log.write(json.dumps(args) + "\\n")
 proxy = Path(os.environ['DOCKER_LOG']).with_suffix('.proxy')
 if 'up' in args and ('web' in args or 'powersync' in args): proxy.write_text('stale')
-if args[-3:] == ['nginx', '-s', 'reload']: proxy.write_text('ready')
+if args[-3:] == ['nginx', '-s', 'reload']:
+    proxy.write_text('ready')
+    proxy.with_suffix('.warming').touch()
 fault=os.environ.get('RELEASE_FAULT','')
 if fault=='double-storage' and 'exec(sys.stdin.read())' in ' '.join(args):
     print('storage setup rejected',file=sys.stderr);sys.exit(7)
-if fault.startswith('double') and 'migrate' in args:
+if fault.startswith('double') and 'migrate' in args and '--check' not in args:
+    proxy.with_suffix('.rollback-failed').unlink(missing_ok=True)
     print('release migration rejected',file=sys.stderr);sys.exit(9)
-if fault.startswith('double') and 'up' in args and any('compose.rollback.yaml' in arg for arg in args):
+if fault.startswith('double') and 'up' in args and any('compose.rollback.yaml' in arg for arg in args) and not proxy.with_suffix('.rollback-failed').exists():
+    proxy.with_suffix('.rollback-failed').touch()
     print('rollback recreate rejected',file=sys.stderr);sys.exit(8)
 if fault=='double-dead-sync' and 'up' in args and args[-1]=='powersync':proxy.with_suffix('.dead-sync').touch()
+state_path = proxy.with_suffix('.images')
+state = json.loads(state_path.read_text()) if state_path.exists() else {}
+if 'tag' in args: state[args[-1]] = args[-2]
+if 'up' in args:
+    override = next((Path(arg) for arg in args if 'compose.rollback.yaml' in arg), None)
+    recorded = {}
+    if override:
+        service = None
+        for line in override.read_text().splitlines():
+            if line.startswith('  ') and not line.startswith('    '): service = line.strip().rstrip(':')
+            elif line.strip().startswith('image:'): recorded[service] = line.split('image:', 1)[1].strip()
+    for service in ('web','celery_worker','celery_beat','powersync'):
+        if service in args:
+            image = recorded.get(service, 'image-id-powersync' if service == 'powersync' else 'mutable-' + service)
+            state[service] = state.get(image, image)
+            if fault in ('proof-wrong-image', 'double-wrong-image') and service == 'celery_worker': state[service] = 'wrong-image'
+    state_path.write_text(json.dumps(state))
+elif 'tag' in args: state_path.write_text(json.dumps(state))
 if "compose" in args and "ps" in args and "-q" in args:
     services = args[args.index("-q") + 1:]
+    if len(services) > 1: services = sorted(services)
+    if fault in ('proof-missing-container', 'proof-multiple-containers') and 'web' in services:
+        print('' if fault == 'proof-missing-container' else 'id-web\\nid-other');sys.exit(0)
     print("\\n".join({"web":"id-web", "celery_worker":"id-worker", "celery_beat":"id-beat", "powersync":"id-powersync"}[service] for service in services))
 elif "inspect" in args:
     template, target = args[args.index("-f") + 1], args[-1]
-    if template == "{{.Image}}": print("image-" + target)
-    elif template == "{{.State.Status}}": print('exited' if target=='id-powersync' and proxy.with_suffix('.dead-sync').exists() else 'running')
+    service = {'id-web':'web','id-worker':'celery_worker','id-beat':'celery_beat','id-powersync':'powersync'}[target]
+    if template == "{{.Image}}": print(state.get(service, "image-" + target) if fault.startswith(('proof-', 'double')) else "image-" + target)
+    elif template == "{{.State.Status}}": print('exited' if (target=='id-powersync' and proxy.with_suffix('.dead-sync').exists()) or (fault=='proof-wrong-state' and service=='celery_worker' and state) else 'running')
     else: print("healthy")
 elif any("stored_name" in arg for arg in args):
     manifest = json.loads(Path(os.environ["STATIC_MANIFEST"]).read_text())
@@ -109,7 +188,25 @@ elif "compose" in args and "cp" in args:
     source, destination = args[index + 1:index + 3]
     relative = source.removeprefix("nginx:/wger/static/")
     Path(destination).write_bytes((Path(os.environ["STATIC_ROOT"]) / relative).read_bytes())
-elif "showmigrations" in args: print("[X] manager.0029")
+elif 'showmigrations' in args or any('MigrationRecorder' in arg for arg in args):
+    restored = any('compose.rollback.yaml' in arg for arg in args)
+    rows = [['manager','0029'], ['exercises','0040']]
+    if restored and fault.startswith('proof-'):
+        rows.reverse()
+        if fault == 'proof-missing': rows.pop()
+        if fault == 'proof-extra': rows.append(['removed_app','0001_absent_from_image'])
+        if fault == 'proof-duplicate': rows.append(rows[0])
+        if fault == 'proof-malformed-row': rows.append(['manager', 30])
+    if 'showmigrations' in args:
+        if fault.startswith('proof-'): print('2026-09-25 12:00:0' + str(int(restored)) + ' AXES startup')
+        print('\\n'.join('[X] ' + str(app) + '.' + str(name) for app, name in rows))
+    else:
+        print('2026-09-25 12:00:0' + str(int(restored)) + ' AXES startup')
+        print('WGER_SCHEMA_BEGIN')
+        print('invalid-json' if restored and fault == 'proof-malformed-json' else json.dumps(rows))
+        if not (restored and fault == 'proof-missing-end'): print('WGER_SCHEMA_END')
+elif fault == 'proof-pending' and 'migrate' in args and '--check' in args:
+    print('pending migration', file=sys.stderr);sys.exit(1)
 elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
 elif "config" in args and "--format" in args:
     services={name:{} for name in ('web','celery_worker','celery_beat','powersync','db','cache','nginx')}
@@ -140,6 +237,10 @@ elif "sha256sum" in args:
                     def do_GET(self):
                         if docker_log.with_suffix('.proxy').read_text() != 'ready':
                             self.send_error(502, 'nginx retained old upstream');return
+                        warming = docker_log.with_suffix('.warming')
+                        if warming.exists():
+                            warming.unlink()
+                            self.send_error(503, 'nginx reload is pending');return
                         self.send_response(200)
                         self.send_header('Last-Modified', 'Fri, 25 Sep 2026 00:00:00 GMT')
                         self.end_headers()
@@ -219,11 +320,39 @@ elif "sha256sum" in args:
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 recovery = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
                 self.assertTrue(any('pg_restore' in command for command in recovery))
-                self.assertTrue(any('showmigrations' in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
                 for service in ('web', 'celery_worker', 'celery_beat', 'powersync'):
                     self.assertTrue(any('up' in command and service in command and any('compose.rollback.yaml' in arg for arg in command) for command in recovery))
                 self.assertEqual(docker_log.with_suffix('.proxy').read_text(), 'ready')
                 (root / 'malformed-http').unlink()
+                (root / 'stale-http').touch()
+                for fault, error in (
+                    ('proof-noise', None),
+                    ('proof-missing', 'not the prior database schema'),
+                    ('proof-extra', 'not the prior database schema'),
+                    ('proof-duplicate', 'invalid applied migration proof'),
+                    ('proof-malformed-row', 'invalid applied migration proof'),
+                    ('proof-malformed-json', 'invalid applied migration proof'),
+                    ('proof-missing-end', 'invalid applied migration proof'),
+                    ('proof-pending', 'pending migration'),
+                    ('proof-wrong-image', 'prior image/running state: celery_worker'),
+                    ('proof-wrong-state', 'prior image/running state: celery_worker'),
+                    ('proof-missing-container', 'exactly one running container: web'),
+                    ('proof-multiple-containers', 'exactly one running container: web'),
+                ):
+                    with self.subTest(rollback_proof=fault):
+                        docker_log.with_suffix('.images').unlink(missing_ok=True)
+                        outcome = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env={**staged_env, 'RELEASE_FAULT': fault}, text=True, capture_output=True)
+                        self.assertNotEqual(outcome.returncode, 0)
+                        if error:
+                            self.assertIn(error, outcome.stderr)
+                            self.assertNotIn('exact images restored', outcome.stderr)
+                        else:
+                            self.assertIn('exact images restored', outcome.stderr)
+                            restored_images = json.loads(docker_log.with_suffix('.images').read_text())
+                            self.assertEqual({service: restored_images[service] for service in ('web', 'celery_worker', 'celery_beat', 'powersync')},
+                                             {'web':'image-id-web', 'celery_worker':'image-id-worker', 'celery_beat':'image-id-beat', 'powersync':'image-id-powersync'})
+                docker_log.with_suffix('.images').unlink(missing_ok=True)
+                (root / 'stale-http').unlink()
                 (deploy / 'settings-main.py').mkdir()
                 staged = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertEqual(staged.returncode, 0, staged.stderr)
@@ -257,17 +386,25 @@ elif "sha256sum" in args:
                     self.assertFalse(any('stop' in command or 'up' in command for command in attempts))
                     target.unlink()
                     target.write_bytes(original)
+                docker_log.with_suffix('.images').unlink(missing_ok=True)
                 double = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double'},text=True,capture_output=True)
                 self.assertNotEqual(double.returncode,0)
                 self.assertIn('release migration rejected',double.stderr)
                 self.assertIn('rollback recreate rejected',double.stderr)
                 self.assertIn('previous compose running; public login 200',double.stderr)
                 self.assertEqual(docker_log.with_suffix('.proxy').read_text(),'ready')
+                self.assertEqual(json.loads(docker_log.with_suffix('.images').read_text())['celery_worker'], 'image-id-worker')
+                docker_log.with_suffix('.images').unlink(missing_ok=True)
+                wrong = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double-wrong-image'},text=True,capture_output=True)
+                self.assertIn('final restore did not recover prior image/running state: celery_worker', wrong.stderr)
+                self.assertNotIn('previous compose running;', wrong.stderr)
+                docker_log.with_suffix('.images').unlink(missing_ok=True)
                 storage = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double-storage'},text=True,capture_output=True)
                 self.assertNotEqual(storage.returncode,0)
                 self.assertIn('storage setup rejected',storage.stderr)
                 self.assertNotIn('previous compose running;',storage.stderr)
                 self.assertEqual(docker_log.with_suffix('.proxy').read_text(),'ready')
+                docker_log.with_suffix('.images').unlink(missing_ok=True)
                 dead = subprocess.run([sys.executable,str(ROOT/'release_web.py')],env={**staged_env,'RELEASE_FAULT':'double-dead-sync'},text=True,capture_output=True)
                 self.assertNotEqual(dead.returncode,0)
                 self.assertIn('final restore did not recover prior image/running state: powersync',dead.stderr)

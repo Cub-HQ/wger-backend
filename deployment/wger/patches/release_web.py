@@ -13,6 +13,7 @@ import hashlib
 import json
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 import signal
 
 
@@ -28,8 +29,26 @@ config_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager
 public_url = os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098').rstrip('/')
 
 
+def public_response(request, timeout):
+    # nginx reload acknowledges the signal before workers switch upstreams.
+    deadline = time.monotonic() + timeout
+    for attempt in range(10):
+        try:
+            return urlopen(request, timeout=max(0.001, deadline - time.monotonic()))
+        except HTTPError as error:
+            if error.code not in {502, 503, 504} or attempt == 9 or time.monotonic() >= deadline:
+                raise
+            error.close()
+        except (URLError, ConnectionResetError, ConnectionRefusedError, TimeoutError) as error:
+            reason = error.reason if isinstance(error, URLError) else error
+            if (not isinstance(reason, (ConnectionResetError, ConnectionRefusedError, TimeoutError))
+                    or attempt == 9 or time.monotonic() >= deadline):
+                raise
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+
+
 def http_bundle(expected):
-    with urlopen(Request(public_url + '/en-au/user/login', headers={'Cache-Control': 'no-cache'}), timeout=30) as response:
+    with public_response(Request(public_url + '/en-au/user/login', headers={'Cache-Control': 'no-cache'}), timeout=30) as response:
         html = response.read().decode('utf-8')
     names = re.findall(r'''(?:src=["'])([^"']*/static/node/@wger-project/react-components/build/main\.[0-9a-f]+\.js)(?:["'])''', html)
     if not names:
@@ -37,7 +56,7 @@ def http_bundle(expected):
     url = urljoin(public_url + '/', names[-1])
     if not url.startswith(public_url + '/'):
         raise OSError('browser bundle escaped public origin')
-    with urlopen(Request(url, headers={'Cache-Control': 'no-cache', 'Accept-Encoding': 'identity'}), timeout=60) as response:
+    with public_response(Request(url, headers={'Cache-Control': 'no-cache', 'Accept-Encoding': 'identity'}), timeout=60) as response:
         actual = response.read()
         date, modified = response.headers.get('Date'), response.headers.get('Last-Modified')
     normalized = re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', b'sourceMappingURL=main.js.map', actual)
@@ -94,6 +113,48 @@ def compose(*args, capture=False, files=()):
     for file in files:
         command.extend(('-f', str(file)))
     return run(*command, *args, capture=capture)
+
+
+def container_id(service, files=()):
+    ids = compose('ps', '-q', service, capture=True, files=files).splitlines()
+    if len(ids) != 1 or not ids[0].strip():
+        raise RuntimeError('expected exactly one running container: ' + service)
+    return ids[0]
+
+
+def applied_migrations(files=()):
+    script = (
+        'import json; from django.db.migrations.recorder import MigrationRecorder; '
+        'print("WGER_SCHEMA_BEGIN"); '
+        'print(json.dumps(list(MigrationRecorder.Migration.objects.values_list("app", "name")))); '
+        'print("WGER_SCHEMA_END")'
+    )
+    lines = compose('exec', '-T', 'web', 'python3', 'manage.py', 'shell', '-c', script, capture=True, files=files).splitlines()
+    try:
+        start = lines.index('WGER_SCHEMA_BEGIN')
+        if (lines.count('WGER_SCHEMA_BEGIN') != 1 or lines.count('WGER_SCHEMA_END') != 1
+                or lines.index('WGER_SCHEMA_END') != start + 2):
+            raise ValueError
+        rows = json.loads(lines[start + 1])
+        if (not isinstance(rows, list) or not rows
+                or any(not isinstance(row, list) or len(row) != 2
+                       or any(not isinstance(value, str) or not value.strip() for value in row) for row in rows)):
+            raise ValueError
+        schema = {tuple(row) for row in rows}
+        if len(schema) != len(rows):
+            raise ValueError
+        return schema
+    except (ValueError, IndexError):
+        raise RuntimeError('invalid applied migration proof') from None
+
+
+def verify_images(images, files=(), prefix='rollback'):
+    for service, image in images.items():
+        container = container_id(service, files)
+        actual_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True)
+        actual_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', container, capture=True)
+        if actual_image != image or actual_state != 'running':
+            raise RuntimeError(prefix + ' restore did not recover prior image/running state: ' + service)
 
 
 def setup_powersync_storage():
@@ -158,18 +219,14 @@ except ValueError as error:
     raise SystemExit(str(error)) from None
 db_user = database_environment['POSTGRES_USER']
 db_name = database_environment['POSTGRES_DB']
-container_ids = compose('ps', '-q', *services, capture=True).splitlines()
-if len(container_ids) != len(services):
-    raise SystemExit('web and both workers must be running before release')
-powersync_id = compose('ps', '-q', 'powersync', capture=True)
-if not powersync_id:
-    raise SystemExit('PowerSync must be running before release')
+container_ids = {service: container_id(service) for service in services}
+powersync_id = container_id('powersync')
 prior_powersync_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', powersync_id, capture=True)
 prior_powersync_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', powersync_id, capture=True)
 if prior_powersync_state != 'running':
     raise SystemExit('PowerSync must be running before release')
-prior_images = {service: run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True) for service, container in zip(services, container_ids)}
-prior_schema = compose('exec', '-T', 'web', 'python3', 'manage.py', 'showmigrations', '--plan', capture=True)
+prior_images = {service: run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True) for service, container in container_ids.items()}
+prior_schema = applied_migrations()
 # Non-web service/topology changes have no reviewed activation in this route.
 before_config = rendered_config(deploy_dir / 'compose.yaml')
 verify_binds(before_config)
@@ -225,7 +282,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             shutil.copy2((source_deploy or deploy_dir) / 'overrides' / f'{name}.next', deploy_dir / 'overrides' / name)
         compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services)
         compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--no-input')
-        wait_healthy(compose('ps', '-q', 'web', capture=True))
+        wait_healthy(container_id('web'))
         logical_bundle = 'node/@wger-project/react-components/build/main.js'
         manifest_lookup = f'from django.contrib.staticfiles.storage import staticfiles_storage; print(staticfiles_storage.stored_name({logical_bundle!r}))'
         served_name = compose('exec', '-T', 'web', 'python3', 'manage.py', 'shell', '-c', manifest_lookup, capture=True).splitlines()[-1]
@@ -240,7 +297,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         if re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', map_marker, actual) != expected:
             raise subprocess.CalledProcessError(1, ('verify', 'browser-bundle'))
         compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync')
-        resumed = compose('ps', '-q', 'powersync', capture=True)
+        resumed = container_id('powersync')
         resumed_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', resumed, capture=True)
         resumed_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', resumed, capture=True)
         if resumed_image != prior_powersync_image or resumed_state != prior_powersync_state:
@@ -271,37 +328,37 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
                 compose('exec', '-T', 'db', 'createdb', '-U', db_user, db_name)
                 stream_from(database_backup, 'docker', '-H', docker_host, 'compose', '-f', str(deploy_dir / 'compose.yaml'), 'exec', '-T', 'db', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-U', db_user, '-d', db_name)
             compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services, files=(rollback_override,))
-            wait_healthy(compose('ps', '-q', 'web', capture=True, files=(rollback_override,)))
-            restored_schema = compose('exec', '-T', 'web', 'python3', 'manage.py', 'showmigrations', '--plan', capture=True, files=(rollback_override,))
+            wait_healthy(container_id('web', files=(rollback_override,)))
+            verify_images(prior_images, files=(rollback_override,))
+            restored_schema = applied_migrations(files=(rollback_override,))
             if snapshot_complete and restored_schema != prior_schema:
                 raise RuntimeError('rollback restored services but not the prior database schema')
+            compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--check', files=(rollback_override,))
             setup_powersync_storage()
             compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync', files=(rollback_override,))
-            resumed = compose('ps', '-q', 'powersync', capture=True, files=(rollback_override,))
+            resumed = container_id('powersync', files=(rollback_override,))
             resumed_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', resumed, capture=True)
             resumed_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', resumed, capture=True)
             if resumed_image != prior_powersync_image or resumed_state != prior_powersync_state:
                 raise RuntimeError('rollback restored the app but not exact PowerSync image/state')
             compose('exec', '-T', 'nginx', 'nginx', '-t')
             compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
+            with public_response(public_url + '/en-au/user/login', timeout=30) as response:
+                if response.status != 200:
+                    raise RuntimeError('rollback public login did not return 200')
         except Exception as rollback_error:
             try:
-                verify_binds(rendered_config(deploy_dir / 'compose.yaml'))
-                compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services)
-                wait_healthy(compose('ps', '-q', 'web', capture=True))
+                verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)))
+                compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services, files=(rollback_override,))
+                wait_healthy(container_id('web', files=(rollback_override,)))
                 try:
                     setup_powersync_storage()
-                    compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync')
-                    for service, image in rollback_images.items():
-                        container = compose('ps', '-q', service, capture=True)
-                        actual_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container, capture=True)
-                        actual_state = run('docker', '-H', docker_host, 'inspect', '-f', '{{.State.Status}}', container, capture=True)
-                        if actual_image != image or actual_state != 'running':
-                            raise RuntimeError('final restore did not recover prior image/running state: ' + service)
+                    compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync', files=(rollback_override,))
+                    verify_images(rollback_images, files=(rollback_override,), prefix='final')
                 finally:
                     compose('exec', '-T', 'nginx', 'nginx', '-t')
                     compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
-                with urlopen(public_url + '/en-au/user/login', timeout=30) as response:
+                with public_response(public_url + '/en-au/user/login', timeout=30) as response:
                     if response.status != 200:raise RuntimeError('fallback public login did not return 200')
                 fallback = 'previous compose running; public login 200; database recovery unproven'
             except Exception as fallback_error:
