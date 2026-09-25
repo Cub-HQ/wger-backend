@@ -35,7 +35,7 @@ def web_override_mounts(work):
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise RuntimeError(f'restored bind source has wrong type: {path}')
         if not path.exists():
-            if source in ('overrides/react-main.js', 'overrides/template.html'):
+            if source in ('overrides/react-main.js', 'overrides/template.html', 'settings-main.py'):
                 raise RuntimeError(f'required restored bind source is missing: {path}')
             continue
         mounts.append(str(path) + ':' + target + ':ro')

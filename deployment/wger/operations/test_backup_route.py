@@ -171,8 +171,8 @@ class BackupRouteTest(unittest.TestCase):
                     self.assertEqual(captured.extractfile('compose.yaml').read(), name.encode())
                     self.assertEqual(captured.extractfile('settings-main.py').read(), b"LANGUAGE_CODE = 'en-au'\n")
 
-    def test_restore_requires_existing_browser_and_template_overrides(self):
-        for missing in ('overrides/react-main.js', 'overrides/template.html'):
+    def test_restore_requires_existing_browser_template_and_settings_overrides(self):
+        for missing in ('overrides/react-main.js', 'overrides/template.html', 'settings-main.py'):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
                 root = pathlib.Path(directory)
                 for source, _ in REVIEWED_MOUNTS:
@@ -204,43 +204,39 @@ class BackupRouteTest(unittest.TestCase):
             self.assertEqual(environment['DJANGO_DB_USER'], 'restore')
 
     def test_pre_release_snapshot_and_restore_skip_not_yet_installed_date_overrides(self):
-        for settings_present in (False, True):
-            with self.subTest(settings_present=settings_present), tempfile.TemporaryDirectory() as directory:
-                root = pathlib.Path(directory)
-                deploy = root / 'deploy'
-                (deploy / 'config').mkdir(parents=True)
-                (deploy / 'overrides').mkdir()
-                (deploy / 'compose.yaml').write_text('services: {}\n')
-                (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
-                (deploy / 'overrides' / 'react-main.js').write_text('browser bundle\n')
-                (deploy / 'overrides' / 'template.html').write_text('page template\n')
-                if settings_present:
-                    (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-gb'\n")
-                archive = root / 'deployment.tar'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            deploy = root / 'deploy'
+            (deploy / 'config').mkdir(parents=True)
+            (deploy / 'overrides').mkdir()
+            (deploy / 'compose.yaml').write_text('services: {}\n')
+            (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
+            (deploy / 'overrides' / 'react-main.js').write_text('browser bundle\n')
+            (deploy / 'overrides' / 'template.html').write_text('page template\n')
+            (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-gb'\n")
+            archive = root / 'deployment.tar'
 
-                backup.write_deployment_archive(archive, deploy=deploy)
+            backup.write_deployment_archive(archive, deploy=deploy)
 
-                restored = root / 'restored'
-                restored.mkdir()
-                with tarfile.open(archive) as captured:
-                    captured.extractall(restored, filter='data')
-                    names = set(captured.getnames())
-                self.assertTrue({'compose.yaml', 'config/private.env', 'overrides/react-main.js'} <= names)
-                self.assertEqual('settings-main.py' in names, settings_present)
-                self.assertTrue({
-                    'formats/en_AU/formats.py',
-                    'overrides/history-overview.html',
-                    'overrides/api-key.html',
-                    'overrides/pdf.py',
-                }.isdisjoint(names))
-                expected = (
-                    str(restored / 'overrides/react-main.js') + ':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro',
-                    str(restored / 'overrides/template.html') + ':/home/wger/src/wger/core/templates/template.html:ro',
-                )
-                if settings_present:
-                    expected += (str(restored / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro',)
-                    self.assertEqual((restored / 'settings-main.py').read_text(), "LANGUAGE_CODE = 'en-gb'\n")
-                self.assertEqual(restore_drill.web_override_mounts(restored), expected)
+            restored = root / 'restored'
+            restored.mkdir()
+            with tarfile.open(archive) as captured:
+                captured.extractall(restored, filter='data')
+                names = set(captured.getnames())
+            self.assertTrue({'compose.yaml', 'config/private.env', 'overrides/react-main.js', 'overrides/template.html', 'settings-main.py'} <= names)
+            self.assertTrue({
+                'formats/en_AU/formats.py',
+                'overrides/history-overview.html',
+                'overrides/api-key.html',
+                'overrides/pdf.py',
+            }.isdisjoint(names))
+            expected = (
+                str(restored / 'overrides/react-main.js') + ':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro',
+                str(restored / 'overrides/template.html') + ':/home/wger/src/wger/core/templates/template.html:ro',
+                str(restored / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro',
+            )
+            self.assertEqual((restored / 'settings-main.py').read_text(), "LANGUAGE_CODE = 'en-gb'\n")
+            self.assertEqual(restore_drill.web_override_mounts(restored), expected)
 
     def test_snapshot_and_restore_keep_all_australian_date_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -303,7 +299,7 @@ class BackupRouteTest(unittest.TestCase):
                 with self.subTest(source=source, kind=kind), tempfile.TemporaryDirectory() as directory:
                     root = pathlib.Path(directory)
                     work = root / 'restored'
-                    for required in ('overrides/react-main.js', 'overrides/template.html'):
+                    for required in ('overrides/react-main.js', 'overrides/template.html', 'settings-main.py'):
                         if required != source:
                             member = work / required
                             member.parent.mkdir(parents=True, exist_ok=True)
