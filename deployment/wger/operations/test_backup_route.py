@@ -155,6 +155,54 @@ class BackupRouteTest(unittest.TestCase):
 
     def test_destination_is_established_private_directory_only(self):
         with self.assertRaises(ValueError):backup.snapshot('/tmp/not-approved')
+    def test_archive_default_tracks_current_deployment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name in ('first', 'second'):
+                deploy = root / name
+                (deploy / 'config').mkdir(parents=True)
+                (deploy / 'overrides').mkdir()
+                (deploy / 'compose.yaml').write_text(name)
+                (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-au'\n")
+                archive = root / (name + '.tar')
+                with patch.object(backup, 'DEPLOY', deploy):
+                    backup.write_deployment_archive(archive)
+                with tarfile.open(archive) as captured:
+                    self.assertEqual(captured.extractfile('compose.yaml').read(), name.encode())
+                    self.assertEqual(captured.extractfile('settings-main.py').read(), b"LANGUAGE_CODE = 'en-au'\n")
+
+    def test_restore_requires_existing_browser_and_template_overrides(self):
+        for missing in ('overrides/react-main.js', 'overrides/template.html'):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                for source, _ in REVIEWED_MOUNTS:
+                    if source != missing:
+                        path = root / source
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text('reviewed file')
+                with self.assertRaisesRegex(RuntimeError, 'required restored bind source is missing'):
+                    restore_drill.web_override_mounts(root)
+
+    def test_restore_selects_postgresql_after_removing_powersync_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            deploy = root / 'deploy'
+            (deploy / 'config').mkdir(parents=True)
+            (deploy / 'overrides').mkdir()
+            (deploy / 'compose.yaml').write_text('services: {}')
+            (deploy / 'config/private.env').write_text('PS_DATABASE_URI=postgres://private\n')
+            snapshot = root / 'snapshot'
+            snapshot.mkdir()
+            backup.write_deployment_archive(snapshot / 'deployment.tar', deploy=deploy)
+            (snapshot / 'manifest.json').write_text('{"files": {}}')
+            with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch.object(restore_drill, 'run', side_effect=RuntimeError('stop before Docker')):
+                with self.assertRaisesRegex(RuntimeError, 'stop before Docker'):
+                    restore_drill.main()
+            environment = dict(line.split('=', 1) for line in next(root.glob('wger-restore-*/restore.env')).read_text().splitlines())
+            self.assertEqual(environment['DJANGO_DB_ENGINE'], 'django.db.backends.postgresql')
+            self.assertNotIn('PS_DATABASE_URI', environment)
+            self.assertEqual(environment['DJANGO_DB_USER'], 'restore')
+
     def test_pre_release_snapshot_and_restore_skip_not_yet_installed_date_overrides(self):
         for settings_present in (False, True):
             with self.subTest(settings_present=settings_present), tempfile.TemporaryDirectory() as directory:
@@ -165,6 +213,7 @@ class BackupRouteTest(unittest.TestCase):
                 (deploy / 'compose.yaml').write_text('services: {}\n')
                 (deploy / 'config' / 'private.env').write_text('PRIVATE=yes\n')
                 (deploy / 'overrides' / 'react-main.js').write_text('browser bundle\n')
+                (deploy / 'overrides' / 'template.html').write_text('page template\n')
                 if settings_present:
                     (deploy / 'settings-main.py').write_text("LANGUAGE_CODE = 'en-gb'\n")
                 archive = root / 'deployment.tar'
@@ -180,13 +229,13 @@ class BackupRouteTest(unittest.TestCase):
                 self.assertEqual('settings-main.py' in names, settings_present)
                 self.assertTrue({
                     'formats/en_AU/formats.py',
-                    'overrides/template.html',
                     'overrides/history-overview.html',
                     'overrides/api-key.html',
                     'overrides/pdf.py',
                 }.isdisjoint(names))
                 expected = (
                     str(restored / 'overrides/react-main.js') + ':/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro',
+                    str(restored / 'overrides/template.html') + ':/home/wger/src/wger/core/templates/template.html:ro',
                 )
                 if settings_present:
                     expected += (str(restored / 'settings-main.py') + ':/home/wger/src/settings/main.py:ro',)
@@ -254,8 +303,13 @@ class BackupRouteTest(unittest.TestCase):
                 with self.subTest(source=source, kind=kind), tempfile.TemporaryDirectory() as directory:
                     root = pathlib.Path(directory)
                     work = root / 'restored'
+                    for required in ('overrides/react-main.js', 'overrides/template.html'):
+                        if required != source:
+                            member = work / required
+                            member.parent.mkdir(parents=True, exist_ok=True)
+                            member.write_text('reviewed override')
                     path = work / source
-                    path.parent.mkdir(parents=True)
+                    path.parent.mkdir(parents=True, exist_ok=True)
                     if kind == 'directory':
                         path.mkdir()
                     else:
@@ -263,7 +317,7 @@ class BackupRouteTest(unittest.TestCase):
                         if kind == 'symlink':
                             target.write_text('regular file\n')
                         path.symlink_to(target)
-                    with self.assertRaises(RuntimeError):
+                    with self.assertRaisesRegex(RuntimeError, 'restored bind source has wrong type'):
                         restore_drill.web_override_mounts(work)
 
 

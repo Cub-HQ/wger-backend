@@ -53,6 +53,17 @@ if text.count("options = options ?? DateTime.DATE_MED;") != 1:
     raise SystemExit(f"Expected one Luxon date option anchor in {dates}")
 text = text.replace("options = options ?? DateTime.DATE_MED;", "options = options ?? DateTime.DATE_SHORT;")
 target.write_text(text)
+for function in ("dateTimeToLocale", "dateToLocale"):
+    replace_in_function(
+        dates, function,
+        "return dateTime.toLocaleString(locale ? [locale] : [], options);",
+        "return dateTime.toLocaleString(locale ? [locale] : [], { ...options, year: 'numeric', month: '2-digit', day: '2-digit' });",
+    )
+replace_in_function(
+    dates, "luxonDateTimeToLocale",
+    "return dateTime.toLocaleString(options, { locale: locale });",
+    "return dateTime.toLocaleString({ ...options, year: 'numeric', month: '2-digit', day: '2-digit' }, { locale: locale });",
+)
 replace(
     "src/components/Dashboard/MeasurementCard.tsx",
     "import { makeLink, WgerLink } from \"@/core/lib/url\";",
@@ -111,6 +122,13 @@ replace(
             expect(dateTimeToLocale(date).startsWith('21/09/2026')).toBe(true);
             expect(dateToLocale(date, 'en-US', { year: 'numeric', month: '2-digit', day: '2-digit' })).toBe('21/09/2026');
             expect(luxonDateTimeToLocale(DateTime.fromJSDate(date))).toBe('21/09/2026');
+            const early = new Date(2026, 0, 5, 15, 24);
+            expect(dateToLocale(early, 'en-US', { month: '2-digit', day: '2-digit' })).toBe('05/01/2026');
+            expect(dateToLocale(early, 'en-US', { year: '2-digit', month: 'long', day: 'numeric' })).toBe('05/01/2026');
+            expect(dateTimeToLocale(early, 'en-US', { year: '2-digit', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).startsWith('05/01/2026, ')).toBe(true);
+            expect(luxonDateTimeToLocale(DateTime.fromJSDate(early))).toBe('05/01/2026');
+            expect(luxonDateTimeToLocale(DateTime.fromJSDate(early), 'en-US', DateTime.DATETIME_SHORT).startsWith('05/01/2026, ')).toBe(true);
+            expect(dateToYYYYMMDD(early)).toBe('2026-01-05');
         });
 """,
 )

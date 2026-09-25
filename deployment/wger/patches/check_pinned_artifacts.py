@@ -37,6 +37,7 @@ class PinnedArtifactsTest(unittest.TestCase):
             ], cwd=root, check=True)
             for patch in ("patch_australian_dates.py", "patch_progression_chart.py"):
                 subprocess.run([sys.executable, str(PATCH_DIR / patch), str(root)], check=True)
+            subprocess.run(["npm", "test", "--", "src/core/lib/date.test.ts"], cwd=root, check=True)
             subprocess.run(["npm", "run", "typecheck"], cwd=root, check=True)
             subprocess.run(["npm", "run", "build"], cwd=root, check=True)
             australian_digest = re.search(

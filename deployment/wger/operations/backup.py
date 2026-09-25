@@ -94,7 +94,8 @@ def encrypt_snapshot(root, output, passphrase_file, *, runner=subprocess.run):
 
 def media_inventory():
     return docker('run','--rm','-v','fitness-wger_media:/media:ro','alpine:3.22','sh','-c','cd /media && find . -type f -exec sha256sum {} + | sort')
-def write_deployment_archive(path, *, deploy=DEPLOY):
+def write_deployment_archive(path, *, deploy=None):
+    deploy = DEPLOY if deploy is None else pathlib.Path(deploy)
     required = ('compose.yaml', 'config', 'overrides')
     optional = ('settings-main.py', 'formats/en_AU/formats.py')
     members = list(required)

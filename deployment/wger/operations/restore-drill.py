@@ -35,6 +35,8 @@ def web_override_mounts(work):
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise RuntimeError(f'restored bind source has wrong type: {path}')
         if not path.exists():
+            if source in ('overrides/react-main.js', 'overrides/template.html'):
+                raise RuntimeError(f'required restored bind source is missing: {path}')
             continue
         mounts.append(str(path) + ':' + target + ':ro')
     return tuple(mounts)
@@ -57,6 +59,7 @@ def main():
         if line and not line.startswith('#') and '=' in line:
             k,v=line.split('=',1);config[k]=v
     password=secrets.token_urlsafe(36)
+    config['DJANGO_DB_ENGINE'] = 'django.db.backends.postgresql'
     config.update(POSTGRES_USER='restore',POSTGRES_PASSWORD=password,POSTGRES_DB='wger',DJANGO_DB_USER='restore',DJANGO_DB_PASSWORD=password,DJANGO_DB_DATABASE='wger',DJANGO_DB_HOST=name+'-db',DJANGO_DB_PORT='5432',DJANGO_CACHE_BACKEND='django.core.cache.backends.locmem.LocMemCache',DJANGO_CACHE_LOCATION='restore-only',USE_CELERY='False',ENABLE_EMAIL='False',DJANGO_PERFORM_MIGRATIONS='True',SYNC_EXERCISES_ON_STARTUP='False',SYNC_EXERCISE_IMAGES_CELERY='False',SYNC_EXERCISES_CELERY='False',SYNC_INGREDIENTS_CELERY='False',SITE_URL=f'http://127.0.0.1:{args.port}',STATIC_URL='/static/',MEDIA_URL='/media/',CSRF_TRUSTED_ORIGINS=f'http://127.0.0.1:{args.port}',DJANGO_CLEAR_STATIC_FIRST='False',DJANGO_DEBUG='False')
     for key in list(config):
         if key.startswith('PS_') or key.startswith('JWT_') or key in ['CELERY_BROKER','CELERY_BACKEND']:config.pop(key)

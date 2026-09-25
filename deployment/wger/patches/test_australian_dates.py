@@ -202,12 +202,14 @@ console.log(JSON.stringify([
     dateTimeToLocale(date).split(',')[0],
     luxonDateTimeToLocale(DateTime.fromJSDate(date)),
     dateToLocale(date, 'en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }),
+    dateToLocale(new Date(2026, 0, 5), 'en-US', { month: '2-digit', day: '2-digit' }),
+    luxonDateTimeToLocale(DateTime.fromJSDate(new Date(2026, 0, 5)), 'en-US', { year: '2-digit', month: 'long', day: 'numeric' }),
 ]));
 '''
         output = subprocess.run(
             ["node", "-e", javascript], check=True, text=True, capture_output=True
         )
-        self.assertEqual(json.loads(output.stdout), ["21/09/2026"] * 4)
+        self.assertEqual(json.loads(output.stdout), ["21/09/2026"] * 4 + ["05/01/2026"] * 2)
         self.assertEqual(source.count("locale = DISPLAY_LOCALE;"), 3)
         self.assertIn("locale = locale ?? i18n.language;", time_only)
         self.assertNotIn("locale = DISPLAY_LOCALE;", time_only)
