@@ -24,7 +24,7 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 
 source_deploy = Path(os.environ['WGER_SOURCE_DEPLOY']).resolve() if os.environ.get('WGER_SOURCE_DEPLOY') else None
-config_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
+config_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
 public_url = os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098').rstrip('/')
 
 
@@ -118,7 +118,9 @@ def verify_binds(config, staged=False):
                 continue
             path = Path(mount['source'])
             file_targets = {'/home/wger/src/settings/main.py', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js',
-                            '/home/wger/src/wger/core/templates/template.html', '/config/powersync.yaml', '/config/sync_rules.yaml', '/etc/nginx/conf.d/default.conf'}
+                            '/home/wger/src/wger/core/templates/template.html', '/home/wger/src/wger/exercises/templates/history/overview.html',
+                            '/home/wger/src/wger/core/templates/user/api_key.html', '/home/wger/src/wger/utils/pdf.py',
+                            '/config/powersync.yaml', '/config/sync_rules.yaml', '/etc/nginx/conf.d/default.conf'}
             directory_targets = {'/home/wger/media', '/home/wger/static', '/wger/media', '/wger/static'}
             if mount['target'] not in file_targets | directory_targets:
                 raise RuntimeError('unreviewed bind target type: ' + mount['target'])
@@ -148,7 +150,7 @@ expected_host = f'unix://{Path.home()}/.colima/default/docker.sock'
 if docker_host != expected_host or not Path(docker_host.removeprefix('unix://')).is_socket():
     raise SystemExit('Docker is not the reviewed Colima socket')
 
-names = ('react-main.js', 'template.html', 'corresponding-source.json')
+names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json')
 for name in names:
     if not ((source_deploy or deploy_dir) / 'overrides' / f'{name}.next').is_file():
         raise SystemExit(f'missing staged override: {name}.next')
@@ -219,6 +221,8 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             current = deploy_dir / name
             if current.is_symlink():
                 raise SystemExit('DEPLOY_MISSING: symlink deployment target')
+            if current.parent.exists() and not current.parent.is_dir():
+                raise SystemExit('DEPLOY_MISSING: deployment parent is not a directory')
             previous_config[name] = current.read_bytes() if current.exists() else None
     if not source_deploy:
         compose('build', *services)
@@ -228,8 +232,10 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         snapshot_complete = True
         if source_deploy:
             for name in config_names:
-                # Preserve mounted-file inode; never copy private.env or private directories.
-                shutil.copyfile(source_deploy / name, deploy_dir / name)
+                current = deploy_dir / name
+                current.parent.mkdir(parents=True, exist_ok=True)
+                # Preserve mounted-file inode when one exists; never copy private.env or private directories.
+                shutil.copyfile(source_deploy / name, current)
             compose('config', '--quiet')
         for name in names:
             shutil.copy2((source_deploy or deploy_dir) / 'overrides' / f'{name}.next', deploy_dir / 'overrides' / name)

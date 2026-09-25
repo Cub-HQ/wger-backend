@@ -25,6 +25,9 @@ class ReleaseRouteTest(unittest.TestCase):
         self.assertIn('135d8569a3eb27c9f0f74e865d56372421a61294', script)
         self.assertIn('react-main.js.next', script)
         self.assertIn('template.html.next', script)
+        self.assertIn('history-overview.html.next', script)
+        self.assertIn('api-key.html.next', script)
+        self.assertIn('pdf.py.next', script)
         self.assertNotIn('compose up', script)
     def test_release_refuses_without_both_writer_locks_and_restores_exact_runtime(self):
         wrapper = (ROOT / 'release-web.sh').read_text()
@@ -64,8 +67,10 @@ class ReleaseRouteTest(unittest.TestCase):
                 config.mkdir()
                 (deploy / 'compose.yaml').write_text('services: {}\n')
                 (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
-                for name in ('template.html', 'corresponding-source.json'):
+                for name in ('template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json'):
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
+                    if name in {'history-overview.html', 'api-key.html', 'pdf.py'}:
+                        (overrides / name).write_text(f'old {name}\n')
                 bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
                 (overrides / 'react-main.js.next').write_bytes(bundle)
                 writer, history = root / 'writer.lock', root / 'history.lock'
@@ -109,7 +114,12 @@ elif "showmigrations" in args: print("[X] manager.0029")
 elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
 elif "config" in args and "--format" in args:
     services={name:{} for name in ('web','celery_worker','celery_beat','powersync','db','cache','nginx')}
-    if fault=='missing':services['web']['volumes']=[{'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'}]
+    services['web']['volumes']=[
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/history-overview.html'),'target':'/home/wger/src/wger/exercises/templates/history/overview.html'},
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/api-key.html'),'target':'/home/wger/src/wger/core/templates/user/api_key.html'},
+        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/pdf.py'),'target':'/home/wger/src/wger/utils/pdf.py'},
+    ]
+    if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
     for arg in args:
         if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
             print('services.web.build must be a string',file=sys.stderr);sys.exit(1)
@@ -157,7 +167,7 @@ elif "sha256sum" in args:
                 self.assertNotEqual(proof['served_sha256'], proof['expected_sha256'])
                 self.assertTrue(proof['date'])
                 self.assertEqual(proof['last_modified'], 'Fri, 25 Sep 2026 00:00:00 GMT')
-                for name in ('template.html', 'corresponding-source.json'):
+                for name in ('template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json'):
                     self.assertEqual((overrides / name).read_text(), f'new {name}\n')
                 commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
                 self.assertTrue(any(str(deploy / 'compose.yaml') in command for command in map(' '.join, commands)))
@@ -165,11 +175,16 @@ elif "sha256sum" in args:
                 candidate = root / 'candidate'
                 (candidate / 'config').mkdir(parents=True)
                 (candidate / 'overrides').mkdir()
-                stage_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
+                stage_names = ('compose.yaml', 'Dockerfile', 'settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
                 for name in stage_names:
-                    (candidate / name).write_text('new ' + name)
-                    (deploy / name).write_text('old ' + name)
-                for name in ('react-main.js', 'template.html', 'corresponding-source.json'):
+                    candidate_path = candidate / name
+                    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+                    candidate_path.write_text('new ' + name)
+                    if name != 'formats/en_AU/formats.py':
+                        deploy_path = deploy / name
+                        deploy_path.parent.mkdir(parents=True, exist_ok=True)
+                        deploy_path.write_text('old ' + name)
+                for name in ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json'):
                     (candidate / 'overrides' / (name + '.next')).write_bytes((overrides / (name + '.next')).read_bytes())
                 private_before = (config / 'private.env').read_bytes()
                 staged_env = {**env, 'WGER_SOURCE_DEPLOY': str(candidate)}
@@ -178,7 +193,10 @@ elif "sha256sum" in args:
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertIn('fork release failed', rejected.stderr)
                 for name in stage_names:
-                    self.assertEqual((deploy / name).read_text(), 'old ' + name)
+                    if name == 'formats/en_AU/formats.py':
+                        self.assertFalse((deploy / name).exists())
+                    else:
+                        self.assertEqual((deploy / name).read_text(), 'old ' + name)
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 (root / 'stale-http').unlink()
                 (root / 'malformed-http').touch()
@@ -188,7 +206,10 @@ elif "sha256sum" in args:
                 self.assertNotEqual(malformed.returncode, 0)
                 self.assertIn('fork release failed', malformed.stderr)
                 for name in stage_names:
-                    self.assertEqual((deploy / name).read_text(), 'old ' + name)
+                    if name == 'formats/en_AU/formats.py':
+                        self.assertFalse((deploy / name).exists())
+                    else:
+                        self.assertEqual((deploy / name).read_text(), 'old ' + name)
                 self.assertEqual((overrides / 'react-main.js').read_bytes(), b'prior browser bundle')
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 recovery = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]

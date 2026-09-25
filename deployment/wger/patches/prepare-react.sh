@@ -29,11 +29,20 @@ docker -H "$DOCKER_HOST" cp "$EXTRACTOR:/home/wger/src/wger/core/templates/templ
 
 curl --fail --location --silent --show-error "$REACT_REPO/archive/$REACT_COMMIT.tar.gz" --output "$BUILD_DIR/react-source.tgz"
 tar -xzf "$BUILD_DIR/react-source.tgz" --strip-components=1 -C "$BUILD_DIR"
-(cd "$BUILD_DIR" && npm ci --ignore-scripts --no-audit --no-fund && python3 "$PATCH_DIR/patch_progression_chart.py" "$BUILD_DIR" && npm run typecheck && npm run build)
+(cd "$BUILD_DIR" && npm ci --ignore-scripts --no-audit --no-fund && python3 "$PATCH_DIR/patch_australian_dates.py" "$BUILD_DIR" && python3 "$PATCH_DIR/patch_progression_chart.py" "$BUILD_DIR" && npm test -- src/core/lib/date.test.ts && npm run typecheck && npm run build)
 python3 "$PATCH_DIR/patch_muscle_diagram.py" "$BUILD_DIR/build/main.js" "$DEPLOY_DIR/overrides/react-main.js.next"
 
 curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/core/templates/template.html" --output "$BUILD_DIR/template.html"
 python3 "$PATCH_DIR/patch_footer.py" "$BUILD_DIR/template.html" "$DEPLOY_DIR/overrides/template.html.next"
+
+curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/exercises/templates/history/overview.html" --output "$BUILD_DIR/history-overview.html"
+python3 "$PATCH_DIR/patch_australian_template_dates.py" history-overview "$BUILD_DIR/history-overview.html" "$DEPLOY_DIR/overrides/history-overview.html.next"
+
+curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/core/templates/user/api_key.html" --output "$BUILD_DIR/api-key.html"
+python3 "$PATCH_DIR/patch_australian_template_dates.py" api-key "$BUILD_DIR/api-key.html" "$DEPLOY_DIR/overrides/api-key.html.next"
+curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/utils/pdf.py" --output "$BUILD_DIR/pdf.py"
+python3 "$PATCH_DIR/patch_australian_pdf.py" "$BUILD_DIR/pdf.py" "$DEPLOY_DIR/overrides/pdf.py.next"
+
 
 cat > "$DEPLOY_DIR/overrides/corresponding-source.json.next" <<EOF
 {"license":"AGPL-3.0","server":{"repository":"$WGER_REPO","commit":"$WGER_COMMIT"},"frontend":{"repository":"$REACT_REPO","commit":"$REACT_COMMIT","upstream_commit":"89d234a800ba0f2097162f1d91444c7e3a5ccc5c"}}

@@ -94,6 +94,23 @@ def encrypt_snapshot(root, output, passphrase_file, *, runner=subprocess.run):
 
 def media_inventory():
     return docker('run','--rm','-v','fitness-wger_media:/media:ro','alpine:3.22','sh','-c','cd /media && find . -type f -exec sha256sum {} + | sort')
+def write_deployment_archive(path, *, deploy=None):
+    deploy = DEPLOY if deploy is None else pathlib.Path(deploy)
+    required = ('compose.yaml', 'config', 'overrides')
+    optional = ('settings-main.py', 'formats/en_AU/formats.py')
+    members = list(required)
+    for name in optional:
+        source = pathlib.Path(deploy) / name
+        if source.is_symlink() or (source.exists() and not source.is_file()):
+            raise RuntimeError(f'deployment archive member has wrong type: {source}')
+        if source.is_file():
+            members.append(name)
+    with pathlib.Path(path).open('wb') as output:
+        subprocess.run([
+            '/usr/bin/tar', '-C', str(deploy), '-cf', '-', *members,
+        ], stdout=output, stderr=subprocess.PIPE, check=True)
+
+
 
 
 def snapshot(destination):
@@ -121,8 +138,7 @@ def snapshot(destination):
         if before!=after:raise RuntimeError('Media changed inside closed writer snapshot window')
         (root/'media-sha256.txt').write_bytes(after)
         (root/'images.json').write_text(json.dumps(writer_states,indent=2)+'\n')
-        with (root/'deployment.tar').open('wb') as output:
-            subprocess.run(['/usr/bin/tar','-C',str(DEPLOY),'-cf','-','compose.yaml','config','overrides'],stdout=output,stderr=subprocess.PIPE,check=True)
+        write_deployment_archive(root/'deployment.tar')
         write_manifest(root,stamp);capture_complete=True
     except Exception as error:
         primary_error=error;(root/'INCOMPLETE').touch()
