@@ -463,6 +463,11 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
         for table in ('User', 'WorkoutSession', 'WorkoutLog', 'ExerciseVideo'):
             self.database.execute(f'CREATE TABLE {table} (id INTEGER PRIMARY KEY)')
             self.database.execute(f'INSERT INTO {table} VALUES (1)')
+        # Real protected tables whose values DATABASE_PROOF digests; rows match the counted models.
+        self.database.execute('CREATE TABLE manager_workoutsession (id INTEGER PRIMARY KEY, date TEXT, notes TEXT)')
+        self.database.execute("INSERT INTO manager_workoutsession VALUES (1, '2026-09-01', 'synthetic private note')")
+        self.database.execute('CREATE TABLE manager_workoutlog (id INTEGER PRIMARY KEY, session_id INTEGER, weight REAL, repetitions INTEGER)')
+        self.database.execute('INSERT INTO manager_workoutlog VALUES (1, 1, 80.0, 5)')
 
     def install_recovery(self, database=None):
         database = database if database is not None else self.database
@@ -483,10 +488,13 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
             return types.SimpleNamespace(objects=types.SimpleNamespace(
                 count=lambda: database.execute(f'SELECT COUNT(*) FROM {model}').fetchone()[0]))
 
+        def table_description(cursor, table):
+            return [types.SimpleNamespace(name=row[1]) for row in database.execute(f'PRAGMA table_info({table})')]
+
         modules = {
             'django.apps': types.SimpleNamespace(apps=types.SimpleNamespace(get_model=get_model)),
             'django.db': types.SimpleNamespace(connection=types.SimpleNamespace(
-                introspection=types.SimpleNamespace(table_names=table_names),
+                introspection=types.SimpleNamespace(table_names=table_names, get_table_description=table_description),
                 cursor=lambda: contextlib.closing(database.cursor()),
                 ops=types.SimpleNamespace(quote_name=lambda name: '"' + name + '"'))),
             'django.db.migrations.recorder': types.SimpleNamespace(MigrationRecorder=types.SimpleNamespace(
@@ -500,6 +508,7 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
         with patch.object(preflight, '_command', return_value=raw.encode()):
             result = preflight._database(['docker'], 'synthetic-web', {})
         self.assertNotIn('private synthetic', raw)
+        self.assertNotIn('synthetic private note', raw)
         return result
 
     def test_legacy_table_absence_allows_initial_rollout(self):
@@ -533,6 +542,38 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
                                      sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ
                                      and table == 'manager_workoutsessionrecovery' else sqlite3.SQLITE_OK)
         with self.assertRaises(sqlite3.DatabaseError):
+            self.proof()
+
+    def restored_copy(self):
+        self.database.commit()
+        restored = sqlite3.connect(':memory:')
+        self.addCleanup(restored.close)
+        self.database.backup(restored)
+        return restored
+
+    def test_candidate_edit_of_protected_row_refuses_even_with_equal_counts(self):
+        baseline = self.proof()
+        for statement, table in (('UPDATE manager_workoutlog SET weight = 82.5 WHERE id = 1', 'manager_workoutlog'),
+                                 ("UPDATE manager_workoutsession SET notes = NULL WHERE id = 1", 'manager_workoutsession'),
+                                 ('UPDATE manager_workoutlog SET id = 7 WHERE id = 1', 'manager_workoutlog'),
+                                 ('ALTER TABLE manager_workoutsession DROP COLUMN notes', 'manager_workoutsession')):
+            with self.subTest(statement=statement):
+                restored = self.restored_copy()
+                restored.execute(statement)
+                candidate = self.proof(restored)
+                self.assertEqual(candidate['counts'], baseline['counts'])
+                with self.assertRaisesRegex(RuntimeError, 'candidate restore changed protected ' + table + ' rows'):
+                    preflight._protected_unchanged(baseline, candidate)
+
+    def test_candidate_added_column_and_untouched_rows_pass(self):
+        baseline = self.proof()
+        restored = self.restored_copy()
+        restored.execute('ALTER TABLE manager_workoutlog ADD COLUMN distance REAL')
+        preflight._protected_unchanged(baseline, self.proof(restored))
+
+    def test_protected_rows_must_match_counted_models(self):
+        self.database.execute('INSERT INTO manager_workoutlog VALUES (2, 1, 60.0, 8)')
+        with self.assertRaisesRegex(RuntimeError, 'incomplete protected session/set proof'):
             self.proof()
 
     def test_validator_requires_nonnegative_integer_recovery_count(self):
@@ -607,33 +648,156 @@ class DrillRouteTest(unittest.TestCase):
             with self.subTest(recovery=recovery):
                 self.cleanup_route(recovery, mismatch=True)
 
-    def test_restore_pins_every_docker_command(self):
+    CANDIDATE = 'sha256:f3bfc71c7693fef7baaccaf097d3a2ca2ba9076ce547b90d777e5b822f74c008'
+    TAG = 'fitness-wger-backend:0812ca39a80e82c071c99a54300df73e28668776'
+    PDF = '/home/wger/src/wger/utils/pdf.py'
+    SETTINGS = '/home/wger/src/settings/main.py'
+    # Release promotes overrides/pdf.py from pdf.py.next; settings-main.py is copied as-is (config_names).
+    STAGED = {'overrides/pdf.py.next': b'candidate pdf', 'overrides/settings-main.py': b'candidate settings'}
+    CANDIDATE_BINDS = (('overrides/pdf.py', PDF, True), ('overrides/settings-main.py', SETTINGS, True))
+
+    def restore(self, *options, resolved=None, binds=CANDIDATE_BINDS, staged=STAGED, image=TAG):
         deploy = self.root / 'deploy'
-        (deploy / 'config').mkdir(parents=True)
-        (deploy / 'overrides').mkdir()
+        (deploy / 'config').mkdir(parents=True, exist_ok=True)
+        (deploy / 'overrides').mkdir(exist_ok=True)
         (deploy / 'compose.yaml').write_text('services: {}')
         (deploy / 'config/private.env').write_text('PRIVATE=yes\n')
+        # Deliberately poisoned historical sources: a candidate restore must never load these.
+        (deploy / 'overrides/pdf.py').write_bytes(b'POISONED snapshot pdf')
+        (deploy / 'overrides/settings-main.py').write_bytes(b'POISONED snapshot settings')
         snapshot = self.root / 'snapshot'
-        snapshot.mkdir()
+        snapshot.mkdir(exist_ok=True)
         backup.write_deployment_archive(snapshot / 'deployment.tar', deploy=deploy)
         for name in ('database.dump', 'media.tar'):
             (snapshot / name).write_bytes(b'fixture')
         (snapshot / 'manifest.json').write_text('{"files": {}}')
+        manifest = (snapshot / 'manifest.json').read_bytes()
+        candidate = self.root / 'wger-product-candidate'
+        (candidate / 'overrides').mkdir(parents=True, exist_ok=True)
+        (candidate / 'compose.yaml').write_text('services: {candidate: true}')
+        for name, data in staged.items():
+            (candidate / name).write_bytes(data)
         calls = []
 
         def command(argv, **kwargs):
             calls.append(argv)
             self.assertEqual(argv[:3], ['docker', '-H', self.host])
             self.assertEqual(kwargs.get('env', os.environ)['WGER_DOCKER_HOST'], self.host)
-            services = services_for(deploy, ())
+            if argv[3:5] == ['image', 'inspect']:
+                return types.SimpleNamespace(stdout=((resolved or (self.CANDIDATE if argv[-1] == self.TAG else argv[-1])) + '\n').encode())
+            if argv[3] != 'compose':
+                return types.SimpleNamespace(stdout=b'')
+            project = pathlib.Path(argv[argv.index('--project-directory') + 1])
+            if pathlib.Path(argv[argv.index('-f') + 1]) == (candidate / 'compose.yaml').resolve():
+                web = {'image': image, 'volumes': [{'type': 'bind', 'target': target, 'read_only': read_only,
+                                                    'source': source if source.startswith('/') else str(project / source)}
+                                                   for source, target, read_only in binds]}
+                return types.SimpleNamespace(stdout=json.dumps({'services': {'web': web}}).encode())
+            services = services_for(project, (('overrides/pdf.py', self.PDF), ('overrides/settings-main.py', self.SETTINGS)))
             services.update(db={'image': 'postgres:15'}, nginx={'image': 'nginx:alpine'})
             return types.SimpleNamespace(stdout=json.dumps({'services': services}).encode())
 
-        with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch('subprocess.run', side_effect=command):
+        previous = set(self.root.glob('wger-restore-*'))
+        argv = ['restore-drill.py', str(snapshot), *[str(candidate) if option == 'CANDIDATE_DEPLOY' else option for option in options]]
+        with patch('sys.argv', argv), patch('subprocess.run', side_effect=command):
             restore_drill.main()
+        self.assertEqual((snapshot / 'manifest.json').read_bytes(), manifest)
+        [work] = set(self.root.glob('wger-restore-*')) - previous
+        receipt = json.loads((work / 'receipt.json').read_text())
+        return calls, receipt
+
+    def candidate(self, **kwargs):
+        return self.restore('--candidate-image', self.CANDIDATE, '--candidate-deploy', 'CANDIDATE_DEPLOY', **kwargs)
+
+    @staticmethod
+    def web_images(calls):
+        # Media extraction (image then -C) and the migrating web container (image then -c).
+        return [call[call.index(flag) - 1] for call in calls if call[3] == 'run'
+                for flag in ('-C', '-c') if flag in call]
+
+    @staticmethod
+    def web_mounts(calls):
+        """Bytes the web container would see at each bind target."""
+        web = next(call for call in calls if '/bin/sh' in call)
+        binds = [web[index + 1] for index, argument in enumerate(web) if argument == '-v' and web[index + 1].startswith('/')]
+        return {bind.split(':')[1]: (pathlib.Path(bind.split(':')[0]).read_bytes(), bind.split(':')[2]) for bind in binds}
+
+    def test_restore_pins_every_docker_command(self):
+        calls, receipt = self.restore()
         self.assertEqual({call[3] for call in calls}, {'compose', 'network', 'volume', 'run', 'exec'})
-        receipt = json.loads(next(self.root.glob('wger-restore-*/receipt.json')).read_text())
         self.assertEqual(receipt['state'], 'restored-awaiting-independent-application-check')
+
+    def test_default_and_explicit_snapshot_restore_use_backup_image_and_snapshot_sources(self):
+        backup_image = services_for(self.root)['web']['image']
+        for options in ((), ('--snapshot-image',)):
+            with self.subTest(options=options):
+                calls, receipt = self.restore(*options)
+                self.assertEqual(self.web_images(calls), [backup_image, backup_image])
+                self.assertNotIn(self.CANDIDATE, sum(calls, []))
+                self.assertEqual(self.web_mounts(calls), {self.PDF: (b'POISONED snapshot pdf', 'ro'),
+                                                          self.SETTINGS: (b'POISONED snapshot settings', 'ro')})
+                self.assertEqual((receipt['image_source'], receipt['web_image'], receipt['snapshot_web_image']),
+                                 ('snapshot', backup_image, backup_image))
+                self.assertNotIn('candidate_web_mounts', receipt)
+
+    def test_candidate_restore_runs_candidate_image_and_staged_binds_never_snapshot_sources(self):
+        backup_image = services_for(self.root)['web']['image']
+        calls, receipt = self.candidate()
+        self.assertEqual(self.web_images(calls), [self.CANDIDATE, self.CANDIDATE])
+        self.assertIn('manage.py migrate', next(call for call in calls if '/bin/sh' in call)[-1])
+        self.assertNotIn(backup_image, [argument for call in calls for argument in call if call[3] == 'run'])
+        mounts = self.web_mounts(calls)
+        self.assertEqual(mounts, {self.PDF: (b'candidate pdf', 'ro'), self.SETTINGS: (b'candidate settings', 'ro')})
+        self.assertFalse(any(b'POISONED' in data for data, _ in mounts.values()))
+        self.assertEqual((receipt['image_source'], receipt['web_image'], receipt['snapshot_web_image']),
+                         ('candidate', self.CANDIDATE, backup_image))
+        self.assertEqual(receipt['candidate_deploy'], str((self.root / 'wger-product-candidate').resolve()))
+        self.assertEqual(receipt['candidate_web_mounts'], [
+            {'source': 'overrides/pdf.py', 'candidate_file': 'overrides/pdf.py.next', 'target': self.PDF,
+             'sha256': hashlib.sha256(b'candidate pdf').hexdigest()},
+            {'source': 'overrides/settings-main.py', 'candidate_file': 'overrides/settings-main.py', 'target': self.SETTINGS,
+             'sha256': hashlib.sha256(b'candidate settings').hexdigest()}])
+        self.assertNotIn('PRIVATE', json.dumps(receipt))
+
+    def test_candidate_bind_set_refuses_before_any_restore_resource(self):
+        cases = {
+            'missing staged file': ({'binds': self.CANDIDATE_BINDS, 'staged': {'overrides/settings-main.py': b'x'}},
+                                    'required deployment bind source is missing'),
+            'unmapped bind': ({'binds': self.CANDIDATE_BINDS + (('overrides/stale.py', '/home/wger/src/stale.py', True),)},
+                              'no staged release source'),
+            'live path bind': ({'binds': (('/etc/hosts', self.PDF, True),)}, 'no staged release source'),
+            'escaping bind': ({'binds': (('overrides/../config/private.env', self.PDF, True),)}, 'no staged release source'),
+            'writable bind': ({'binds': (('overrides/pdf.py', self.PDF, False),)}, 'must be read-only'),
+            'snapshot image in compose': ({'image': services_for(self.root)['web']['image']}, 'not the candidate image'),
+        }
+        for name, (kwargs, cause) in cases.items():
+            with self.subTest(name):
+                with self.assertRaisesRegex((ValueError, RuntimeError), cause):
+                    self.candidate(**kwargs)
+                self.assertEqual(list(self.root.glob('wger-restore-*')), [])
+
+    def test_candidate_mapping_is_the_release_mapping(self):
+        mapping = restore_drill.release_mapping()
+        self.assertEqual(mapping['overrides/pdf.py'], 'overrides/pdf.py.next')
+        self.assertEqual(mapping['overrides/settings-main.py'], 'overrides/settings-main.py')
+        self.assertEqual(mapping['compose.yaml'], 'compose.yaml')
+
+    def test_invalid_candidate_refuses_before_any_restore_resource(self):
+        for image, resolved, cause in (('fitness-wger-backend:latest', None, 'immutable'),
+                                        ('sha256:f3bfc71c', None, 'immutable'),
+                                        (self.CANDIDATE.upper(), None, 'immutable'),
+                                        (self.CANDIDATE, 'sha256:' + '2' * 64, 'does not resolve')):
+            with self.subTest(image=image):
+                with self.assertRaisesRegex(ValueError, cause):
+                    self.restore('--candidate-image', image, '--candidate-deploy', 'CANDIDATE_DEPLOY', resolved=resolved)
+                self.assertEqual(list(self.root.glob('wger-restore-*')), [])
+
+    def test_candidate_mode_requires_both_identities_and_excludes_snapshot_mode(self):
+        for options in (('--candidate-image', self.CANDIDATE, '--candidate-deploy', 'CANDIDATE_DEPLOY', '--snapshot-image'),
+                        ('--candidate-image', self.CANDIDATE), ('--candidate-deploy', 'CANDIDATE_DEPLOY')):
+            with self.subTest(options=options), self.assertRaises(SystemExit):
+                self.restore(*options)
+            self.assertEqual(list(self.root.glob('wger-restore-*')), [])
 
     def test_recovery_creation_and_cleanup_use_same_selected_endpoint(self):
         deploy = self.root / 'deploy'
