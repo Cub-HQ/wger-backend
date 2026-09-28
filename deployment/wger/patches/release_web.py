@@ -26,7 +26,7 @@ signal.signal(signal.SIGINT, interrupted)
 
 source_deploy = Path(os.environ['WGER_SOURCE_DEPLOY']).resolve() if os.environ.get('WGER_SOURCE_DEPLOY') else None
 config_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
-public_url = os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098').rstrip('/')
+public_url = os.environ.get('WGER_PUBLIC_URL', '').rstrip('/')
 
 
 def public_response(request, timeout):
@@ -223,6 +223,12 @@ except ValueError as error:
     raise SystemExit(str(error)) from None
 db_user = database_environment['POSTGRES_USER']
 db_name = database_environment['POSTGRES_DB']
+# The public origin is host configuration: explicit env first, else the live SITE_URL.
+if not public_url:
+    public_url = next((line.split('=', 1)[1].strip() for line in private_env.read_text().splitlines()
+                       if line.startswith('SITE_URL=')), '').rstrip('/')
+if not public_url.startswith(('https://', 'http://')) or 'REQUIRED_' in public_url:
+    raise SystemExit('WGER_PUBLIC_URL or private.env SITE_URL must name the gym public origin')
 container_ids = {service: container_id(service) for service in services}
 powersync_id = container_id('powersync')
 prior_powersync_image = run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', powersync_id, capture=True)
