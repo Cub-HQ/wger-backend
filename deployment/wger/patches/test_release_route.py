@@ -711,6 +711,70 @@ elif "sha256sum" in args:
             fixture.write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\nGUNICORN_CMD_ARGS=--workers 1 --threads 2 --timeout 240\nPOSTGRES_PASSWORD=never-return-this\n')
             self.assertEqual(read_database_environment(fixture), {'POSTGRES_USER': 'fitness_wger', 'POSTGRES_DB': 'fitness_wger'})
 
+    def test_release_refuses_malformed_public_origin_before_any_docker_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            writer, history = root / 'writer.lock', root / 'history.lock'
+            writer.touch(); history.touch()
+            (root / 'overrides').mkdir()
+            for name in ARTIFACT_NAMES:
+                (root / 'overrides' / (name + '.next')).write_text('staged ' + name)
+            (root / 'config').mkdir()
+            private_env = root / 'config/private.env'
+            docker_log = root / 'docker.log'
+            binary = root / 'bin/docker'
+            binary.parent.mkdir()
+            binary.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(docker_log)!r}).touch()\nraise SystemExit(99)\n')
+            binary.chmod(0o755)
+            socket_path = root / 'docker.sock'
+            env = {**os.environ, 'WGER_DEPLOY_DIR': str(root), 'WGER_DOCKER_HOST': 'unix://' + str(socket_path),
+                   'PATH': str(binary.parent) + ':' + os.environ['PATH'],
+                   'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history)}
+            env.pop('WGER_PUBLIC_URL', None)
+            database = 'POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n'
+
+            def release(site_lines, override=None):
+                private_env.write_text(database + ''.join(line + '\n' for line in site_lines))
+                docker_log.unlink(missing_ok=True)
+                run_env = dict(env) if override is None else {**env, 'WGER_PUBLIC_URL': override}
+                return subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=run_env,
+                                      text=True, capture_output=True)
+
+            malformed = ('https://gym.example # live', 'https://gym example', 'https://gym.example:notaport',
+                         'https://:8098', 'http://?x', 'https://gym.example:99999', 'https://gym.example:0',
+                         'https://gym.example:', 'https://', 'ftp://gym.example', 'gym.example:8098',
+                         'https://user:pass@gym.example', 'https://gym.example/app', 'https://gym.example/?x=1',
+                         'https://gym.example#top', 'https://gym.example\t', 'https://gym.exa\x7fmple',
+                         'https://gym_example', 'https://gym.exämple', 'https://gym%2eexample',
+                         'https://[::1', '"https://gym.example"', 'https://REQUIRED_VERIFIED_TAILNET_HOST', ' ')
+            with socket.socket(socket.AF_UNIX) as docker_socket:
+                docker_socket.bind(str(socket_path))
+                for value in malformed:
+                    for source in ('WGER_PUBLIC_URL', 'SITE_URL'):
+                        with self.subTest(value=value, source=source):
+                            if source == 'SITE_URL':
+                                result = release(['SITE_URL=' + value])
+                            else:
+                                # A bad override is refused, never replaced by a valid SITE_URL.
+                                result = release(['SITE_URL=https://gym.example:8098'], override=value)
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn('must name the gym public origin', result.stderr)
+                            self.assertFalse(docker_log.exists(), 'docker called before origin refusal')
+                for lines in ([], ['SITE_URL=https://a.example', 'SITE_URL=https://b.example'], ['export SITE_URL=https://gym.example']):
+                    with self.subTest(site_lines=lines):
+                        result = release(lines)
+                        self.assertIn('SITE_URL exactly once', result.stderr)
+                        self.assertFalse(docker_log.exists())
+                for lines, override in ((['SITE_URL=https://gym.example:8098'], None),
+                                        (['SITE_URL=https://gym.example:8098/'], ''),
+                                        (['SITE_URL=http://127.0.0.1:8000'], None),
+                                        (['SITE_URL=https://REQUIRED_VERIFIED_TAILNET_HOST'], 'https://gym.example'),
+                                        ([], 'http://[::1]:8098/')):
+                    with self.subTest(site_lines=lines, override=override):
+                        result = release(lines, override)
+                        self.assertNotIn('public origin', result.stderr)
+                        self.assertTrue(docker_log.exists(), 'valid origin must reach the first docker call')
+
 
     def test_release_validates_selected_endpoint_before_work(self):
         with tempfile.TemporaryDirectory() as directory:

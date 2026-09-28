@@ -218,7 +218,7 @@ class WgerDeployTests(unittest.TestCase):
             home.mkdir()
             live = Path(directory) / 'live'
             (live / 'config').mkdir(parents=True)
-            (live / 'config/private.env').write_text('private fixture')
+            (live / 'config/private.env').write_text('SITE_URL=https://gym.example:8098\n')
 
             def prepare(args, **kwargs):
                 self.assertEqual(args[0], 'bash', 'stock image must not be rebuilt')
@@ -258,6 +258,30 @@ class WgerDeployTests(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, 'stop before backup or live release'):
                             module.deploy(args)
 
+    def test_malformed_public_origin_refuses_before_preparation(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            live = Path(directory) / 'live'
+            (live / 'config').mkdir(parents=True)
+            args = SimpleNamespace(source=str(source), commit='a' * 40, deploy_root=str(live), changed_file=[])
+            for site, override in (('SITE_URL=https://gym.example # live', None), ('SITE_URL=https://:8098', None),
+                                   ('SITE_URL=https://gym.example:8098', 'https://gym.example:notaport'), ('', None)):
+                with self.subTest(site=site, override=override):
+                    (live / 'config/private.env').write_text(site + '\n')
+                    environment = {key: value for key, value in module.os.environ.items() if key != 'WGER_PUBLIC_URL'}
+                    if override is not None:
+                        environment['WGER_PUBLIC_URL'] = override
+                    with patch.dict(module.os.environ, environment, clear=True), \
+                            patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
+                            patch.object(module, 'existing_locks', return_value={}), \
+                            patch.object(module.subprocess, 'run') as prepare:
+                        with self.assertRaisesRegex(ValueError, 'DEPLOY_MISSING: .*SITE_URL|DEPLOY_MISSING: WGER_PUBLIC_URL'):
+                            module.deploy(args)
+                        prepare.assert_not_called()
+
     def test_escaped_cache_refuses_before_preparation(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
         module = importlib.util.module_from_spec(spec)
@@ -275,7 +299,7 @@ class WgerDeployTests(unittest.TestCase):
             self.assertFalse((home / '.cache').resolve().is_relative_to(home.resolve()))
             live = Path(directory) / 'live'
             (live / 'config').mkdir(parents=True)
-            (live / 'config/private.env').write_text('private fixture')
+            (live / 'config/private.env').write_text('SITE_URL=https://gym.example:8098\n')
             args = SimpleNamespace(source=str(source), commit='a' * 40,
                                    deploy_root=str(live), changed_file=[])
             with patch.object(module.Path, 'home', return_value=home), \
@@ -298,7 +322,7 @@ class WgerDeployTests(unittest.TestCase):
             cache.mkdir(mode=0o700)
             live = Path(directory) / 'live'
             (live / 'config').mkdir(parents=True)
-            (live / 'config/private.env').write_text('private fixture')
+            (live / 'config/private.env').write_text('SITE_URL=https://gym.example:8098\n')
             args = SimpleNamespace(source=str(source), commit='a' * 40,
                                    deploy_root=str(live), changed_file=[])
             try:
