@@ -159,6 +159,32 @@ class ReleaseRouteTest(unittest.TestCase):
                 self.assertEqual(namespace['CELERY_BEAT_SCHEDULE']['purge-session-recoveries'],
                                  {'task': 'wger.manager.tasks.purge_session_recoveries', 'schedule': timedelta(hours=1)})
 
+    def test_wger_axes_whitelists_private_docker_and_tailscale_networks(self):
+        # Ported from Cub-HQ/fitness-coach runtime/tests/test_wger_tool.py at
+        # f6d3efe32e27353defab8fc9a627094af98bfdbd (same test name).
+        import ast
+        import ipaddress
+        tree = ast.parse((ROOT.parent / 'overrides/settings-main.py').read_text())
+        wanted = [node for node in tree.body if
+                  isinstance(node, ast.FunctionDef) and node.name == '_never_lock_our_nets' or
+                  isinstance(node, ast.Assign) and [getattr(target, 'id', None) for target in node.targets] in (
+                      ['_OUR_NETWORKS'], ['AXES_WHITELIST_CALLABLE'])]
+        namespace = {'ipaddress': ipaddress}
+        exec(compile(ast.Module(body=wanted, type_ignores=[]), '<axes-settings>', 'exec'), namespace)
+        allowed = namespace['AXES_WHITELIST_CALLABLE']
+        self.assertIs(allowed, namespace['_never_lock_our_nets'])
+        request = lambda remote, forwarded='': type('Request', (), {'META': {
+            'REMOTE_ADDR': remote, 'HTTP_X_FORWARDED_FOR': forwarded}})()
+        for address in ('172.18.0.1', '100.64.0.7', '100.127.255.254', '127.0.0.1'):
+            with self.subTest(remote=address):
+                self.assertTrue(allowed(request(address)))
+        self.assertTrue(allowed(request('172.18.0.1', '8.8.8.8')))
+        self.assertTrue(allowed(request('8.8.8.8', '100.64.0.7, 172.18.0.1')))
+        for remote, forwarded in (('8.8.8.8', '1.1.1.1'), ('100.128.0.1', ''),
+                                  ('8.8.8.8', '1.1.1.1, 100.64.0.7'), ('not-an-ip', 'garbage')):
+            with self.subTest(remote=remote, forwarded=forwarded):
+                self.assertFalse(allowed(request(remote, forwarded)))
+
     def test_public_readiness_retries_only_transient_transport_failures(self):
         import ast
         from unittest.mock import Mock, patch

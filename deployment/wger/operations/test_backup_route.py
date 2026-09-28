@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -14,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 import backup
+from snapshot import REQUIRED, RESTORE_ARTIFACTS
 RESTORE_MODULE = pathlib.Path(__file__).with_name('restore-drill.py')
 RESTORE_SPEC = importlib.util.spec_from_file_location('restore_drill', RESTORE_MODULE)
 restore_drill = importlib.util.module_from_spec(RESTORE_SPEC)
@@ -380,6 +382,76 @@ class BackupRouteTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'deployment bind source has wrong type'):
                         restore_drill.web_override_mounts(work, services_for(work))
 
+
+class CoachSafetyPortTest(unittest.TestCase):
+    """Backup and restore guards ported from Cub-HQ/fitness-coach
+    runtime/tests/test_wger_tool.py at f6d3efe32e27353defab8fc9a627094af98bfdbd
+    (SnapshotTests), which covered this code before it moved here."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = pathlib.Path(directory.name)
+
+    def snapshot(self, *extra):
+        root = self.root / 'snapshot'
+        root.mkdir()
+        for name in (*REQUIRED, *extra):
+            (root / name).write_bytes(name.encode())
+        return root, backup.write_manifest(root, 'fixture')
+
+    def test_manifest_requires_and_verifies_powersync_state(self):
+        # Source: test_manifest_requires_and_verifies_powersync_state
+        root, manifest = self.snapshot()
+        self.assertTrue(manifest['includes_powersync_storage'])
+        self.assertEqual(manifest['powersync_storage_source'], 'database.dump')
+        self.assertEqual(RESTORE_ARTIFACTS, ('database.dump', 'media.tar'))
+        self.assertNotIn('powersync.dump', manifest['files'])
+        backup.verify_snapshot(root)
+        (root / 'database.dump').write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            backup.verify_snapshot(root)
+
+    def test_migration_bundle_is_encrypted_and_privately_receipted(self):
+        # Source: test_migration_bundle_is_encrypted_and_privately_receipted
+        root, _ = self.snapshot('images.json')
+        passphrase = self.root / 'passphrase'
+        passphrase.write_text('x' * 32)
+        passphrase.chmod(0o600)
+        output = self.root / 'migration.dmg'
+
+        def create(command, **kwargs):
+            self.assertEqual(command[:2], ['/usr/bin/hdiutil', 'create'])
+            self.assertEqual(command[command.index('-encryption') + 1], 'AES-256')
+            self.assertEqual(kwargs['input'], b'x' * 32)
+            output.write_bytes(b'encrypted fixture')
+
+        receipt_path = backup.encrypt_snapshot(root, output, passphrase, runner=create)
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt['sha256'], hashlib.sha256(b'encrypted fixture').hexdigest())
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
+
+    def test_restore_waits_for_named_database(self):
+        # Source: test_restore_waits_for_named_database
+        calls = []
+
+        def ready(*command, data=None):
+            calls.append(command)
+            if len(calls) == 1:
+                raise restore_drill.subprocess.CalledProcessError(1, command)
+            return b'ok'
+
+        with patch.object(restore_drill, 'run', side_effect=ready), patch.object(restore_drill.time, 'sleep'):
+            restore_drill.wait_for_database('fixture', attempts=2, delay=0)
+        self.assertEqual(calls[-1], ('exec', 'fixture-db', 'pg_isready', '-h', '127.0.0.1', '-U', 'restore', '-d', 'wger'))
+
+    def test_restore_database_timeout_fails_explicitly(self):
+        # Source: test_restore_database_timeout_fails_explicitly
+        error = restore_drill.subprocess.CalledProcessError(1, ['pg_isready'])
+        with patch.object(restore_drill, 'run', side_effect=error), patch.object(restore_drill.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'did not become ready'):
+                restore_drill.wait_for_database('fixture', attempts=2, delay=0)
 
 
 class DatabaseRecoveryProofTest(unittest.TestCase):
