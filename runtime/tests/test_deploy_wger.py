@@ -179,11 +179,11 @@ class WgerDeployTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         changed = [module.PREFIX + name for name in
-                   ('Dockerfile', 'settings-main.py', 'compose.yaml',
+                   ('compose.yaml',
                     'overrides/settings-main.py', 'overrides/manager-urls.py',
-                    'formats/en_AU/formats.py', 'patches/prepare-react.sh',
+                    'patches/prepare-react.sh',
                     'patches/release_web.py', 'patches/test_release_route.py',
-                    'patches/check_pinned_artifacts.py', 'patches/patch_footer.py',
+                    'patches/check_pinned_artifacts.py', *module.REMOVED_FILES,
                     'operations/backup.py', 'operations/snapshot.py', 'operations/restore-drill.py',
                     'operations/recovery-drill.py', 'operations/test_backup_route.py')]
         with tempfile.TemporaryDirectory() as directory:
@@ -193,7 +193,7 @@ class WgerDeployTests(unittest.TestCase):
             module.check_surfaces(changed, source)
             for name in module.REMOVED_FILES:
                 retired = root / name
-                retired.parent.mkdir(exist_ok=True)
+                retired.parent.mkdir(parents=True, exist_ok=True)
                 for kind in ('file', 'directory', 'symlink'):
                     with self.subTest(name=name, kind=kind):
                         if kind == 'file':
@@ -231,7 +231,7 @@ class WgerDeployTests(unittest.TestCase):
                 candidate = script.parents[1]
                 self.assertTrue(candidate.is_relative_to((home / '.cache').resolve()))
                 for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
-                             'formats/en_AU/formats.py', 'patches/patch_session_recovery.py',
+                             'patches/patch_session_recovery.py',
                              'patches/patch_session_recovery_ui.py',
                              'patches/test_patch_session_recovery_ui.py',
                              'patches/test_patch_session_recovery.py'):

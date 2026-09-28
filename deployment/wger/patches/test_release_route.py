@@ -23,8 +23,8 @@ RECOVERY_TARGETS = {
     'manager-tasks.py': 'wger/manager/tasks.py',
     'manager-0031-session-recovery.py': 'wger/manager/migrations/0031_workoutsessionrecovery.py',
 }
-ARTIFACT_NAMES = ('react-main.js', 'history-overview.html', 'api-key.html',
-                  'pdf.py', 'corresponding-source.json', *RECOVERY_TARGETS)
+ARTIFACT_NAMES = ('react-main.js',
+                  'corresponding-source.json', *RECOVERY_TARGETS)
 RELEASE_NAMES = (*ARTIFACT_NAMES, 'backend-image.json')
 CANDIDATE_COMMIT = '0812ca39a80e82c071c99a54300df73e28668776'
 CANDIDATE = {'tag': 'fitness-wger-backend:' + CANDIDATE_COMMIT, 'image_id': 'sha256:' + 'c' * 64,
@@ -350,7 +350,7 @@ class ReleaseRouteTest(unittest.TestCase):
                     (overrides / name).write_text(f'old {name}\n')
                 for name in ARTIFACT_NAMES[1:]:
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
-                    if name in {'history-overview.html', 'api-key.html', 'pdf.py', *RECOVERY_TARGETS}:
+                    if name in RECOVERY_TARGETS:
                         (overrides / name).write_text(f'old {name}\n')
                 bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
                 (overrides / 'react-main.js.next').write_bytes(bundle)
@@ -456,9 +456,6 @@ elif "config" in args and "--format" in args:
     for service in ('web','celery_worker','celery_beat'):
         services[service]['image'] = 'fitness-wger-backend:stale' if fault == 'compose-tag' else json.loads(os.environ['CANDIDATE'])['tag']
     services['web']['volumes']=[
-        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/history-overview.html'),'target':'/home/wger/src/wger/exercises/templates/history/overview.html'},
-        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/api-key.html'),'target':'/home/wger/src/wger/core/templates/user/api_key.html'},
-        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/pdf.py'),'target':'/home/wger/src/wger/utils/pdf.py'},
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py'},
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/manager-urls.py'),'target':'/home/wger/src/wger/manager/urls.py'},
     ]
@@ -468,8 +465,6 @@ elif "config" in args and "--format" in args:
         if service != 'web':
             volumes.append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py','read_only':True})
         volumes.extend({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides'/name),'target':'/home/wger/src/'+target,'read_only':True} for name, target in recovery_targets.items() if any('candidate/compose.yaml' in arg for arg in args) or (Path(os.environ['WGER_DEPLOY_DIR'])/'overrides'/name).exists())
-    if any('candidate/compose.yaml' in arg for arg in args) or (Path(os.environ['WGER_DEPLOY_DIR'])/'formats/en_AU/formats.py').exists():
-        services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'formats/en_AU/formats.py'),'target':'/home/wger/src/wger/formats/en_AU/formats.py'})
     if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
     for arg in args:
         if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
@@ -555,12 +550,14 @@ elif "sha256sum" in args:
                 candidate = root / 'candidate'
                 (candidate / 'config').mkdir(parents=True)
                 (candidate / 'overrides').mkdir()
-                stage_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
+                stage_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
+                # A first-release config file must return to absent on rollback.
+                absent_config = 'config/sync_rules.yaml'
                 for name in stage_names:
                     candidate_path = candidate / name
                     candidate_path.parent.mkdir(parents=True, exist_ok=True)
                     candidate_path.write_text('new ' + name)
-                    if name != 'formats/en_AU/formats.py':
+                    if name != absent_config:
                         deploy_path = deploy / name
                         deploy_path.parent.mkdir(parents=True, exist_ok=True)
                         deploy_path.write_text('old ' + name)
@@ -589,7 +586,7 @@ elif "sha256sum" in args:
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertIn('web release failed', rejected.stderr)
                 for name in stage_names:
-                    if name == 'formats/en_AU/formats.py':
+                    if name == absent_config:
                         self.assertFalse((deploy / name).exists())
                     else:
                         self.assertEqual((deploy / name).read_text(), 'old ' + name)
@@ -603,7 +600,7 @@ elif "sha256sum" in args:
                 self.assertNotEqual(malformed.returncode, 0)
                 self.assertIn('web release failed', malformed.stderr)
                 for name in stage_names:
-                    if name == 'formats/en_AU/formats.py':
+                    if name == absent_config:
                         self.assertFalse((deploy / name).exists())
                     else:
                         self.assertEqual((deploy / name).read_text(), 'old ' + name)
