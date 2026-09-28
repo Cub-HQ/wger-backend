@@ -184,15 +184,11 @@ mkdir -p "$DEPLOY_DIR/overrides"
 
 docker -H "$DOCKER_HOST" create --name "$EXTRACTOR" --entrypoint /bin/true "$IMAGE" >/dev/null
 docker -H "$DOCKER_HOST" cp "$EXTRACTOR:/home/wger/src/node_modules/@wger-project/react-components/build/main.js" "$DEPLOY_DIR/overrides/react-original-main.js"
-docker -H "$DOCKER_HOST" cp "$EXTRACTOR:/home/wger/src/wger/core/templates/template.html" "$DEPLOY_DIR/overrides/template-original.html"
 
 curl --fail --location --silent --show-error "$REACT_REPO/archive/$REACT_COMMIT.tar.gz" --output "$BUILD_DIR/react-source.tgz"
 tar -xzf "$BUILD_DIR/react-source.tgz" --strip-components=1 -C "$BUILD_DIR"
 (cd "$BUILD_DIR" && npm ci --ignore-scripts --no-audit --no-fund && python3 "$PATCH_DIR/patch_australian_dates.py" "$BUILD_DIR" && python3 "$PATCH_DIR/patch_progression_chart.py" "$BUILD_DIR" && python3 "$PATCH_DIR/patch_session_recovery_ui.py" "$BUILD_DIR" && python3 "$PATCH_DIR/test_patch_session_recovery_ui.py" --install "$BUILD_DIR" && npm test -- src/core/lib/date.test.ts src/components/Routines/screens/Detail/SessionRecovery.test.tsx && npm run typecheck && npm run build)
 python3 "$PATCH_DIR/patch_muscle_diagram.py" "$BUILD_DIR/build/main.js" "$STAGED_DIR/react-main.js.next"
-
-curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/core/templates/template.html" --output "$BUILD_DIR/template.html"
-python3 "$PATCH_DIR/patch_footer.py" "$BUILD_DIR/template.html" "$STAGED_DIR/template.html.next"
 
 curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/exercises/templates/history/overview.html" --output "$BUILD_DIR/history-overview.html"
 python3 "$PATCH_DIR/patch_australian_template_dates.py" history-overview "$BUILD_DIR/history-overview.html" "$STAGED_DIR/history-overview.html.next"
@@ -218,7 +214,7 @@ cat > "$STAGED_DIR/corresponding-source.json.next" <<EOF
 EOF
 
 # Publish candidates only once every strict pinned-source transformation succeeds.
-for name in react-main.js template.html history-overview.html api-key.html pdf.py corresponding-source.json \
+for name in react-main.js history-overview.html api-key.html pdf.py corresponding-source.json \
   manager-session-recovery.py manager-models-init.py manager-api-views.py manager-tasks.py \
   manager-log.py manager-0030-workoutlog-cardio-metrics.py manager-0031-session-recovery.py; do
   test -f "$STAGED_DIR/$name.next"

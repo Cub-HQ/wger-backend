@@ -25,7 +25,6 @@ PRODUCT_FILES = (
     'patches/prepare-react.sh', 'patches/patch_australian_dates.py',
     'patches/patch_australian_template_dates.py', 'patches/patch_australian_pdf.py',
     'patches/patch_progression_chart.py', 'patches/patch_muscle_diagram.py',
-    'patches/patch_footer.py',
     'patches/patch_session_recovery.py', 'patches/patch_session_recovery_ui.py',
     'patches/test_patch_session_recovery_ui.py', 'patches/test_patch_session_recovery.py',
 )
@@ -49,7 +48,7 @@ EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.
                   'operations/test_backup_route.py')
 RETIRED_FILES = ('patches/patch_server_wave3.py', 'patches/patch_ux_wave1.py',
                  'patches/patch_ux_wave3.py')
-REMOVED_FILES = ('Dockerfile', 'settings-main.py')
+REMOVED_FILES = ('Dockerfile', 'settings-main.py', 'patches/patch_footer.py')
 
 
 def normalize_bundle(data):
