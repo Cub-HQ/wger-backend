@@ -110,8 +110,11 @@ class ExerciseVideo(AbstractLicenseModel, AbstractHistoryMixin, models.Model):
         verbose_name='Video',
         upload_to=exercise_video_upload_dir,
         validators=[validate_video],
+        blank=True,
     )
     """Uploaded video"""
+
+    source_url = models.URLField(verbose_name='Linked video', max_length=1000, blank=True)
 
     size = models.IntegerField(
         verbose_name='Size',
@@ -175,10 +178,13 @@ class ExerciseVideo(AbstractLicenseModel, AbstractHistoryMixin, models.Model):
     """Edit history"""
 
     def get_absolute_url(self):
-        """
-        Returns the video URL
-        """
-        return self.video.url
+        """Returns the uploaded or linked video URL."""
+        return self.video.url if self.video else self.source_url
+
+    def clean(self):
+        super().clean()
+        if bool(self.video) == bool(self.source_url):
+            raise ValidationError(_('Provide exactly one uploaded or linked video.'))
 
     class Meta:
         """

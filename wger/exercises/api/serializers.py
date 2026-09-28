@@ -248,9 +248,12 @@ class ExerciseImageSerializer(serializers.ModelSerializer):
 
 
 class ExerciseVideoSerializer(serializers.ModelSerializer):
-    """
-    ExerciseVideo serializer
-    """
+    """Serializer for uploaded and linked exercise videos."""
+
+    video = serializers.SerializerMethodField()
+
+    def get_video(self, obj):
+        return obj.get_absolute_url()
 
     exercise_uuid = serializers.ReadOnlyField(source='exercise.uuid')
     author_history = serializers.ListSerializer(child=serializers.CharField(), read_only=True)
@@ -263,6 +266,7 @@ class ExerciseVideoSerializer(serializers.ModelSerializer):
             'exercise',
             'exercise_uuid',
             'video',
+            'source_url',
             'is_main',
             'size',
             'duration',
