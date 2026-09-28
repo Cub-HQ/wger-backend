@@ -14,17 +14,11 @@ import threading
 from contextlib import contextmanager
 
 ROOT = pathlib.Path(__file__).parent
-RECOVERY_TARGETS = {
-    'manager-log.py': 'wger/manager/models/log.py',
-    'manager-0030-workoutlog-cardio-metrics.py': 'wger/manager/migrations/0030_workoutlog_cardio_metrics.py',
-    'manager-session-recovery.py': 'wger/manager/models/session_recovery.py',
-    'manager-models-init.py': 'wger/manager/models/__init__.py',
-    'manager-api-views.py': 'wger/manager/api/views.py',
-    'manager-tasks.py': 'wger/manager/tasks.py',
-    'manager-0031-session-recovery.py': 'wger/manager/migrations/0031_workoutsessionrecovery.py',
-}
-ARTIFACT_NAMES = ('react-main.js',
-                  'corresponding-source.json', *RECOVERY_TARGETS)
+# Retired recovery overrides a live deployment may still hold; the old compose (rollback) binds them.
+LEGACY_RECOVERY_FILES = ('manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
+                         'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
+                         'manager-tasks.py', 'manager-0031-session-recovery.py')
+ARTIFACT_NAMES = ('react-main.js', 'corresponding-source.json')
 RELEASE_NAMES = (*ARTIFACT_NAMES, 'backend-image.json')
 CANDIDATE_COMMIT = '0812ca39a80e82c071c99a54300df73e28668776'
 CANDIDATE = {'tag': 'fitness-wger-backend:' + CANDIDATE_COMMIT, 'image_id': 'sha256:' + 'c' * 64,
@@ -37,25 +31,13 @@ def preparation_fixture():
         root = pathlib.Path(directory).resolve()
         patches = root / 'deployment/patches'
         patches.mkdir(parents=True)
-        for name in ('prepare-react.sh', 'test_patch_session_recovery.py', 'patch_session_recovery.py'):
+        for name in ('prepare-react.sh',):
             (patches / name).write_bytes((ROOT / name).read_bytes())
         overrides = patches.parent / 'overrides'
         overrides.mkdir()
         for name in ARTIFACT_NAMES:
             (overrides / (name + '.next')).write_text('previous candidate ' + name)
             (overrides / name).write_text('live ' + name)
-        modules = root / 'modules'
-        for name in ('django', 'rest_framework'):
-            package = modules / name
-            package.mkdir(parents=True)
-            (package / '__init__.py').write_text('')
-        for name in ('django/__init__.py', 'rest_framework/exceptions.py', 'sqlite3.py'):
-            module = name.removesuffix('/__init__.py').removesuffix('.py').replace('/', '.')
-            (modules / name).write_text(
-                'import os\nfrom pathlib import Path\n'
-                f'with Path(os.environ["IMPORT_LOG"]).open("a") as log: log.write({module!r} + "\\n")\n'
-                f'if os.environ.get("FAIL_MODULE") == {module!r}: raise ImportError("missing {module}")\n'
-            )
         binary = root / 'bin'
         binary.mkdir()
         fake = f'#!{sys.executable}\n' + '''import json, os, subprocess, sys
@@ -72,41 +54,13 @@ if tool == 'docker':
         print(json.dumps({'services': {'web': {'image': image}}}))
     elif 'inspect' in args: sys.exit(1 if os.environ.get('FAIL_PREFLIGHT') == 'image' else 0)
     elif 'create' in args and os.environ.get('STOP_AT_CREATE') == '1': sys.exit(7)
-    elif 'run' in args:
-        assert args[args.index('--user') + 1] == 'wger', args
-        assert args[args.index('--network') + 1] == 'none', args
-        assert '--rm' in args and not any(arg.startswith('HOME=') for arg in args), args
-        mount = args[args.index('--mount') + 1]
-        assert 'target=/tests' in mount and 'readonly' in mount.split(','), args
-        source = next(part[4:] for part in mount.split(',') if part.startswith('src='))
-        if '--orm' not in args:
-            if os.environ.get('FAIL_PREFLIGHT') == 'mount': sys.exit(125)
-            entrypoint = args[args.index('--entrypoint') + 1]
-            payload = args[args.index('fixture-image') + 1:]
-            if os.environ.get('FAIL_PREFLIGHT') == 'bind': source += '/missing'
-            payload = [arg.replace('/tests', source) for arg in payload]
-            sys.exit(subprocess.run([entrypoint, *payload], env={**os.environ, 'PYTHONPATH': os.environ['PROBE_MODULES']}).returncode)
-        overrides = Path(os.environ['PREPARE_OVERRIDES'])
-        candidates = {path.name: path.read_text() for path in overrides.glob('*.next')}
-        if candidates != json.loads(os.environ['PRIOR_CANDIDATES']):
-            print('candidates published before ORM proof', file=sys.stderr)
-            sys.exit(11)
-        Path(os.environ['ORM_LOG']).write_text(json.dumps(args))
-        if os.environ.get('FAIL_ORM') == '1':
-            print('ORM recovery proof rejected', file=sys.stderr)
-            sys.exit(10)
 elif tool == 'python3':
     if args[0] == '-c':
-        if os.environ.get('PYTHONPATH') == os.environ['PROBE_MODULES'] and os.environ.get('FAIL_PREFLIGHT') == 'python': sys.exit(127)
         os.execv(os.environ['REAL_PYTHON'], [os.environ['REAL_PYTHON'], *args])
-    generator = Path(args[0]).name
-    if generator == 'patch_session_recovery.py':
-        for name in json.loads(os.environ['RECOVERY_TARGETS']):
-            (Path(args[-1]) / (name + '.next')).write_text('prepared ' + name)
-        if os.environ.get('FAIL_RECOVERY') == '1':
-            print('backend anchor rejected', file=sys.stderr)
-            sys.exit(9)
-    elif args[-1].endswith('.next'):
+    if os.environ.get('FAIL_PATCH') == Path(args[0]).name:
+        print('pinned patch rejected', file=sys.stderr)
+        sys.exit(9)
+    if args[-1].endswith('.next'):
         Path(args[-1]).write_text('prepared ' + Path(args[-1]).name.removesuffix('.next'))
 '''
         for name in ('docker', 'curl', 'tar', 'npm', 'python3'):
@@ -116,30 +70,25 @@ elif tool == 'python3':
         socket_path = root / 'docker.sock'
         env = {**os.environ, 'HOME': str(root), 'PATH': str(binary) + ':' + os.environ['PATH'],
                'WGER_DOCKER_HOST': 'unix://' + str(socket_path), 'REAL_PYTHON': sys.executable,
-               'PREPARE_OVERRIDES': str(overrides), 'ORM_LOG': str(root / 'orm.json'),
-               'COMMAND_LOG': str(root / 'commands.jsonl'), 'IMPORT_LOG': str(root / 'imports'),
-               'PROBE_MODULES': str(modules),
-               'PRIOR_CANDIDATES': json.dumps({name + '.next': 'previous candidate ' + name for name in ARTIFACT_NAMES}),
-               'RECOVERY_TARGETS': json.dumps(RECOVERY_TARGETS)}
+               'COMMAND_LOG': str(root / 'commands.jsonl'),
+               'PRIOR_CANDIDATES': json.dumps({name + '.next': 'previous candidate ' + name for name in ARTIFACT_NAMES})}
         with socket.socket(socket.AF_UNIX) as docker_socket:
             docker_socket.bind(str(socket_path))
             yield root, patches / 'prepare-react.sh', overrides, env
 
 
 class ReleaseRouteTest(unittest.TestCase):
-    def test_compose_mounts_recovery_in_every_writer(self):
+    def test_compose_writers_run_image_source_with_settings_only(self):
         try:
             import yaml
         except ImportError:
             self.skipTest('PyYAML unavailable; no dependency installed by release tests')
         services = yaml.safe_load((ROOT.parent / 'compose.yaml').read_text())['services']
-        targets = {**RECOVERY_TARGETS, 'settings-main.py': 'settings/main.py'}
         for service in ('web', 'celery_worker', 'celery_beat'):
-            for name, target in targets.items():
-                with self.subTest(service=service, artifact=name):
-                    mounts = [mount.split(':') for mount in services[service]['volumes']]
-                    matching = [mount for mount in mounts if mount[1] == '/home/wger/src/' + target]
-                    self.assertEqual(matching, [['./overrides/' + name, '/home/wger/src/' + target, 'ro']])
+            with self.subTest(service=service):
+                mounts = [mount.split(':') for mount in services[service]['volumes']]
+                self.assertIn(['./overrides/settings-main.py', '/home/wger/src/settings/main.py', 'ro'], mounts)
+                self.assertFalse([mount for mount in mounts if mount[0].startswith('./overrides/manager-')])
 
     def test_recovery_schedule_is_independent_of_email(self):
         import ast
@@ -254,8 +203,7 @@ class ReleaseRouteTest(unittest.TestCase):
             create = next(command for command in commands if 'create' in command)
             self.assertEqual(create[-1], 'fixture-image')
             self.assertFalse(any('up' in command or 'build' in command for command in commands))
-            self.assertEqual((root / 'imports').read_text().splitlines(),
-                             ['django', 'rest_framework.exceptions', 'sqlite3'])
+            self.assertFalse(any(command[0] == 'docker' and 'run' in command for command in commands))
 
     def test_preparation_rejects_preflight_failures_before_work(self):
         cases = [
@@ -268,11 +216,6 @@ class ReleaseRouteTest(unittest.TestCase):
             ({'FAIL_PREFLIGHT': 'resolve'}, 'compose web image'),
             ({'FAIL_PREFLIGHT': 'empty-image'}, 'compose web image'),
             ({'FAIL_PREFLIGHT': 'image'}, 'image unavailable'),
-            ({'FAIL_PREFLIGHT': 'mount'}, 'staging path'),
-            ({'FAIL_PREFLIGHT': 'bind'}, 'staging path'),
-            ({'FAIL_PREFLIGHT': 'python'}, 'Python interpreter'),
-            *[({'FAIL_MODULE': module}, 'module importability: ' + module)
-              for module in ('django', 'rest_framework.exceptions', 'sqlite3')],
         ]
         for failure, condition in cases:
             with self.subTest(failure=failure), preparation_fixture() as (root, script, overrides, env):
@@ -285,43 +228,24 @@ class ReleaseRouteTest(unittest.TestCase):
                 commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()] if (root / 'commands.jsonl').exists() else []
                 self.assertFalse(any(command[0] in ('curl', 'tar', 'npm') for command in commands))
                 self.assertFalse(any(command[0] == 'python3' and command[1] != '-c' for command in commands))
-                self.assertFalse(any('create' in command or 'cp' in command or '--orm' in command for command in commands))
+                self.assertFalse(any('create' in command or 'cp' in command for command in commands))
 
     def test_preparation_publishes_only_complete_candidates(self):
         with preparation_fixture() as (root, script, overrides, env):
-            failed = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '1'},
+            failed = subprocess.run(['bash', str(script)], env={**env, 'FAIL_PATCH': 'patch_muscle_diagram.py'},
                                     text=True, capture_output=True)
             self.assertEqual(failed.returncode, 9, failed.stderr)
-            self.assertIn('backend anchor rejected', failed.stderr)
-            orm_failed = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '0', 'FAIL_ORM': '1'},
-                                        text=True, capture_output=True)
-            self.assertEqual(orm_failed.returncode, 10, orm_failed.stderr)
-            self.assertIn('ORM recovery proof rejected', orm_failed.stderr)
+            self.assertIn('pinned patch rejected', failed.stderr)
             for name in ARTIFACT_NAMES:
                 self.assertEqual((overrides / (name + '.next')).read_text(), 'previous candidate ' + name)
                 self.assertEqual((overrides / name).read_text(), 'live ' + name)
                 (overrides / (name + '.next')).unlink()
-            env['PRIOR_CANDIDATES'] = '{}'
-            failed_fresh = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '1'},
+            failed_fresh = subprocess.run(['bash', str(script)], env={**env, 'FAIL_PATCH': 'patch_muscle_diagram.py'},
                                           text=True, capture_output=True)
             self.assertEqual(failed_fresh.returncode, 9, failed_fresh.stderr)
             self.assertEqual(list(overrides.glob('*.next')), [])
-            orm_failed_fresh = subprocess.run(['bash', str(script)],
-                                              env={**env, 'FAIL_RECOVERY': '0', 'FAIL_ORM': '1'},
-                                              text=True, capture_output=True)
-            self.assertEqual(orm_failed_fresh.returncode, 10, orm_failed_fresh.stderr)
-            self.assertEqual(list(overrides.glob('*.next')), [])
-            (root / 'orm.json').unlink()
-            prepared = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '0'},
-                                      text=True, capture_output=True)
+            prepared = subprocess.run(['bash', str(script)], env=env, text=True, capture_output=True)
             self.assertEqual(prepared.returncode, 0, prepared.stderr)
-            orm_command = json.loads((root / 'orm.json').read_text())
-            self.assertIn('--rm', orm_command)
-            self.assertEqual(orm_command[orm_command.index('--network') + 1], 'none')
-            self.assertEqual(orm_command[orm_command.index('--entrypoint') + 1], 'python3')
-            self.assertEqual(orm_command[-3:], ['fixture-image', '/tests/test_patch_session_recovery.py', '--orm'])
-            self.assertTrue(any('target=/tests' in argument and ('readonly' in argument or 'ro' in argument.split(','))
-                                for argument in orm_command))
             self.assertEqual({path.name for path in overrides.glob('*.next')},
                              {name + '.next' for name in ARTIFACT_NAMES})
             for name in ARTIFACT_NAMES:
@@ -350,8 +274,8 @@ class ReleaseRouteTest(unittest.TestCase):
                     (overrides / name).write_text(f'old {name}\n')
                 for name in ARTIFACT_NAMES[1:]:
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
-                    if name in RECOVERY_TARGETS:
-                        (overrides / name).write_text(f'old {name}\n')
+                for name in LEGACY_RECOVERY_FILES:
+                    (overrides / name).write_text(f'old {name}\n')
                 bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
                 (overrides / 'react-main.js.next').write_bytes(bundle)
                 (overrides / 'backend-image.json.next').write_text(json.dumps(CANDIDATE))
@@ -459,12 +383,13 @@ elif "config" in args and "--format" in args:
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py'},
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/manager-urls.py'),'target':'/home/wger/src/wger/manager/urls.py'},
     ]
-    recovery_targets = json.loads(os.environ['RECOVERY_TARGETS'])
     for service in ('web', 'celery_worker', 'celery_beat'):
         volumes = services[service].setdefault('volumes', [])
         if service != 'web':
             volumes.append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py','read_only':True})
-        volumes.extend({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides'/name),'target':'/home/wger/src/'+target,'read_only':True} for name, target in recovery_targets.items() if any('candidate/compose.yaml' in arg for arg in args) or (Path(os.environ['WGER_DEPLOY_DIR'])/'overrides'/name).exists())
+        # Only the prior (old-layout) compose still binds retired recovery overrides.
+        if not any('candidate/compose.yaml' in arg for arg in args):
+            volumes.extend({'type':'bind','source':str(path),'target':'/home/wger/src/legacy/'+path.name,'read_only':True} for path in sorted((Path(os.environ['WGER_DEPLOY_DIR'])/'overrides').glob('manager-*.py')) if path.name != 'manager-urls.py')
     if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
     for arg in args:
         if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
@@ -507,7 +432,7 @@ elif "sha256sum" in args:
                        'DOCKER_LOG': str(docker_log), 'WGER_DEPLOY_DIR': str(deploy),
                        'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history),
                        'WGER_PUBLIC_URL': 'http://127.0.0.1:' + str(server.server_port),
-                       'RECOVERY_TARGETS': json.dumps(RECOVERY_TARGETS), 'CANDIDATE': json.dumps(CANDIDATE),
+                       'CANDIDATE': json.dumps(CANDIDATE),
                        'STATIC_ROOT': str(root / 'static'), 'STATIC_MANIFEST': str(manifest)}
                 result = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                         text=True, capture_output=True)
@@ -565,17 +490,18 @@ elif "sha256sum" in args:
                     (candidate / 'overrides' / (name + '.next')).write_bytes((overrides / (name + '.next')).read_bytes())
                 private_before = (config / 'private.env').read_bytes()
                 staged_env = {**env, 'WGER_SOURCE_DEPLOY': str(candidate)}
-                recovery_before = {}
-                for index, name in enumerate(RECOVERY_TARGETS):
+                legacy_before = {}
+                for index, name in enumerate(LEGACY_RECOVERY_FILES):
                     target = overrides / name
                     target.unlink()
-                    recovery_before[name] = None if index % 2 == 0 else f'prior deployment {name}\n'.encode()
-                    if recovery_before[name] is not None:
-                        target.write_bytes(recovery_before[name])
+                    legacy_before[name] = None if index % 2 == 0 else f'prior deployment {name}\n'.encode()
+                    if legacy_before[name] is not None:
+                        target.write_bytes(legacy_before[name])
 
                 def assert_recovery_restored():
-                    for name, prior in recovery_before.items():
-                        with self.subTest(restored_artifact=name):
+                    # Retired overrides are never staged, replaced or removed: old-layout rollback keeps them.
+                    for name, prior in legacy_before.items():
+                        with self.subTest(legacy_artifact=name):
                             if prior is None:
                                 self.assertFalse((overrides / name).exists())
                             else:
@@ -701,8 +627,7 @@ elif "sha256sum" in args:
                 self.assertTrue((deploy / 'settings-main.py').is_dir())
                 for name in stage_names:
                     self.assertEqual((deploy / name).read_text(), 'new ' + name)
-                for name in RECOVERY_TARGETS:
-                    self.assertEqual((overrides / name).read_text(), f'new {name}\n')
+                assert_recovery_restored()
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 offset = len(docker_log.read_text().splitlines())
                 refused = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env={**staged_env,'RELEASE_FAULT':'missing'}, text=True,capture_output=True)

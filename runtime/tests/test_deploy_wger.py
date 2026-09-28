@@ -231,13 +231,12 @@ class WgerDeployTests(unittest.TestCase):
                 candidate = script.parents[1]
                 self.assertTrue(candidate.is_relative_to((home / '.cache').resolve()))
                 for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
-                             'patches/patch_session_recovery.py',
                              'patches/patch_session_recovery_ui.py',
-                             'patches/test_patch_session_recovery_ui.py',
-                             'patches/test_patch_session_recovery.py'):
+                             'patches/test_patch_session_recovery_ui.py'):
                     self.assertEqual((candidate / name).read_bytes(),
                                      (source / module.PREFIX / name).read_bytes())
                 self.assertFalse((candidate / 'Dockerfile').exists())
+                self.assertFalse((candidate / 'patches/patch_session_recovery.py').exists())
                 self.assertFalse((candidate / 'operations/recovery-drill.py').exists())
                 raise RuntimeError('stop before backup or live release')
 

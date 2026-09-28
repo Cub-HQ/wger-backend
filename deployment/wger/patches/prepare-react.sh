@@ -146,32 +146,6 @@ print(image)
 ') || preflight_failed 'compose web image could not be resolved'
 docker -H "$DOCKER_HOST" image inspect "$IMAGE" >/dev/null 2>&1 || preflight_failed "image unavailable: $IMAGE"
 
-# Exercise the same bind, image user and Python environment as the ORM proof.
-probe_status=0
-docker -H "$DOCKER_HOST" run --rm --network none --user wger --entrypoint /bin/sh \
-  --env PYTHONDONTWRITEBYTECODE=1 \
-  --mount "type=bind,src=$PATCH_DIR,target=/tests,readonly" \
-  "$IMAGE" -c '
-    cat /tests/test_patch_session_recovery.py /tests/patch_session_recovery.py >/dev/null || exit 41
-    python3 -c "pass" || exit 42
-    python3 -c '\''
-import importlib, sys
-for module in ("django", "rest_framework.exceptions", "sqlite3"):
-    try:
-        importlib.import_module(module)
-    except Exception as error:
-        print(f"preflight failed: module importability: {module}: {error}", file=sys.stderr)
-        sys.exit(1)
-'\'' || exit 43
-  ' || probe_status=$?
-case "$probe_status" in
-  0) ;;
-  41) preflight_failed "staging path unreadable in image: $PATCH_DIR" ;;
-  42) preflight_failed "Python interpreter unavailable for wger in image: $IMAGE" ;;
-  43) exit 1 ;;
-  *) preflight_failed "staging path/container probe could not run: $PATCH_DIR (image $IMAGE, status $probe_status)" ;;
-esac
-
 BUILD_DIR=$(mktemp -d)
 STAGED_DIR="$BUILD_DIR/staged"
 mkdir -p "$STAGED_DIR"
@@ -190,25 +164,12 @@ tar -xzf "$BUILD_DIR/react-source.tgz" --strip-components=1 -C "$BUILD_DIR"
 (cd "$BUILD_DIR" && npm ci --ignore-scripts --no-audit --no-fund && python3 "$PATCH_DIR/patch_australian_dates.py" "$BUILD_DIR" && python3 "$PATCH_DIR/patch_progression_chart.py" "$BUILD_DIR" && python3 "$PATCH_DIR/patch_session_recovery_ui.py" "$BUILD_DIR" && python3 "$PATCH_DIR/test_patch_session_recovery_ui.py" --install "$BUILD_DIR" && npm test -- src/core/lib/date.test.ts src/components/Routines/screens/Detail/SessionRecovery.test.tsx && npm run typecheck && npm run build)
 python3 "$PATCH_DIR/patch_muscle_diagram.py" "$BUILD_DIR/build/main.js" "$STAGED_DIR/react-main.js.next"
 
-mkdir "$BUILD_DIR/server"
-curl --fail --location --silent --show-error "$WGER_REPO/archive/$WGER_COMMIT.tar.gz" --output "$BUILD_DIR/server-source.tgz"
-tar -xzf "$BUILD_DIR/server-source.tgz" --strip-components=1 -C "$BUILD_DIR/server"
-python3 "$PATCH_DIR/patch_session_recovery.py" "$BUILD_DIR/server" "$STAGED_DIR"
-# Use the released image's dependencies, never the host environment or live database.
-docker -H "$DOCKER_HOST" run --rm --network none --user wger --entrypoint python3 \
-  --env PYTHONDONTWRITEBYTECODE=1 \
-  --mount "type=bind,src=$PATCH_DIR,target=/tests,readonly" \
-  "$IMAGE" /tests/test_patch_session_recovery.py --orm
-
-
 cat > "$STAGED_DIR/corresponding-source.json.next" <<EOF
 {"license":"AGPL-3.0","server":{"repository":"$WGER_REPO","commit":"$WGER_COMMIT"},"frontend":{"repository":"$REACT_REPO","commit":"$REACT_COMMIT","upstream_commit":"89d234a800ba0f2097162f1d91444c7e3a5ccc5c"}}
 EOF
 
 # Publish candidates only once every strict pinned-source transformation succeeds.
-for name in react-main.js corresponding-source.json \
-  manager-session-recovery.py manager-models-init.py manager-api-views.py manager-tasks.py \
-  manager-log.py manager-0030-workoutlog-cardio-metrics.py manager-0031-session-recovery.py; do
+for name in react-main.js corresponding-source.json; do
   test -f "$STAGED_DIR/$name.next"
 done
 for artifact in "$STAGED_DIR/"*.next; do
