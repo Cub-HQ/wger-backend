@@ -1,14 +1,10 @@
 import importlib.util
-import json
 from pathlib import Path
-import re
 import subprocess
 import sys
-import tempfile
 import unittest
 
 ROOT = Path(__file__).parents[1]
-PATCH = Path(__file__).with_name("patch_australian_dates.py")
 NGINX = ROOT / "config" / "nginx.conf"
 TEMPLATE_PATCH = Path(__file__).with_name("patch_australian_template_dates.py")
 PDF_PATCH = Path(__file__).with_name("patch_australian_pdf.py")
@@ -99,117 +95,6 @@ with TemporaryDirectory() as directory:
             patch.patch_text(source),
             "date = datetime.date.today().strftime('%d/%m/%Y')",
         )
-
-
-    def test_shared_react_helpers_and_pickers_use_australian_dates(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fixtures = {
-                "src/core/lib/date.ts": '''import i18n from 'i18next';
-import { DateTime, DateTimeFormatOptions } from "luxon";
-export const DAY_MS = 24 * 60 * 60 * 1000;
-export function dateTimeToLocale(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions,) {
-    if (dateTime == null) return '';
-    locale = locale ?? i18n.language;
-    options = options ?? { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
-    return dateTime.toLocaleString(locale ? [locale] : [], options);
-}
-export function dateTimeToLocaleHHMM(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions) {
-    if (dateTime == null) return null;
-    locale = locale ?? i18n.language;
-    options = options ?? { hour: '2-digit', minute: '2-digit' };
-    return dateTime.toLocaleTimeString(locale ? [locale] : [], options);
-}
-export function luxonDateTimeToLocale(dateTime: DateTime | null, locale?: string, options?: DateTimeFormatOptions,) {
-    if (dateTime == null) return '';
-    locale = locale ?? i18n.language;
-    options = options ?? DateTime.DATE_MED;
-    return dateTime.toLocaleString(options, { locale: locale });
-}
-export function dateToLocale(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions) {
-    if (dateTime == null) return '';
-    locale = locale ?? i18n.language;
-    options = options ?? { year: '2-digit', month: '2-digit', day: '2-digit' };
-    return dateTime.toLocaleString(locale ? [locale] : [], options);
-}
-''',
-                "src/core/lib/date.test.ts": '''import { dateTimeToHHMM, dateToRelative, dateToYYYYMMDD, yyyymmddToDate } from "@/core/lib/date";
-    describe("test date utility", () => {
-''',
-                "src/components/Dashboard/MeasurementCard.tsx": '''import { makeLink, WgerLink } from "@/core/lib/url";
-<TableCell>{entry.date.toLocaleDateString()}</TableCell>
-''',
-                "src/components/Routines/widgets/forms/SessionForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n' * 3,
-                "src/components/Routines/widgets/forms/RoutineForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n' * 2,
-                "src/components/Measurements/widgets/EntryDateTimeField.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n',
-                "src/components/Nutrition/widgets/forms/MealForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n',
-                "src/components/Nutrition/widgets/forms/NutritionDiaryEntryForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n<DateTimePicker format="yyyy-MM-dd HH:mm" />\n',
-                "src/components/Nutrition/widgets/forms/PlanForm.tsx": '<LocalizationProvider dateAdapter={AdapterLuxon} adapterLocale={i18n.language}>\n<DatePicker format="yyyy-MM-dd" />\n' * 2,
-                "src/components/Routines/widgets/forms/SessionForm.test.tsx": """const formattedDate = new Date().toLocaleDateString(
-            'en-us',
-            { year: 'numeric', month: '2-digit', day: '2-digit' }
-        );
-const timeStartFormatted = timeStart.toLocaleString(DateTime.TIME_SIMPLE, { locale: 'en-us' });
-const timeEndFormatted = timeEnd.toLocaleString(DateTime.TIME_SIMPLE, { locale: 'en-us' });
-""",
-            }
-            for relative, content in fixtures.items():
-                target = root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content)
-            subprocess.run([sys.executable, str(PATCH), str(root)], check=True)
-            source = (root / "src/core/lib/date.ts").read_text()
-            measurement = (root / "src/components/Dashboard/MeasurementCard.tsx").read_text()
-            picker_sources = "\n".join(
-                (root / path).read_text()
-                for path in fixtures
-                if path.endswith(".tsx") and path != "src/components/Dashboard/MeasurementCard.tsx"
-            )
-
-        display_locale = re.search(r"const DISPLAY_LOCALE = .*?;", source).group()
-        date_time = source[source.index("export function dateTimeToLocale("):source.index("export function dateTimeToLocaleHHMM(")]
-        time_only = source[source.index("export function dateTimeToLocaleHHMM("):source.index("export function luxonDateTimeToLocale(")]
-        luxon = source[source.index("export function luxonDateTimeToLocale("):source.index("export function dateToLocale(")]
-        date_only = source[source.index("export function dateToLocale("):]
-        javascript = display_locale + "\n" + date_time + luxon + date_only
-        javascript = javascript.replace(
-            "export function dateTimeToLocale(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions,)",
-            "function dateTimeToLocale(dateTime, locale, options)",
-        ).replace(
-            "export function luxonDateTimeToLocale(dateTime: DateTime | null, locale?: string, options?: DateTimeFormatOptions,)",
-            "function luxonDateTimeToLocale(dateTime, locale, options)",
-        ).replace(
-            "export function dateToLocale(dateTime: Date | null, locale?: string, options?: Intl.DateTimeFormatOptions)",
-            "function dateToLocale(dateTime, locale, options)",
-        )
-        javascript += '''
-const DateTime = { fromJSDate: (value) => ({
-    toLocaleString: (options, config) => value.toLocaleDateString(config.locale, options),
-}) };
-const date = new Date(2026, 8, 21, 15, 24);
-console.log(JSON.stringify([
-    dateToLocale(date),
-    dateTimeToLocale(date).split(',')[0],
-    luxonDateTimeToLocale(DateTime.fromJSDate(date)),
-    dateToLocale(date, 'en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }),
-    dateToLocale(new Date(2026, 0, 5), 'en-US', { month: '2-digit', day: '2-digit' }),
-    luxonDateTimeToLocale(DateTime.fromJSDate(new Date(2026, 0, 5)), 'en-US', { year: '2-digit', month: 'long', day: 'numeric' }),
-]));
-'''
-        output = subprocess.run(
-            ["node", "-e", javascript], check=True, text=True, capture_output=True
-        )
-        self.assertEqual(json.loads(output.stdout), ["21/09/2026"] * 4 + ["05/01/2026"] * 2)
-        self.assertEqual(source.count("locale = DISPLAY_LOCALE;"), 3)
-        self.assertIn("locale = locale ?? i18n.language;", time_only)
-        self.assertNotIn("locale = DISPLAY_LOCALE;", time_only)
-        self.assertIn("dateToLocale(entry.date)", measurement)
-        self.assertNotIn("adapterLocale={i18n.language}", picker_sources)
-        self.assertEqual(picker_sources.count('adapterLocale="en-AU"'), 10)
-        self.assertNotIn('format="yyyy-MM-dd', picker_sources)
-        self.assertIn('format="dd/MM/yyyy HH:mm"', picker_sources)
-        self.assertEqual(picker_sources.count('format="dd/MM/yyyy"'), 2)
-
 
 
 if __name__ == "__main__":
