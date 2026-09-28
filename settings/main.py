@@ -16,6 +16,7 @@
 
 # Standard Library
 import hashlib
+import ipaddress
 import secrets
 import warnings
 
@@ -273,6 +274,41 @@ AXES_IPWARE_PROXY_COUNT = env.int('AXES_IPWARE_PROXY_COUNT', 0)
 AXES_IPWARE_META_PRECEDENCE_ORDER = env.list(
     'AXES_IPWARE_META_PRECEDENCE_ORDER', default=['REMOTE_ADDR']
 )
+AXES_NEVER_LOCKOUT_WHITELIST = env.bool('AXES_NEVER_LOCKOUT_WHITELIST', True)
+AXES_IP_WHITELIST = env.list('AXES_IP_WHITELIST', default=[])
+# Never lock out loopback, private, Docker or Tailscale (100.64/10) clients.
+_AXES_TRUSTED_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in env.list(
+        'AXES_TRUSTED_NETWORKS',
+        default=[
+            '127.0.0.0/8',
+            '10.0.0.0/8',
+            '172.16.0.0/12',
+            '192.168.0.0/16',
+            '100.64.0.0/10',
+            '::1/128',
+        ],
+    )
+)
+
+
+def _axes_never_lock_trusted_networks(request, credentials=None):
+    candidates = (
+        request.META.get('REMOTE_ADDR', ''),
+        request.META.get('HTTP_X_FORWARDED_FOR', '').split(',', 1)[0].strip(),
+    )
+    for candidate in candidates:
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if any(address in network for network in _AXES_TRUSTED_NETWORKS):
+            return True
+    return False
+
+
+AXES_WHITELIST_CALLABLE = _axes_never_lock_trusted_networks
 
 #
 # Django-allauth social providers
