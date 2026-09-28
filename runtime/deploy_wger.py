@@ -45,7 +45,8 @@ EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.
                   'patches/test_release_route.py', 'patches/test_patch_progression_chart.py',
                   'patches/test_patch_ux_wave1.py', 'patches/test_patch_ux_wave3.py',
                   'patches/test_australian_dates.py', 'patches/check_pinned_artifacts.py',
-                  'patches/test_powersync_storage.py', 'operations/test_backup_route.py')
+                  'patches/test_powersync_storage.py', 'patches/test_backend_image.py',
+                  'operations/test_backup_route.py')
 RETIRED_FILES = ('patches/patch_server_wave3.py', 'patches/patch_ux_wave1.py',
                  'patches/patch_ux_wave3.py')
 REMOVED_FILES = ('Dockerfile', 'settings-main.py')
@@ -150,14 +151,21 @@ def deploy(args):
             destination = candidate / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original, destination)
-        subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh')], env=env, check=True)
+        # The backend image first: legacy preparation probes and extracts from the compose image.
+        for step in (['--backend-image'], []):
+            subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh'), *step], env=env, check=True)
         expected = hashlib.sha256((candidate / 'overrides/react-main.js.next').read_bytes()).hexdigest()
-        from wger_preflight import run
-        preflight = run(machinery, live, env)
         # A replayed UI revision must not downgrade independently installed proxy/sync fixes.
         for name in ('config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml'):
             if PREFIX + name not in args.changed_file:
                 shutil.copyfile(live / name, candidate / name)
+        from wger_preflight import run
+        # The candidate image restore is proven against the commit prep pinned, never a live/env value.
+        pinned = re.search(r'^BACKEND_COMMIT=([0-9a-f]{40})$', (candidate / 'patches/prepare-react.sh').read_text(), re.M)
+        if not pinned:
+            raise ValueError('DEPLOY_MISSING: prepare-react.sh does not pin BACKEND_COMMIT')
+        preflight = run(machinery, live, env, candidate_receipt=candidate / 'overrides/backend-image.json.next',
+                        candidate_commit=pinned[1])
         env.update(WGER_SOURCE_DEPLOY=str(candidate), WGER_EXPECTED_SHA256=expected,
                    WGER_RELEASE_COMMIT=args.commit)
         result = subprocess.run(['bash', str(machinery / PREFIX / 'patches/release-web.sh')],
