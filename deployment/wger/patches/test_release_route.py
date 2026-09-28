@@ -364,9 +364,12 @@ elif "config" in args and "--format" in args:
         volumes = services[service].setdefault('volumes', [])
         if service != 'web':
             volumes.append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py','read_only':True})
-        # Only the prior (old-layout) compose still binds retired backend overrides.
+        # Only the prior (old-layout) compose still binds retired backend overrides and the pre-#417 bundle overlay.
+        legacy_bundle = {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/react-main.js'),'target':'/home/wger/src/node_modules/@wger-project/react-components/build/main.js','read_only':True}
         if not any('candidate/compose.yaml' in arg for arg in args):
             volumes.extend({'type':'bind','source':str(path),'target':'/home/wger/src/legacy/'+path.name,'read_only':True} for path in sorted((Path(os.environ['WGER_DEPLOY_DIR'])/'overrides').glob('manager-*.py')))
+            if service == 'web' and Path(legacy_bundle['source']).exists(): volumes.append(legacy_bundle)
+        elif fault == 'candidate-legacy-bind' and service == 'web': volumes.append(legacy_bundle)
     if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
     if fault=='frontend-bind':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/template.html'),'target':'/home/wger/src/node_modules/@wger-project/react-components/build/main.js'})
     for arg in args:
@@ -475,6 +478,10 @@ elif "sha256sum" in args:
                     legacy_before[name] = None if index % 2 == 0 else f'prior deployment {name}\n'.encode()
                     if legacy_before[name] is not None:
                         target.write_bytes(legacy_before[name])
+                # The live deployment still holds and binds the pre-#417 overlay; release must
+                # accept that old layout before cutover and leave it in place for rollback.
+                legacy_before['react-main.js'] = b'legacy react-main.js overlay\n'
+                (overrides / 'react-main.js').write_bytes(legacy_before['react-main.js'])
 
                 def assert_recovery_restored():
                     # Retired overrides are never staged, replaced or removed: old-layout rollback keeps them.
@@ -507,7 +514,6 @@ elif "sha256sum" in args:
                         self.assertFalse((deploy / name).exists())
                     else:
                         self.assertEqual((deploy / name).read_text(), 'old ' + name)
-                self.assertFalse((overrides / 'react-main.js').exists())
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 assert_recovery_restored()
                 recovery = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
@@ -573,6 +579,7 @@ elif "sha256sum" in args:
                     ('image-commit', None, 'no longer resolves to receipt image'),
                     ('compose-tag', None, 'is not the receipt candidate'),
                     ('frontend-bind', None, 'bind overrides the image frontend package'),
+                    ('candidate-legacy-bind', None, 'bind overrides the image frontend package'),
                     ('', '{}', 'receipt is missing or malformed'),
                     ('', json.dumps({**CANDIDATE, 'app_build_commit': 'f' * 40}), 'receipt is missing or malformed'),
                     ('', json.dumps({**CANDIDATE, 'tag': 'fitness-wger-backend:latest'}), 'receipt is missing or malformed'),
@@ -659,6 +666,14 @@ elif "sha256sum" in args:
                 self.assertIn('final restore did not recover prior image/running state: powersync',dead.stderr)
                 self.assertNotIn('previous compose running;',dead.stderr)
                 docker_log.with_suffix('.dead-sync').unlink()
+                # In place (no candidate), the deployment's own compose is what gets served: the legacy overlay refuses.
+                offset = len(docker_log.read_text().splitlines())
+                in_place = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env, text=True, capture_output=True)
+                self.assertNotEqual(in_place.returncode, 0)
+                self.assertIn('bind overrides the image frontend package', in_place.stderr)
+                attempts = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
+                self.assertFalse(any(verb in command for command in attempts for verb in ('stop', 'up', 'tag', 'pg_dump')))
+                (overrides / 'react-main.js').unlink()
                 served_file.write_text('stale collected browser bundle\n')
                 mismatch = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                           text=True, capture_output=True)

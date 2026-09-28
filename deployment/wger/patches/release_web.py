@@ -172,14 +172,17 @@ def rendered_config(path, files=()):
 
 # The frontend is the image's reviewed package; a bind over it would serve unreviewed bytes again.
 FRONTEND_TARGET = '/home/wger/src/node_modules/@wger-project/react-components'
+# The pre-#417 compose bound this overlay. Only the existing deployment and its rollback may hold it.
+LEGACY_FRONTEND_BIND = (deploy_dir / 'overrides/react-main.js', FRONTEND_TARGET + '/build/main.js')
 
 
-def verify_binds(config, staged=False):
+def verify_binds(config, staged=False, legacy=False):
     for service in config['services'].values():
         for mount in service.get('volumes', []):
             if mount['type'] != 'bind':
                 continue
-            if (mount['target'] + '/').startswith(FRONTEND_TARGET + '/'):
+            if ((mount['target'] + '/').startswith(FRONTEND_TARGET + '/')
+                    and not (legacy and (Path(mount['source']), mount['target']) == LEGACY_FRONTEND_BIND)):
                 raise RuntimeError('bind overrides the image frontend package: ' + mount['target'])
             path = Path(mount['source'])
             # This compose uses named volumes for directories; every bind is a file.
@@ -238,7 +241,7 @@ prior_images = {service: run('docker', '-H', docker_host, 'inspect', '-f', '{{.I
 prior_schema = applied_migrations()
 # Non-web service/topology changes have no reviewed activation in this route.
 before_config = rendered_config(deploy_dir / 'compose.yaml')
-verify_binds(before_config)
+verify_binds(before_config, legacy=source_deploy is not None)
 if source_deploy:
     next_config = rendered_config(source_deploy / 'compose.yaml')
     verify_binds(next_config, staged=True)
@@ -280,7 +283,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
     rollback_override.write_text('services:\n' + ''.join(f'  {service}:\n    image: fitness-wger-rollback:{service}\n' for service in rollback_images))
     for service, image in rollback_images.items():
         run('docker', '-H', docker_host, 'tag', image, f'fitness-wger-rollback:{service}')
-    verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)))
+    verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)), legacy=True)
     for name in names:
         current = deploy_dir / 'overrides' / name
         # Rendering compose above makes Docker create a directory for any bind source
@@ -392,7 +395,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
                 current, old = deploy_dir / 'overrides' / name, rollback / name
                 if old.exists(): shutil.copy2(old, current)
                 else: current.unlink(missing_ok=True)
-            verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)))
+            verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)), legacy=True)
             compose('stop', 'powersync', *services)
             if snapshot_complete:
                 compose('exec', '-T', 'db', 'dropdb', '--if-exists', '--force', '-U', db_user, db_name)
@@ -419,7 +422,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
                     raise RuntimeError('rollback public login did not return 200')
         except Exception as rollback_error:
             try:
-                verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)))
+                verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)), legacy=True)
                 compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services, files=(rollback_override,))
                 wait_healthy(container_id('web', files=(rollback_override,)))
                 try:
