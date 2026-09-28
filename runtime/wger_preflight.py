@@ -15,7 +15,11 @@ import urllib.error
 import urllib.request
 
 
-DATABASE_PROOF = """import json
+PROTECTED = ('manager_workoutsession', 'manager_workoutlog')
+CANDIDATE_REPOSITORY = 'fitness-wger-backend:'
+IMAGE_ID = re.compile(r'sha256:[0-9a-f]{64}')
+
+DATABASE_PROOF = """import hashlib, json
 from django.apps import apps
 from django.db.migrations.recorder import MigrationRecorder
 from django.db import connection
@@ -31,7 +35,24 @@ elif ['manager', '0031_workoutsessionrecovery'] in schema:
 else:
     # Preflight runs against the live baseline before the first recovery release.
     counts['recoveries'] = 0
-print(json.dumps({'counts': counts, 'schema': schema}))
+# Per-column digests keyed by primary key: equal counts cannot hide an edited session or set.
+protected = {}
+for table in ('manager_workoutsession', 'manager_workoutlog'):
+    with connection.cursor() as cursor:
+        columns = sorted(column.name for column in connection.introspection.get_table_description(cursor, table))
+        if 'id' not in columns:
+            raise RuntimeError('protected table has no id column: ' + table)
+        digests = {column: hashlib.sha256() for column in columns}
+        quoted = ', '.join(connection.ops.quote_name(column) for column in columns)
+        cursor.execute('SELECT ' + quoted + ' FROM ' + connection.ops.quote_name(table) + ' ORDER BY ' + connection.ops.quote_name('id'))
+        rows = 0
+        for row in cursor.fetchall():
+            rows += 1
+            key = row[columns.index('id')]
+            for column, value in zip(columns, row):
+                digests[column].update(json.dumps([key, value], default=str).encode() + b'\\n')
+    protected[table] = {'rows': rows, 'columns': {column: digest.hexdigest() for column, digest in digests.items()}}
+print(json.dumps({'counts': counts, 'schema': schema, 'protected': protected}))
 """
 
 
@@ -47,6 +68,53 @@ def _database(docker, container, env):
             or any(type(n) is not int or n < 0 for n in proof['counts'].values())
             or not proof['schema']):
         raise RuntimeError('incomplete database proof')
+    protected = proof.get('protected')
+    if (not isinstance(protected, dict) or set(protected) != set(PROTECTED)
+            or protected['manager_workoutsession'].get('rows') != proof['counts']['sessions']
+            or protected['manager_workoutlog'].get('rows') != proof['counts']['logs']
+            or any(not isinstance(protected[table].get('columns'), dict) or 'id' not in protected[table]['columns']
+                   or not all(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest)
+                              for digest in protected[table]['columns'].values())
+                   for table in PROTECTED)):
+        raise RuntimeError('incomplete protected session/set proof')
+    return proof
+
+
+def _protected_unchanged(before, after):
+    """Candidate migrations may add columns; any existing session/set value or row change refuses."""
+    for table in PROTECTED:
+        old, new = before['protected'][table], after['protected'][table]
+        if old['rows'] != new['rows'] or any(new['columns'].get(column) != digest
+                                             for column, digest in old['columns'].items()):
+            raise RuntimeError('candidate restore changed protected ' + table + ' rows')
+
+
+def _candidate(docker, env, receipt_path, commit):
+    """Return the immutable candidate image named by the prepared receipt, checked against Docker."""
+    if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise RuntimeError('candidate commit must be a full lowercase git sha')
+    try:
+        receipt = json.loads(Path(receipt_path).read_text())
+    except (OSError, TypeError, ValueError) as error:
+        raise RuntimeError('candidate image receipt unreadable') from error
+    if (not isinstance(receipt, dict) or receipt.get('commit') != commit
+            or receipt.get('app_build_commit') != commit
+            or receipt.get('tag') != CANDIDATE_REPOSITORY + commit
+            or not isinstance(receipt.get('image_id'), str) or not IMAGE_ID.fullmatch(receipt['image_id'])):
+        raise RuntimeError('candidate image receipt does not match candidate commit')
+    image = receipt['image_id']
+    try:
+        records = json.loads(_command([*docker, 'image', 'inspect', image, receipt['tag']], env))
+    except (subprocess.CalledProcessError, ValueError) as error:
+        raise RuntimeError('candidate image unavailable: ' + image) from error
+    # Inspecting the tag too catches a stale receipt whose tag was since moved to another image.
+    if len(records) != 2 or any(
+            record.get('Id') != image
+            or (record.get('Config') or {}).get('Labels', {}).get('org.opencontainers.image.revision') != commit
+            or 'APP_BUILD_COMMIT=' + commit not in ((record.get('Config') or {}).get('Env') or [])
+            for record in records):
+        raise RuntimeError('candidate image identity does not match receipt')
+    return {'commit': commit, 'image_id': image, 'tag': receipt['tag']}
     return proof
 
 
@@ -143,8 +211,11 @@ def _receipt(path, snapshot):
     return receipt
 
 
-def run(source: Path, deploy: Path, env: dict) -> dict:
-    """Return evidence only after restored proof, owned cleanup and live parity."""
+def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candidate_commit: str) -> dict:
+    """Return evidence only after the candidate image restored proof, owned cleanup and live parity.
+
+    The snapshot's own images stay the rollback identity; the drill runs the prepared candidate.
+    """
     source, deploy = Path(source), Path(deploy)
     env = {**os.environ, **env}
     home = Path.home()
@@ -173,6 +244,7 @@ def run(source: Path, deploy: Path, env: dict) -> dict:
     spec = importlib.util.spec_from_file_location('wger_snapshot_preflight', operations / 'snapshot.py')
     snapshot_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(snapshot_module)
+    candidate = _candidate(docker, env, candidate_receipt, candidate_commit)
     before = _baseline(docker, deploy, env)
     residues = _resources(docker, env)
     previous = set(destination.glob('wger-restore-*'))
@@ -196,23 +268,29 @@ def run(source: Path, deploy: Path, env: dict) -> dict:
                           'health': before['containers'][service]['state'][1]}
                 for service in ('powersync', 'web', 'celery_worker', 'celery_beat')}:
             raise RuntimeError('snapshot writer identities differ from baseline')
-        output = _command([sys.executable, operations / 'restore-drill.py', snapshot], env)
+        output = _command([sys.executable, operations / 'restore-drill.py', snapshot,
+                           '--candidate-image', candidate['image_id']], env)
         receipt_path = Path(json.loads(output.splitlines()[-1])['receipt'])
         receipt = _receipt(receipt_path, snapshot)
         if receipt.get('state') != 'restored-awaiting-independent-application-check':
             raise RuntimeError('restore is incomplete')
+        if receipt.get('image_source') != 'candidate' or receipt.get('web_image') != candidate['image_id']:
+            raise RuntimeError('restore did not run the candidate image')
         application = _application(receipt['port'])
         restored = _database(docker, receipt['project'] + '-web', env)
         schema = {tuple(row) for row in restored['schema']}
         if (restored['counts'] != before['database']['counts']
                 or not {tuple(row) for row in before['database']['schema']} <= schema):
             raise RuntimeError('restored counts or applied migration proof mismatch')
+        _protected_unchanged(before['database'], restored)
         _command([*docker, 'exec', receipt['project'] + '-web', 'python3', 'manage.py', 'migrate', '--check'], env)
         if _media(docker, receipt['project'] + '-media', env) != before['media']:
             raise RuntimeError('restored canonical media inventory/count mismatch')
         evidence = {'snapshot': str(snapshot), 'receipt': str(receipt_path), 'format': manifest['format'],
                     'application': application, 'counts': restored['counts'], 'schema': restored['schema'],
-                    'media_sha256': hashlib.sha256(raw).hexdigest(), 'media_files': before['media'][1]}
+                    'media_sha256': hashlib.sha256(raw).hexdigest(), 'media_files': before['media'][1],
+                    'candidate': candidate, 'rollback_images': json.loads((snapshot / 'images.json').read_text()),
+                    'protected_rows_unchanged': True}
     finally:
         failures = []
         # A failed restore may have written its ownership receipt before exiting.

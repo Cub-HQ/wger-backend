@@ -463,6 +463,11 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
         for table in ('User', 'WorkoutSession', 'WorkoutLog', 'ExerciseVideo'):
             self.database.execute(f'CREATE TABLE {table} (id INTEGER PRIMARY KEY)')
             self.database.execute(f'INSERT INTO {table} VALUES (1)')
+        # Real protected tables whose values DATABASE_PROOF digests; rows match the counted models.
+        self.database.execute('CREATE TABLE manager_workoutsession (id INTEGER PRIMARY KEY, date TEXT, notes TEXT)')
+        self.database.execute("INSERT INTO manager_workoutsession VALUES (1, '2026-09-01', 'synthetic private note')")
+        self.database.execute('CREATE TABLE manager_workoutlog (id INTEGER PRIMARY KEY, session_id INTEGER, weight REAL, repetitions INTEGER)')
+        self.database.execute('INSERT INTO manager_workoutlog VALUES (1, 1, 80.0, 5)')
 
     def install_recovery(self, database=None):
         database = database if database is not None else self.database
@@ -483,10 +488,13 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
             return types.SimpleNamespace(objects=types.SimpleNamespace(
                 count=lambda: database.execute(f'SELECT COUNT(*) FROM {model}').fetchone()[0]))
 
+        def table_description(cursor, table):
+            return [types.SimpleNamespace(name=row[1]) for row in database.execute(f'PRAGMA table_info({table})')]
+
         modules = {
             'django.apps': types.SimpleNamespace(apps=types.SimpleNamespace(get_model=get_model)),
             'django.db': types.SimpleNamespace(connection=types.SimpleNamespace(
-                introspection=types.SimpleNamespace(table_names=table_names),
+                introspection=types.SimpleNamespace(table_names=table_names, get_table_description=table_description),
                 cursor=lambda: contextlib.closing(database.cursor()),
                 ops=types.SimpleNamespace(quote_name=lambda name: '"' + name + '"'))),
             'django.db.migrations.recorder': types.SimpleNamespace(MigrationRecorder=types.SimpleNamespace(
@@ -500,6 +508,7 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
         with patch.object(preflight, '_command', return_value=raw.encode()):
             result = preflight._database(['docker'], 'synthetic-web', {})
         self.assertNotIn('private synthetic', raw)
+        self.assertNotIn('synthetic private note', raw)
         return result
 
     def test_legacy_table_absence_allows_initial_rollout(self):
@@ -533,6 +542,38 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
                                      sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ
                                      and table == 'manager_workoutsessionrecovery' else sqlite3.SQLITE_OK)
         with self.assertRaises(sqlite3.DatabaseError):
+            self.proof()
+
+    def restored_copy(self):
+        self.database.commit()
+        restored = sqlite3.connect(':memory:')
+        self.addCleanup(restored.close)
+        self.database.backup(restored)
+        return restored
+
+    def test_candidate_edit_of_protected_row_refuses_even_with_equal_counts(self):
+        baseline = self.proof()
+        for statement, table in (('UPDATE manager_workoutlog SET weight = 82.5 WHERE id = 1', 'manager_workoutlog'),
+                                 ("UPDATE manager_workoutsession SET notes = NULL WHERE id = 1", 'manager_workoutsession'),
+                                 ('UPDATE manager_workoutlog SET id = 7 WHERE id = 1', 'manager_workoutlog'),
+                                 ('ALTER TABLE manager_workoutsession DROP COLUMN notes', 'manager_workoutsession')):
+            with self.subTest(statement=statement):
+                restored = self.restored_copy()
+                restored.execute(statement)
+                candidate = self.proof(restored)
+                self.assertEqual(candidate['counts'], baseline['counts'])
+                with self.assertRaisesRegex(RuntimeError, 'candidate restore changed protected ' + table + ' rows'):
+                    preflight._protected_unchanged(baseline, candidate)
+
+    def test_candidate_added_column_and_untouched_rows_pass(self):
+        baseline = self.proof()
+        restored = self.restored_copy()
+        restored.execute('ALTER TABLE manager_workoutlog ADD COLUMN distance REAL')
+        preflight._protected_unchanged(baseline, self.proof(restored))
+
+    def test_protected_rows_must_match_counted_models(self):
+        self.database.execute('INSERT INTO manager_workoutlog VALUES (2, 1, 60.0, 8)')
+        with self.assertRaisesRegex(RuntimeError, 'incomplete protected session/set proof'):
             self.proof()
 
     def test_validator_requires_nonnegative_integer_recovery_count(self):
@@ -607,33 +648,86 @@ class DrillRouteTest(unittest.TestCase):
             with self.subTest(recovery=recovery):
                 self.cleanup_route(recovery, mismatch=True)
 
-    def test_restore_pins_every_docker_command(self):
+    CANDIDATE = 'sha256:f3bfc71c7693fef7baaccaf097d3a2ca2ba9076ce547b90d777e5b822f74c008'
+
+    def restore(self, *options, resolved=None):
         deploy = self.root / 'deploy'
-        (deploy / 'config').mkdir(parents=True)
-        (deploy / 'overrides').mkdir()
+        (deploy / 'config').mkdir(parents=True, exist_ok=True)
+        (deploy / 'overrides').mkdir(exist_ok=True)
         (deploy / 'compose.yaml').write_text('services: {}')
         (deploy / 'config/private.env').write_text('PRIVATE=yes\n')
         snapshot = self.root / 'snapshot'
-        snapshot.mkdir()
+        snapshot.mkdir(exist_ok=True)
         backup.write_deployment_archive(snapshot / 'deployment.tar', deploy=deploy)
         for name in ('database.dump', 'media.tar'):
             (snapshot / name).write_bytes(b'fixture')
         (snapshot / 'manifest.json').write_text('{"files": {}}')
+        manifest = (snapshot / 'manifest.json').read_bytes()
         calls = []
 
         def command(argv, **kwargs):
             calls.append(argv)
             self.assertEqual(argv[:3], ['docker', '-H', self.host])
             self.assertEqual(kwargs.get('env', os.environ)['WGER_DOCKER_HOST'], self.host)
+            if argv[3:5] == ['image', 'inspect']:
+                return types.SimpleNamespace(stdout=((resolved or argv[-1]) + '\n').encode())
             services = services_for(deploy, ())
             services.update(db={'image': 'postgres:15'}, nginx={'image': 'nginx:alpine'})
             return types.SimpleNamespace(stdout=json.dumps({'services': services}).encode())
 
-        with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch('subprocess.run', side_effect=command):
+        previous = set(self.root.glob('wger-restore-*'))
+        with patch('sys.argv', ['restore-drill.py', str(snapshot), *options]), patch('subprocess.run', side_effect=command):
             restore_drill.main()
+        self.assertEqual((snapshot / 'manifest.json').read_bytes(), manifest)
+        [work] = set(self.root.glob('wger-restore-*')) - previous
+        receipt = json.loads((work / 'receipt.json').read_text())
+        return calls, receipt
+
+    @staticmethod
+    def web_images(calls):
+        # Media extraction (image then -C) and the migrating web container (image then -c).
+        return [call[call.index(flag) - 1] for call in calls if call[3] == 'run'
+                for flag in ('-C', '-c') if flag in call]
+
+    def test_restore_pins_every_docker_command(self):
+        calls, receipt = self.restore()
         self.assertEqual({call[3] for call in calls}, {'compose', 'network', 'volume', 'run', 'exec'})
-        receipt = json.loads(next(self.root.glob('wger-restore-*/receipt.json')).read_text())
         self.assertEqual(receipt['state'], 'restored-awaiting-independent-application-check')
+
+    def test_default_and_explicit_snapshot_restore_use_backup_image(self):
+        backup_image = services_for(self.root)['web']['image']
+        for options in ((), ('--snapshot-image',)):
+            with self.subTest(options=options):
+                calls, receipt = self.restore(*options)
+                self.assertEqual(self.web_images(calls), [backup_image, backup_image])
+                self.assertNotIn(self.CANDIDATE, sum(calls, []))
+                self.assertEqual((receipt['image_source'], receipt['web_image'], receipt['snapshot_web_image']),
+                                 ('snapshot', backup_image, backup_image))
+
+    def test_candidate_restore_migrates_with_candidate_not_backup_image(self):
+        backup_image = services_for(self.root)['web']['image']
+        calls, receipt = self.restore('--candidate-image', self.CANDIDATE)
+        self.assertEqual(self.web_images(calls), [self.CANDIDATE, self.CANDIDATE])
+        migrate = next(call for call in calls if '/bin/sh' in call)
+        self.assertIn('manage.py migrate', migrate[-1])
+        self.assertNotIn(backup_image, [argument for call in calls for argument in call if call[3] == 'run'])
+        self.assertEqual((receipt['image_source'], receipt['web_image'], receipt['snapshot_web_image']),
+                         ('candidate', self.CANDIDATE, backup_image))
+
+    def test_invalid_candidate_refuses_before_any_restore_resource(self):
+        for image, resolved, cause in (('fitness-wger-backend:latest', None, 'immutable'),
+                                        ('sha256:f3bfc71c', None, 'immutable'),
+                                        (self.CANDIDATE.upper(), None, 'immutable'),
+                                        (self.CANDIDATE, 'sha256:' + '2' * 64, 'does not resolve')):
+            with self.subTest(image=image):
+                with self.assertRaisesRegex(ValueError, cause):
+                    self.restore('--candidate-image', image, resolved=resolved)
+                self.assertEqual(list(self.root.glob('wger-restore-*')), [])
+
+    def test_candidate_and_snapshot_modes_are_exclusive(self):
+        with self.assertRaises(SystemExit):
+            self.restore('--candidate-image', self.CANDIDATE, '--snapshot-image')
+        self.assertEqual(list(self.root.glob('wger-restore-*')), [])
 
     def test_recovery_creation_and_cleanup_use_same_selected_endpoint(self):
         deploy = self.root / 'deploy'

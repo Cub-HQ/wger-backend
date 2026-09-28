@@ -13,6 +13,28 @@ import wger_preflight as gate
 from deploy_wger import failure_reason
 
 
+COMMIT = '0812ca39a80e82c071c99a54300df73e28668776'
+CANDIDATE = 'sha256:f3bfc71c7693fef7baaccaf097d3a2ca2ba9076ce547b90d777e5b822f74c008'
+BACKUP = 'sha256:' + '1' * 64
+DIGEST = 'a' * 64
+
+
+def protected(sessions, logs, **changes):
+    return {'manager_workoutsession': {'rows': sessions, 'columns': {'id': DIGEST, 'date': DIGEST, **changes.get('session', {})}},
+            'manager_workoutlog': {'rows': logs, 'columns': {'id': DIGEST, 'weight': DIGEST, **changes.get('log', {})}}}
+
+
+def candidate_receipt(**changes):
+    return {'repository': 'https://github.com/Cub-HQ/wger-backend', 'commit': COMMIT, 'archive_sha256': 'b' * 64,
+            'dockerfile': 'extras/docker/production/Dockerfile', 'base_image': 'wger/base@sha256:' + 'c' * 64,
+            'image_id': CANDIDATE, 'tag': 'fitness-wger-backend:' + COMMIT, 'app_build_commit': COMMIT, **changes}
+
+
+def image_record(image=CANDIDATE, revision=COMMIT, build=COMMIT):
+    return {'Id': image, 'Config': {'Labels': {'org.opencontainers.image.revision': revision},
+                                    'Env': ['PATH=/usr/bin', 'APP_BUILD_COMMIT=' + build]}}
+
+
 class PreflightTest(unittest.TestCase):
     def exercise(self, fault=None):
         source = Path(__file__).resolve().parents[2]
@@ -30,7 +52,7 @@ class PreflightTest(unittest.TestCase):
             env = {'WGER_WRITER_LOCK': str(home / 'writer'), 'WGER_HISTORY_LOCK': str(home / 'history')}
             env['WGER_DOCKER_HOST'] = 'unix://' + str(home / 'selected-docker.sock')
             counts = {'users': 5, 'sessions': 387, 'logs': 4564, 'videos': 0, 'recoveries': 2}
-            before = {'database': {'counts': counts, 'schema': [['manager', '0029']]},
+            before = {'database': {'counts': counts, 'schema': [['manager', '0029']], 'protected': protected(387, 4564)},
                       'media': (b'', 0), 'containers': {name: {'Image': name, 'state': ('running', 'healthy')}
                        for name in ('web', 'powersync', 'celery_worker', 'celery_beat')}}
             before['files'] = {'overrides/react-main.js': ('bundle-digest', 0o644)}
@@ -54,6 +76,14 @@ class PreflightTest(unittest.TestCase):
                 restored['counts']['recoveries'] -= 1
             if fault == 'schema':
                 restored['schema'] = [['manager', '0028']]
+            if fault == 'protected-value':
+                # Same counts, one edited set weight: counts alone would pass.
+                restored['protected'] = protected(387, 4564, log={'weight': 'e' * 64})
+            if fault == 'protected-column':
+                restored['protected']['manager_workoutsession']['columns'].pop('date')
+            if fault == 'added-column':
+                restored['protected']['manager_workoutlog']['columns']['cardio'] = 'f' * 64
+            (home / 'receipt.json').write_text(json.dumps(candidate_receipt()))
             project = 'wger-restore-1234567890'
             calls = []
             residue = False
@@ -67,6 +97,11 @@ class PreflightTest(unittest.TestCase):
                     self.assertEqual(args[:3], ['docker', '-H', env['WGER_DOCKER_HOST']])
                 if 'info' in args:
                     return b'' if fault == 'daemon' else b'selected-daemon'
+                if args[3:5] == ['image', 'inspect']:
+                    self.assertEqual(args[5:], [CANDIDATE, 'fitness-wger-backend:' + COMMIT])
+                    if fault == 'moved-tag':
+                        return json.dumps([image_record(), image_record(BACKUP)]).encode()
+                    return json.dumps([image_record(), image_record()]).encode()
                 script = Path(args[1]).name if len(args) > 1 else ''
                 if script == 'backup.py':
                     snapshot = destination / 'wger-20260925T000000000000Z'
@@ -82,12 +117,16 @@ class PreflightTest(unittest.TestCase):
                         (snapshot / 'database.dump').write_bytes(b'corrupt')
                     return json.dumps({'snapshot': str(snapshot)}).encode()
                 if script == 'restore-drill.py':
+                    self.assertEqual(args[3:], ['--candidate-image', CANDIDATE])
                     work = destination / project
                     work.mkdir()
+                    image_source = 'snapshot' if fault == 'snapshot-image' else 'candidate'
                     receipt = {'snapshot': args[2], 'project': project, 'port': 18197,
                                'created_containers': [project + '-' + n for n in ('db', 'web', 'nginx')],
                                'volumes': [project + '-' + n for n in ('db', 'media', 'static')],
                                'networks': [project, project + '-front'],
+                               'image_source': image_source, 'web_image': BACKUP if image_source == 'snapshot' else CANDIDATE,
+                               'snapshot_web_image': BACKUP,
                                'state': 'restored-awaiting-independent-application-check'}
                     (work / 'receipt.json').write_text(json.dumps(receipt))
                     residue = True
@@ -121,32 +160,84 @@ class PreflightTest(unittest.TestCase):
                     patch.object(gate, '_media', return_value=(b'wrong', 1) if fault == 'media' else (b'', 0)), \
                     patch.object(gate, '_application', side_effect=RuntimeError('HTTP failure') if fault == 'http' else None,
                                  return_value={'version': '2.7'}):
-                if fault and fault != 'reload':
+                if fault and fault not in ('reload', 'added-column'):
                     with self.assertRaises((RuntimeError, ValueError)) as caught:
-                        gate.run(source, deploy, env)
+                        gate.run(source, deploy, env, candidate_receipt=home / 'receipt.json', candidate_commit=COMMIT)
                     if fault == 'daemon':
                         self.assertIn('Docker daemon', str(caught.exception))
                     if fault == 'recoveries':
                         self.assertEqual(str(caught.exception), 'restored counts or applied migration proof mismatch')
+                    if fault in ('protected-value', 'protected-column'):
+                        table = 'manager_workoutlog' if fault == 'protected-value' else 'manager_workoutsession'
+                        self.assertEqual(str(caught.exception), 'candidate restore changed protected ' + table + ' rows')
+                    if fault == 'snapshot-image':
+                        self.assertEqual(str(caught.exception), 'restore did not run the candidate image')
+                    if fault == 'moved-tag':
+                        self.assertEqual(str(caught.exception), 'candidate image identity does not match receipt')
                     category = {'bundle': 'bundle_sha256', 'migration': 'migrations', 'live': 'images'}.get(fault)
                     if category:
                         self.assertEqual(str(caught.exception), 'live release identity changed during backup/restore preflight: ' + category)
                 else:
-                    result = gate.run(source, deploy, env)
+                    result = gate.run(source, deploy, env, candidate_receipt=home / 'receipt.json', candidate_commit=COMMIT)
                     self.assertTrue(result['live_baseline_unchanged'])
                     self.assertTrue(result['disposable_resources_removed'])
+                    self.assertTrue(result['protected_rows_unchanged'])
                     self.assertEqual(result['counts'], counts)
-                self.assertEqual(baseline.call_count, 0 if fault == 'daemon' else 2)
+                    self.assertEqual(result['candidate'], {'commit': COMMIT, 'image_id': CANDIDATE, 'tag': 'fitness-wger-backend:' + COMMIT})
+                    self.assertEqual({record['image'] for record in result['rollback_images'].values()},
+                                     {'web', 'powersync', 'celery_worker', 'celery_beat'})
+                self.assertEqual(baseline.call_count, 0 if fault in ('daemon', 'moved-tag') else 2)
             scripts = [Path(args[1]).name for args in calls]
-            if fault not in ('checksum', 'daemon'):
+            if fault not in ('checksum', 'daemon', 'moved-tag'):
                 self.assertEqual(scripts.count('cleanup-drill.py'), 1)
             else:
                 self.assertNotIn('restore-drill.py', scripts)
+            if fault == 'moved-tag':
+                self.assertNotIn('backup.py', scripts)
 
     def test_success_and_fail_closed_proof_matrix(self):
-        for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'recoveries', 'schema', 'pending-migration', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
+        for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'recoveries', 'schema', 'pending-migration',
+                      'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon', 'protected-value',
+                      'protected-column', 'added-column', 'snapshot-image', 'moved-tag'):
             with self.subTest(fault=fault):
                 self.exercise(fault)
+
+    def test_candidate_identity_is_required(self):
+        with self.assertRaises(TypeError):
+            gate.run(Path('.'), Path('.'), {})
+
+    def test_invalid_candidate_receipt_or_image_refuses(self):
+        good = [image_record(), image_record()]
+        cases = {
+            'stale commit': (candidate_receipt(commit='d' * 40), good, 'does not match candidate commit'),
+            'app build': (candidate_receipt(app_build_commit='d' * 40), good, 'does not match candidate commit'),
+            'foreign tag': (candidate_receipt(tag='wger/server:latest'), good, 'does not match candidate commit'),
+            'mutable id': (candidate_receipt(image_id='fitness-wger-backend:' + COMMIT), good, 'does not match candidate commit'),
+            'short id': (candidate_receipt(image_id='sha256:f3bfc71c'), good, 'does not match candidate commit'),
+            'backup image': (candidate_receipt(image_id=BACKUP), good, 'identity does not match'),
+            'revision label': (candidate_receipt(), [image_record(revision='d' * 40)] * 2, 'identity does not match'),
+            'env commit': (candidate_receipt(), [image_record(build='d' * 40)] * 2, 'identity does not match'),
+            'missing image': (candidate_receipt(), None, 'candidate image unavailable'),
+            'not json': ('not json', good, 'unreadable'),
+        }
+        for name, (receipt, records, cause) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'backend-image.json.next'
+                path.write_text(receipt if isinstance(receipt, str) else json.dumps(receipt))
+
+                def command(args, env):
+                    if records is None:
+                        raise gate.subprocess.CalledProcessError(1, args)
+                    return json.dumps(records).encode()
+                with patch.object(gate, '_command', side_effect=command):
+                    with self.assertRaisesRegex(RuntimeError, cause):
+                        gate._candidate(['docker'], {}, path, COMMIT)
+        with tempfile.TemporaryDirectory() as tmp:
+            for commit in ('0812ca39', COMMIT.upper(), None):
+                with self.subTest(commit=commit), self.assertRaisesRegex(RuntimeError, 'full lowercase git sha'):
+                    gate._candidate(['docker'], {}, Path(tmp) / 'absent', commit)
+            with self.assertRaisesRegex(RuntimeError, 'unreadable'):
+                gate._candidate(['docker'], {}, Path(tmp) / 'absent', COMMIT)
 
     def test_invalid_endpoint_refuses_before_backup(self):
         for endpoint, cause in (('', 'Docker endpoint'), ('tcp://localhost:2375', 'Docker endpoint'),
@@ -154,7 +245,8 @@ class PreflightTest(unittest.TestCase):
                                 ('unix:///absent-wger-test.sock', 'Docker socket')):
             with self.subTest(endpoint=endpoint), patch.object(gate, '_command') as command:
                 with self.assertRaisesRegex(RuntimeError, cause):
-                    gate.run(Path('.'), Path.home() / 'fitness-wger', {'WGER_DOCKER_HOST': endpoint})
+                    gate.run(Path('.'), Path.home() / 'fitness-wger', {'WGER_DOCKER_HOST': endpoint},
+                             candidate_receipt=Path('absent'), candidate_commit=COMMIT)
                 command.assert_not_called()
 
     def test_real_baseline_identity_ignores_restart_but_detects_bundle_bytes(self):
