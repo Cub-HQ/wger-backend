@@ -19,7 +19,7 @@ from release_env import resolve_public_origin
 PREFIX = 'deployment/wger/'
 # Explicit custody: never copy a directory recursively into the live deployment.
 PRODUCT_FILES = (
-    'compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py',
+    'compose.yaml', 'overrides/settings-main.py',
     'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml',
     'patches/prepare-react.sh', 'patches/patch_australian_dates.py',
     'patches/patch_progression_chart.py', 'patches/patch_muscle_diagram.py',
@@ -47,7 +47,7 @@ RETIRED_FILES = ('patches/patch_ux_wave1.py', 'patches/patch_ux_wave3.py')
 REMOVED_FILES = ('Dockerfile', 'settings-main.py', 'patches/patch_footer.py',
                  'formats/en_AU/formats.py', 'patches/patch_australian_template_dates.py',
                  'patches/patch_australian_pdf.py', 'patches/patch_session_recovery.py',
-                 'patches/patch_server_wave3.py')
+                 'patches/patch_server_wave3.py', 'overrides/manager-urls.py')
 
 
 def normalize_bundle(data):

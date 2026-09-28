@@ -180,7 +180,7 @@ class WgerDeployTests(unittest.TestCase):
         spec.loader.exec_module(module)
         changed = [module.PREFIX + name for name in
                    ('compose.yaml',
-                    'overrides/settings-main.py', 'overrides/manager-urls.py',
+                    'overrides/settings-main.py',
                     'patches/prepare-react.sh',
                     'patches/release_web.py', 'patches/test_release_route.py',
                     'patches/check_pinned_artifacts.py', *module.REMOVED_FILES,
@@ -230,13 +230,14 @@ class WgerDeployTests(unittest.TestCase):
                 self.assertTrue(script.is_relative_to(home.resolve()))
                 candidate = script.parents[1]
                 self.assertTrue(candidate.is_relative_to((home / '.cache').resolve()))
-                for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
+                for name in ('overrides/settings-main.py',
                              'patches/patch_session_recovery_ui.py',
                              'patches/test_patch_session_recovery_ui.py'):
                     self.assertEqual((candidate / name).read_bytes(),
                                      (source / module.PREFIX / name).read_bytes())
                 self.assertFalse((candidate / 'Dockerfile').exists())
                 self.assertFalse((candidate / 'patches/patch_session_recovery.py').exists())
+                self.assertFalse((candidate / 'overrides/manager-urls.py').exists())
                 self.assertFalse((candidate / 'operations/recovery-drill.py').exists())
                 raise RuntimeError('stop before backup or live release')
 
