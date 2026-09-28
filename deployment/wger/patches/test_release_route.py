@@ -25,6 +25,10 @@ RECOVERY_TARGETS = {
 }
 ARTIFACT_NAMES = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html',
                   'pdf.py', 'corresponding-source.json', *RECOVERY_TARGETS)
+RELEASE_NAMES = (*ARTIFACT_NAMES, 'backend-image.json')
+CANDIDATE_COMMIT = '0812ca39a80e82c071c99a54300df73e28668776'
+CANDIDATE = {'tag': 'fitness-wger-backend:' + CANDIDATE_COMMIT, 'image_id': 'sha256:' + 'c' * 64,
+             'commit': CANDIDATE_COMMIT, 'app_build_commit': CANDIDATE_COMMIT}
 
 
 @contextmanager
@@ -350,6 +354,7 @@ class ReleaseRouteTest(unittest.TestCase):
                         (overrides / name).write_text(f'old {name}\n')
                 bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
                 (overrides / 'react-main.js.next').write_bytes(bundle)
+                (overrides / 'backend-image.json.next').write_text(json.dumps(CANDIDATE))
                 writer, history = root / 'writer.lock', root / 'history.lock'
                 writer.touch(); history.touch()
                 docker_log = root / 'docker.jsonl'
@@ -388,7 +393,8 @@ if 'up' in args:
             elif line.strip().startswith('image:'): recorded[service] = line.split('image:', 1)[1].strip()
     for service in ('web','celery_worker','celery_beat','powersync'):
         if service in args:
-            image = recorded.get(service, 'image-id-powersync' if service == 'powersync' else 'mutable-' + service)
+            default = 'image-id-powersync' if service == 'powersync' else json.loads(os.environ['CANDIDATE'])['image_id']
+            image = recorded.get(service, 'other-image' if fault == 'writer-image' and service == 'celery_beat' else default)
             state[service] = state.get(image, image)
             if fault in ('proof-wrong-image', 'double-wrong-image') and service == 'celery_worker': state[service] = 'wrong-image'
     state_path.write_text(json.dumps(state))
@@ -399,10 +405,16 @@ if "compose" in args and "ps" in args and "-q" in args:
     if fault in ('proof-missing-container', 'proof-multiple-containers') and 'web' in services:
         print('' if fault == 'proof-missing-container' else 'id-web\\nid-other');sys.exit(0)
     print("\\n".join({"web":"id-web", "celery_worker":"id-worker", "celery_beat":"id-beat", "powersync":"id-powersync"}[service] for service in services))
+elif "image" in args and "inspect" in args:
+    candidate = json.loads(os.environ['CANDIDATE'])
+    commit = 'f' * 40 if fault == 'image-commit' else candidate['commit']
+    print(json.dumps({'Id': 'sha256:' + 'd' * 64 if fault == 'image-moved' else candidate['image_id'],
+                      'Config': {'Env': ['PATH=/usr/bin', 'APP_BUILD_COMMIT=' + commit],
+                                 'Labels': {'org.opencontainers.image.revision': candidate['commit']}}}))
 elif "inspect" in args:
     template, target = args[args.index("-f") + 1], args[-1]
     service = {'id-web':'web','id-worker':'celery_worker','id-beat':'celery_beat','id-powersync':'powersync'}[target]
-    if template == "{{.Image}}": print(state.get(service, "image-" + target) if fault.startswith(('proof-', 'double')) else "image-" + target)
+    if template == "{{.Image}}": print(state.get(service, "image-" + target))
     elif template == "{{.State.Status}}": print('exited' if (target=='id-powersync' and proxy.with_suffix('.dead-sync').exists()) or (fault=='proof-wrong-state' and service=='celery_worker' and state) else 'running')
     else: print("healthy")
 elif any("stored_name" in arg for arg in args):
@@ -441,6 +453,8 @@ elif any('WGER_RECOVERY_READY' in arg for arg in args):
 elif "pg_dump" in args: sys.stdout.buffer.write(b"database")
 elif "config" in args and "--format" in args:
     services={name:{} for name in ('web','celery_worker','celery_beat','powersync','db','cache','nginx')}
+    for service in ('web','celery_worker','celery_beat'):
+        services[service]['image'] = 'fitness-wger-backend:stale' if fault == 'compose-tag' else json.loads(os.environ['CANDIDATE'])['tag']
     services['web']['volumes']=[
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/history-overview.html'),'target':'/home/wger/src/wger/exercises/templates/history/overview.html'},
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/api-key.html'),'target':'/home/wger/src/wger/core/templates/user/api_key.html'},
@@ -498,7 +512,7 @@ elif "sha256sum" in args:
                        'DOCKER_LOG': str(docker_log), 'WGER_DEPLOY_DIR': str(deploy),
                        'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history),
                        'WGER_PUBLIC_URL': 'http://127.0.0.1:' + str(server.server_port),
-                       'RECOVERY_TARGETS': json.dumps(RECOVERY_TARGETS),
+                       'RECOVERY_TARGETS': json.dumps(RECOVERY_TARGETS), 'CANDIDATE': json.dumps(CANDIDATE),
                        'STATIC_ROOT': str(root / 'static'), 'STATIC_MANIFEST': str(manifest)}
                 result = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                         text=True, capture_output=True)
@@ -550,7 +564,7 @@ elif "sha256sum" in args:
                         deploy_path = deploy / name
                         deploy_path.parent.mkdir(parents=True, exist_ok=True)
                         deploy_path.write_text('old ' + name)
-                for name in ARTIFACT_NAMES:
+                for name in RELEASE_NAMES:
                     (candidate / 'overrides' / (name + '.next')).write_bytes((overrides / (name + '.next')).read_bytes())
                 private_before = (config / 'private.env').read_bytes()
                 staged_env = {**env, 'WGER_SOURCE_DEPLOY': str(candidate)}
@@ -651,9 +665,42 @@ elif "sha256sum" in args:
                         for restored in ('web', 'celery_worker', 'celery_beat'):
                             self.assertTrue(any('up' in command and restored in command and
                                                 any('compose.rollback.yaml' in arg for arg in command) for command in attempts))
+                # The writers' image is resolved from the receipt before any Docker mutation:
+                # a moved tag, wrong build commit, stale compose tag or absent receipt refuses.
+                receipt = candidate / 'overrides/backend-image.json.next'
+                for fault, content, error in (
+                    ('image-moved', None, 'no longer resolves to receipt image'),
+                    ('image-commit', None, 'no longer resolves to receipt image'),
+                    ('compose-tag', None, 'is not the receipt candidate'),
+                    ('', '{}', 'receipt is missing or malformed'),
+                    ('', json.dumps({**CANDIDATE, 'app_build_commit': 'f' * 40}), 'receipt is missing or malformed'),
+                    ('', json.dumps({**CANDIDATE, 'tag': 'fitness-wger-backend:latest'}), 'receipt is missing or malformed'),
+                ):
+                    with self.subTest(candidate_refusal=fault or content):
+                        if content is not None:
+                            receipt.write_text(content)
+                        offset = len(docker_log.read_text().splitlines())
+                        refused = subprocess.run([sys.executable, str(ROOT / 'release_web.py')],
+                                                 env={**staged_env, 'RELEASE_FAULT': fault}, text=True, capture_output=True)
+                        self.assertNotEqual(refused.returncode, 0)
+                        self.assertIn(error, refused.stderr)
+                        attempts = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
+                        self.assertFalse(any(verb in command for command in attempts for verb in ('stop', 'up', 'tag', 'pg_dump')))
+                        receipt.write_text(json.dumps(CANDIDATE))
+                docker_log.with_suffix('.images').unlink(missing_ok=True)
+                wrong_writer = subprocess.run([sys.executable, str(ROOT / 'release_web.py')],
+                                              env={**staged_env, 'RELEASE_FAULT': 'writer-image'}, text=True, capture_output=True)
+                self.assertNotEqual(wrong_writer.returncode, 0)
+                self.assertIn('writer is not running the receipt candidate image: celery_beat', wrong_writer.stderr)
+                self.assertIn('exact images restored', wrong_writer.stderr)
+                assert_recovery_restored()
                 (deploy / 'settings-main.py').mkdir()
                 staged = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertEqual(staged.returncode, 0, staged.stderr)
+                self.assertEqual(json.loads(staged.stdout.splitlines()[-1])['backend_image'],
+                                 {key: CANDIDATE[key] for key in ('tag', 'image_id', 'commit')})
+                self.assertEqual(json.loads((overrides / 'backend-image.json').read_text()), CANDIDATE)
+                self.assertEqual(json.loads(docker_log.with_suffix('.images').read_text())['celery_beat'], CANDIDATE['image_id'])
                 self.assertTrue((deploy / 'settings-main.py').is_dir())
                 for name in stage_names:
                     self.assertEqual((deploy / name).read_text(), 'new ' + name)
@@ -743,7 +790,7 @@ elif "sha256sum" in args:
             writer, history = root / 'writer.lock', root / 'history.lock'
             writer.touch(); history.touch()
             (root / 'overrides').mkdir()
-            for name in ARTIFACT_NAMES:
+            for name in RELEASE_NAMES:
                 (root / 'overrides' / (name + '.next')).write_text('staged ' + name)
             (root / 'config').mkdir()
             private_env = root / 'config/private.env'

@@ -151,7 +151,9 @@ def deploy(args):
             destination = candidate / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original, destination)
-        subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh')], env=env, check=True)
+        # The backend image first: legacy preparation probes and extracts from the compose image.
+        for step in (['--backend-image'], []):
+            subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh'), *step], env=env, check=True)
         expected = hashlib.sha256((candidate / 'overrides/react-main.js.next').read_bytes()).hexdigest()
         from wger_preflight import run
         preflight = run(machinery, live, env)

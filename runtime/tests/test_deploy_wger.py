@@ -224,6 +224,7 @@ class WgerDeployTests(unittest.TestCase):
                 self.assertEqual(args[0], 'bash', 'stock image must not be rebuilt')
                 script = Path(args[1]).resolve()
                 self.assertEqual(script.name, 'prepare-react.sh')
+                self.assertEqual(args[2:], ['--backend-image'], 'candidate image must be prepared first')
                 self.assertEqual(kwargs['env']['WGER_DOCKER_HOST'], expected_host)
                 self.assertTrue(script.is_relative_to(home.resolve()))
                 candidate = script.parents[1]
