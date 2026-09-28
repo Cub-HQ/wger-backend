@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.cortana.fitness-wger.backup</string>
+<key>ProgramArguments</key><array>
+<string>/usr/bin/python3</string>
+<string>/Users/OPERATOR/orca/projects/Fitness Coach/deployment/wger/operations/backup.py</string>
+</array>
+<key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>10</integer></dict>
+<key>ProcessType</key><string>Background</string><key>LowPriorityIO</key><true/>
+<key>StandardOutPath</key><string>/Users/OPERATOR/Library/Logs/fitness-wger-backup.log</string>
+<key>StandardErrorPath</key><string>/Users/OPERATOR/Library/Logs/fitness-wger-backup.log</string>
+</dict></plist>
