@@ -25,7 +25,7 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 
 source_deploy = Path(os.environ['WGER_SOURCE_DEPLOY']).resolve() if os.environ.get('WGER_SOURCE_DEPLOY') else None
-config_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
+config_names = ('compose.yaml', 'overrides/settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
 
 
 def public_response(request, timeout):
@@ -46,7 +46,7 @@ def public_response(request, timeout):
         time.sleep(min(1, max(0, deadline - time.monotonic())))
 
 
-def http_bundle(expected):
+def http_bundle(digest):
     with public_response(Request(public_url + '/en-au/user/login', headers={'Cache-Control': 'no-cache'}), timeout=30) as response:
         html = response.read().decode('utf-8')
     names = re.findall(r'''(?:src=["'])([^"']*/static/node/@wger-project/react-components/build/main\.[0-9a-f]+\.js)(?:["'])''', html)
@@ -59,9 +59,8 @@ def http_bundle(expected):
         actual = response.read()
         date, modified = response.headers.get('Date'), response.headers.get('Last-Modified')
     normalized = re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', b'sourceMappingURL=main.js.map', actual)
-    if normalized != expected or not date or not modified:
+    if hashlib.sha256(normalized).hexdigest() != digest or not date or not modified:
         raise OSError('public browser bundle/date does not match staged release')
-    digest = hashlib.sha256(expected).hexdigest()
     if os.environ.get('WGER_EXPECTED_SHA256', digest) != digest:
         raise OSError('staged bundle changed after preparation')
     return {'url': url, 'date': date, 'last_modified': modified, 'expected_sha256': digest,
@@ -171,11 +170,17 @@ def rendered_config(path, files=()):
     return json.loads(run(*command, 'config', '--format', 'json', capture=True))
 
 
+# The frontend is the image's reviewed package; a bind over it would serve unreviewed bytes again.
+FRONTEND_TARGET = '/home/wger/src/node_modules/@wger-project/react-components'
+
+
 def verify_binds(config, staged=False):
     for service in config['services'].values():
         for mount in service.get('volumes', []):
             if mount['type'] != 'bind':
                 continue
+            if (mount['target'] + '/').startswith(FRONTEND_TARGET + '/'):
+                raise RuntimeError('bind overrides the image frontend package: ' + mount['target'])
             path = Path(mount['source'])
             # This compose uses named volumes for directories; every bind is a file.
             if staged and source_deploy and path.is_relative_to(deploy_dir):
@@ -204,10 +209,7 @@ if not docker_host.startswith('unix://') or not Path(docker_host.removeprefix('u
 if not Path(docker_host.removeprefix('unix://')).is_socket():
     raise SystemExit('Docker socket is missing or not a socket: ' + docker_host)
 
-names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
-         'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
-         'manager-tasks.py', 'manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
-         'manager-0031-session-recovery.py', 'backend-image.json')
+names = ('corresponding-source.json', 'backend-image.json')
 for name in names:
     if not ((source_deploy or deploy_dir) / 'overrides' / f'{name}.next').is_file():
         raise SystemExit(f'missing staged override: {name}.next')
@@ -253,9 +255,11 @@ if source_deploy:
 try:
     receipt = json.loads(((source_deploy or deploy_dir) / 'overrides/backend-image.json.next').read_text())
     candidate_tag, candidate_id, candidate_commit = receipt['tag'], receipt['image_id'], receipt['commit']
+    frontend_digest = receipt['frontend']['main_js_sha256']
     if (not re.fullmatch('[0-9a-f]{40}', candidate_commit) or receipt['app_build_commit'] != candidate_commit
             or candidate_tag != 'fitness-wger-backend:' + candidate_commit
-            or not re.fullmatch('sha256:[0-9a-f]{64}', candidate_id)):
+            or not re.fullmatch('sha256:[0-9a-f]{64}', candidate_id)
+            or not re.fullmatch('[0-9a-f]{64}', frontend_digest)):
         raise ValueError
 except (OSError, ValueError, KeyError, TypeError):
     raise SystemExit('backend image receipt is missing or malformed; run prepare-react.sh --backend-image') from None
@@ -341,6 +345,9 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             'assert purge_session_recoveries.name == "wger.manager.tasks.purge_session_recoveries"; '
             'assert purge_session_recoveries.name in current_app.tasks; '
             'assert settings.CELERY_BEAT_SCHEDULE["purge-session-recoveries"]["task"] == purge_session_recoveries.name; '
+            # Image source registers the same entry name as settings; one merged entry, never two.
+            'current_app.finalize(auto=True); '
+            'assert [name for name, entry in current_app.conf.beat_schedule.items() if entry["task"] == purge_session_recoveries.name] == ["purge-session-recoveries"]; '
             'print("WGER_RECOVERY_READY")'
         )
         for service in services:
@@ -355,10 +362,10 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             raise subprocess.CalledProcessError(1, ('verify', 'browser-bundle-manifest'))
         with tempfile.NamedTemporaryFile() as served_bundle:
             compose('cp', f'nginx:/wger/static/{served_path.as_posix()}', served_bundle.name)
-            expected = (deploy_dir / 'overrides' / 'react-main.js').read_bytes()
             actual = Path(served_bundle.name).read_bytes()
         map_marker = b'sourceMappingURL=main.js.map'
-        if re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', map_marker, actual) != expected:
+        normalized = re.sub(rb'sourceMappingURL=main\.js\.[0-9a-f]{12}\.map', map_marker, actual)
+        if hashlib.sha256(normalized).hexdigest() != frontend_digest:
             raise subprocess.CalledProcessError(1, ('verify', 'browser-bundle'))
         compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'powersync')
         resumed = container_id('powersync')
@@ -369,7 +376,7 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         # nginx resolves upstream addresses at reload, after recreated services exist.
         compose('exec', '-T', 'nginx', 'nginx', '-t')
         compose('exec', '-T', 'nginx', 'nginx', '-s', 'reload')
-        live_proof = http_bundle(expected)
+        live_proof = http_bundle(frontend_digest)
     except Exception as release_error:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)

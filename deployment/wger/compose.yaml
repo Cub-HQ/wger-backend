@@ -5,7 +5,7 @@ x-logging: &logging
 x-wger: &wger
   # Built locally by prepare-react.sh --backend-image; release_web.py refuses unless the tag
   # resolves to the image ID, revision and APP_BUILD_COMMIT in overrides/backend-image.json.next.
-  image: fitness-wger-backend:0812ca39a80e82c071c99a54300df73e28668776
+  image: fitness-wger-backend:ea6244abbd1512b2d731c37978e38933160b2b5b
   env_file: [./config/private.env]
   restart: unless-stopped
   logging: *logging
@@ -20,21 +20,7 @@ services:
     volumes:
       - static:/home/wger/static
       - media:/home/wger/media
-      - ./overrides/react-main.js:/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro
-      - ./overrides/template.html:/home/wger/src/wger/core/templates/template.html:ro
-      - ./overrides/history-overview.html:/home/wger/src/wger/exercises/templates/history/overview.html:ro
-      - ./overrides/api-key.html:/home/wger/src/wger/core/templates/user/api_key.html:ro
-      - ./overrides/pdf.py:/home/wger/src/wger/utils/pdf.py:ro
       - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
-      - ./overrides/manager-urls.py:/home/wger/src/wger/manager/urls.py:ro
-      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
-      - &recovery-model ./overrides/manager-session-recovery.py:/home/wger/src/wger/manager/models/session_recovery.py:ro
-      - &recovery-exports ./overrides/manager-models-init.py:/home/wger/src/wger/manager/models/__init__.py:ro
-      - &recovery-api ./overrides/manager-api-views.py:/home/wger/src/wger/manager/api/views.py:ro
-      - &recovery-tasks ./overrides/manager-tasks.py:/home/wger/src/wger/manager/tasks.py:ro
-      - &recovery-log ./overrides/manager-log.py:/home/wger/src/wger/manager/models/log.py:ro
-      - &recovery-cardio-migration ./overrides/manager-0030-workoutlog-cardio-metrics.py:/home/wger/src/wger/manager/migrations/0030_workoutlog_cardio_metrics.py:ro
-      - &recovery-migration ./overrides/manager-0031-session-recovery.py:/home/wger/src/wger/manager/migrations/0031_workoutsessionrecovery.py:ro
     expose: ['8000']
     stop_grace_period: 60s
     healthcheck:
@@ -102,14 +88,6 @@ services:
     volumes:
       - media:/home/wger/media
       - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
-      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
-      - *recovery-model
-      - *recovery-exports
-      - *recovery-api
-      - *recovery-tasks
-      - *recovery-log
-      - *recovery-cardio-migration
-      - *recovery-migration
   celery_beat:
     <<: *wger
     # Beat loads the full Django app to prove tasks and schedule at release, which
@@ -121,14 +99,6 @@ services:
     volumes:
       - beat:/home/wger/beat
       - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
-      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
-      - *recovery-model
-      - *recovery-exports
-      - *recovery-api
-      - *recovery-tasks
-      - *recovery-log
-      - *recovery-cardio-migration
-      - *recovery-migration
 volumes:
   database: {}
   redis: {}

@@ -19,15 +19,9 @@ from release_env import resolve_public_origin
 PREFIX = 'deployment/wger/'
 # Explicit custody: never copy a directory recursively into the live deployment.
 PRODUCT_FILES = (
-    'compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py',
-    'formats/en_AU/formats.py',
+    'compose.yaml', 'overrides/settings-main.py',
     'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml',
-    'patches/prepare-react.sh', 'patches/patch_australian_dates.py',
-    'patches/patch_australian_template_dates.py', 'patches/patch_australian_pdf.py',
-    'patches/patch_progression_chart.py', 'patches/patch_muscle_diagram.py',
-    'patches/patch_footer.py',
-    'patches/patch_session_recovery.py', 'patches/patch_session_recovery_ui.py',
-    'patches/test_patch_session_recovery_ui.py', 'patches/test_patch_session_recovery.py',
+    'patches/prepare-react.sh',
 )
 MACHINERY = ('patches/release-web.sh', 'patches/release_web.py', 'patches/release_env.py',
              'patches/setup-powersync-storage.py')
@@ -42,14 +36,21 @@ OPERATIONS = ('operations/cleanup-recovery.py',
               'operations/com.cortana.fitness-wger.backup.plist',
               'com.cortana.fitness-wger.vm.plist')
 EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.env.example',
-                  'patches/test_release_route.py', 'patches/test_patch_progression_chart.py',
-                  'patches/test_patch_ux_wave1.py', 'patches/test_patch_ux_wave3.py',
-                  'patches/test_australian_dates.py', 'patches/check_pinned_artifacts.py',
+                  'patches/test_release_route.py', 'patches/test_australian_dates.py',
                   'patches/test_powersync_storage.py', 'patches/test_backend_image.py',
-                  'operations/test_backup_route.py')
-RETIRED_FILES = ('patches/patch_server_wave3.py', 'patches/patch_ux_wave1.py',
-                 'patches/patch_ux_wave3.py')
-REMOVED_FILES = ('Dockerfile', 'settings-main.py')
+                  'patches/test_patch_session_recovery.py', 'operations/test_backup_route.py')
+# Deleted from the source; a change deleting them deploys nothing. The backend and frontend
+# source patches retired because the image ships the fork source and the committed
+# react-components package (fitness-coach#416, #417).
+REMOVED_FILES = ('Dockerfile', 'settings-main.py', 'overrides/manager-urls.py', 'formats/en_AU/formats.py',
+                 'patches/patch_ux_wave1.py', 'patches/patch_ux_wave3.py', 'patches/patch_server_wave3.py',
+                 'patches/patch_australian_dates.py', 'patches/patch_australian_template_dates.py',
+                 'patches/patch_australian_pdf.py', 'patches/patch_footer.py',
+                 'patches/patch_progression_chart.py', 'patches/patch_muscle_diagram.py',
+                 'patches/patch_session_recovery.py', 'patches/patch_session_recovery_ui.py',
+                 'patches/test_patch_session_recovery_ui.py', 'patches/test_patch_progression_chart.py',
+                 'patches/test_patch_ux_wave1.py', 'patches/test_patch_ux_wave3.py',
+                 'patches/check_pinned_artifacts.py')
 
 
 def normalize_bundle(data):
@@ -60,17 +61,20 @@ def normalize_bundle(data):
 def check_surfaces(paths, source=None):
     for path in paths:
         if not path.startswith(PREFIX):
-            raise ValueError('DEPLOY_MISSING: non-gym surface ' + path)
+            # Fork source (Dockerfile, package files, react-components tgz, wger/) ships only in
+            # the image built from prepare-react.sh's BACKEND_COMMIT; the release unit is that pin.
+            raise ValueError('DEPLOY_MISSING: non-gym surface (fork source deploys only via the '
+                             'BACKEND_COMMIT pin in patches/prepare-react.sh) ' + path)
         relative = path[len(PREFIX):]
         if relative in REMOVED_FILES and source is not None:
             removed = Path(source) / path
             if not removed.exists() and not removed.is_symlink():
                 continue
         if relative not in PRODUCT_FILES + MACHINERY + PREFLIGHT_FILES + SOURCE_ONLY_FILES + EVIDENCE_FILES:
-            # Scheduler/cleanup activation remains separate. Retired release
-            # inputs stay explicitly classified but cannot silently deploy.
+            # Scheduler/cleanup activation remains separate. Retired release inputs
+            # (REMOVED_FILES) route only while absent; restoring one cannot silently deploy.
             kind = ('operations activation' if relative in OPERATIONS else
-                    'retired release input' if relative in RETIRED_FILES else 'unsupported surface')
+                    'retired release input' if relative in REMOVED_FILES else 'unsupported surface')
             raise ValueError('DEPLOY_MISSING: ' + kind + ': ' + path)
 
 
@@ -151,10 +155,10 @@ def deploy(args):
             destination = candidate / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original, destination)
-        # The backend image first: legacy preparation probes and extracts from the compose image.
+        # The backend image first; the default mode then stages its corresponding-source record.
         for step in (['--backend-image'], []):
             subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh'), *step], env=env, check=True)
-        expected = hashlib.sha256((candidate / 'overrides/react-main.js.next').read_bytes()).hexdigest()
+        expected = json.loads((candidate / 'overrides/backend-image.json.next').read_text())['frontend']['main_js_sha256']
         # A replayed UI revision must not downgrade independently installed proxy/sync fixes.
         for name in ('config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml'):
             if PREFIX + name not in args.changed_file:

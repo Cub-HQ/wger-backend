@@ -167,23 +167,35 @@ class WgerDeployTests(unittest.TestCase):
             'operations/cleanup-recovery.py': 'operations activation',
             'operations/com.cortana.fitness-wger.backup.plist': 'operations activation',
             'com.cortana.fitness-wger.vm.plist': 'operations activation',
-            'patches/patch_server_wave3.py': 'retired release input',
+            'patches/patch_ux_wave1.py': 'retired release input',
             'config/unknown.conf': 'unsupported surface',
         }
         for name, reason in cases.items():
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, reason):
                 module.check_surfaces(['deployment/wger/' + name])
 
+    def test_native_fork_source_releases_only_through_the_backend_pin(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Source F changes fork files; they reach the gym only in the image G pins.
+        for path in ('extras/docker/production/Dockerfile', 'package.json', 'package-lock.json',
+                     'extras/docker/production/react-components/wger-project-react-components-26.8.28.tgz',
+                     'wger/manager/tasks.py'):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'non-gym surface.*BACKEND_COMMIT pin'):
+                module.check_surfaces([path, 'deployment/wger/patches/prepare-react.sh'])
+        module.check_surfaces(['deployment/wger/patches/prepare-react.sh'])
+
     def test_layout_cutover_accepts_only_absent_retired_inputs(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         changed = [module.PREFIX + name for name in
-                   ('Dockerfile', 'settings-main.py', 'compose.yaml',
-                    'overrides/settings-main.py', 'overrides/manager-urls.py',
-                    'formats/en_AU/formats.py', 'patches/prepare-react.sh',
+                   ('compose.yaml',
+                    'overrides/settings-main.py',
+                    'patches/prepare-react.sh',
                     'patches/release_web.py', 'patches/test_release_route.py',
-                    'patches/check_pinned_artifacts.py',
+                    'patches/check_pinned_artifacts.py', *module.REMOVED_FILES,
                     'operations/backup.py', 'operations/snapshot.py', 'operations/restore-drill.py',
                     'operations/recovery-drill.py', 'operations/test_backup_route.py')]
         with tempfile.TemporaryDirectory() as directory:
@@ -191,8 +203,9 @@ class WgerDeployTests(unittest.TestCase):
             root = source / module.PREFIX
             root.mkdir(parents=True)
             module.check_surfaces(changed, source)
-            for name in ('Dockerfile', 'settings-main.py'):
+            for name in module.REMOVED_FILES:
                 retired = root / name
+                retired.parent.mkdir(parents=True, exist_ok=True)
                 for kind in ('file', 'directory', 'symlink'):
                     with self.subTest(name=name, kind=kind):
                         if kind == 'file':
@@ -201,7 +214,7 @@ class WgerDeployTests(unittest.TestCase):
                             retired.mkdir()
                         else:
                             retired.symlink_to(root / 'missing-target')
-                        with self.assertRaisesRegex(ValueError, 'unsupported surface'):
+                        with self.assertRaisesRegex(ValueError, 'retired release input'):
                             module.check_surfaces(changed, source)
                         if kind == 'directory':
                             retired.rmdir()
@@ -229,14 +242,12 @@ class WgerDeployTests(unittest.TestCase):
                 self.assertTrue(script.is_relative_to(home.resolve()))
                 candidate = script.parents[1]
                 self.assertTrue(candidate.is_relative_to((home / '.cache').resolve()))
-                for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
-                             'formats/en_AU/formats.py', 'patches/patch_session_recovery.py',
-                             'patches/patch_session_recovery_ui.py',
-                             'patches/test_patch_session_recovery_ui.py',
-                             'patches/test_patch_session_recovery.py'):
+                for name in ('overrides/settings-main.py', 'patches/prepare-react.sh'):
                     self.assertEqual((candidate / name).read_bytes(),
                                      (source / module.PREFIX / name).read_bytes())
                 self.assertFalse((candidate / 'Dockerfile').exists())
+                self.assertFalse((candidate / 'patches/patch_session_recovery.py').exists())
+                self.assertFalse((candidate / 'overrides/manager-urls.py').exists())
                 self.assertFalse((candidate / 'operations/recovery-drill.py').exists())
                 raise RuntimeError('stop before backup or live release')
 
@@ -354,7 +365,6 @@ class WgerDeployTests(unittest.TestCase):
             'source-only': set(module.SOURCE_ONLY_FILES),
             'operations': set(module.OPERATIONS),
             'evidence': set(module.EVIDENCE_FILES),
-            'retired': set(module.RETIRED_FILES),
         }
         counts = {}
         for kind, paths in classes.items():
@@ -364,6 +374,7 @@ class WgerDeployTests(unittest.TestCase):
         self.assertEqual(actual, set(counts), 'every gym file must have an explicit surface class')
         self.assertFalse({path for path, count in counts.items() if count != 1},
                          'gym files must belong to exactly one surface class')
+        self.assertFalse(actual & set(module.REMOVED_FILES), 'retired release inputs must stay deleted')
         module.check_surfaces(['deployment/wger/' + name for name in
                                classes['product'] | classes['machinery'] |
                                classes['preflight'] | classes['source-only'] | classes['evidence']])
