@@ -54,18 +54,21 @@ RUN pip3 wheel \
     && npm install -g sass
 
 # Fetch the JS and CSS files.
-# For the react-components npm package, we fetch it manually, extract it and move
-# it into node_modules to keep the size of the docker image small(er). Yes, this
-# is hacky and there's probably a better way.
+# The react-components package is the Cub-HQ/wger-frontend build committed next to
+# this Dockerfile, not the registry package: the fork keeps upstream's name and
+# version, so `npm pack NAME@VERSION` would silently install upstream. The build
+# fails unless the tarball matches its recorded SHA256SUMS line.
 COPY package.json package-lock.json ./
 COPY wger/core/static /root/src/wger/core/static
+COPY extras/docker/production/react-components /root/src/react-components
 RUN npm ci --production \
     && npm run build:css:sass \
     && PACKAGE_NAME="@wger-project/react-components" \
     && PACKAGE_VERSION=$(node -p "require('./package.json').devDependencies['$PACKAGE_NAME']") \
-    && TARBALL=$(npm pack ${PACKAGE_NAME}@${PACKAGE_VERSION}) \
+    && TARBALL=wger-project-react-components-${PACKAGE_VERSION}.tgz \
+    && (cd react-components && grep "  ${TARBALL}\$" SHA256SUMS | sha256sum --check --strict -) \
     && mkdir -p node_modules/${PACKAGE_NAME} \
-    && tar -xzf ${TARBALL} -C node_modules/${PACKAGE_NAME} --strip-components=1
+    && tar -xzf react-components/${TARBALL} -C node_modules/${PACKAGE_NAME} --strip-components=1
 
 ########
 # Final
@@ -75,9 +78,12 @@ LABEL org.opencontainers.image.authors="wger team <hello@wger.de>"
 ARG DOCKER_DIR=./extras/docker/production
 ARG BUILD_COMMIT
 ARG BUILD_DATE
+# Cub-HQ/wger-frontend commit the committed react-components tarball was built from.
+ARG UI_BUILD_COMMIT=b23cd36458ba921fe91b448bb3aded4a2bf99189
 
 ENV PATH="/home/wger/.local/bin:$PATH"
 ENV APP_BUILD_COMMIT=$BUILD_COMMIT
+ENV APP_UI_BUILD_COMMIT=$UI_BUILD_COMMIT
 ENV APP_BUILD_DATE=$BUILD_DATE
 ENV PYTHONPATH=/home/wger/src
 ENV DJANGO_SETTINGS_MODULE=settings.main
