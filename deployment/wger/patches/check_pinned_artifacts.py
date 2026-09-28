@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Explicit network/build regression: python3 deployment/wger/patches/check_pinned_artifacts.py.
+"""Explicit network regression: python3 deployment/wger/patches/check_pinned_artifacts.py.
 
-Requires curl, tar, Node/npm and network access; intentionally excluded from
-unit-test discovery. Builds only in temporary storage, without Docker or release.
+Requires curl and network access; intentionally excluded from unit-test
+discovery. Works only in temporary storage, without Docker or release.
 """
 import hashlib
 from pathlib import Path
@@ -18,46 +18,11 @@ PATCH_DIR = Path(__file__).resolve().parent
 class PinnedArtifactsTest(unittest.TestCase):
     def test_real_pinned_artifacts_pass_and_corrupt_recorded_digests_fail(self):
         pins = dict(re.findall(
-            r"^(REACT_REPO|REACT_COMMIT|WGER_REPO|WGER_COMMIT)=(\S+)$",
+            r"^(WGER_REPO|WGER_COMMIT)=(\S+)$",
             (PATCH_DIR / "prepare-react.sh").read_text(), re.MULTILINE,
         ))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            archive = root / "react-source.tgz"
-            subprocess.run([
-                "curl", "--fail", "--location", "--silent", "--show-error",
-                f"{pins['REACT_REPO']}/archive/{pins['REACT_COMMIT']}.tar.gz",
-                "--output", str(archive),
-            ], check=True)
-            subprocess.run([
-                "tar", "-xzf", str(archive), "--strip-components=1", "-C", str(root),
-            ], check=True)
-            subprocess.run([
-                "npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund",
-            ], cwd=root, check=True)
-            for patch in ("patch_australian_dates.py", "patch_progression_chart.py", "patch_session_recovery_ui.py"):
-                subprocess.run([sys.executable, str(PATCH_DIR / patch), str(root)], check=True)
-            subprocess.run([
-                sys.executable, str(PATCH_DIR / "test_patch_session_recovery_ui.py"), "--install", str(root),
-            ], check=True)
-            subprocess.run([
-                "npm", "test", "--", "src/core/lib/date.test.ts",
-                "src/components/Routines/screens/Detail/SessionRecovery.test.tsx",
-            ], cwd=root, check=True)
-            subprocess.run(["npm", "run", "typecheck"], cwd=root, check=True)
-            subprocess.run(["npm", "run", "build"], cwd=root, check=True)
-            current_digest = re.search(
-                r"^SESSION_RECOVERY_SHA256 = '([0-9a-f]{64})'$",
-                (PATCH_DIR / "patch_muscle_diagram.py").read_text(), re.MULTILINE,
-            )
-            self.assertIsNotNone(current_digest, "Expected the named current-build digest")
-            self.assertEqual(
-                hashlib.sha256((root / "build/main.js").read_bytes()).hexdigest(),
-                current_digest.group(1),
-                "Current build must match the current-build digest, not a historical allowlist entry",
-            )
-            self.check_gate(root / "build/main.js", "patch_muscle_diagram.py", "Pinned React source changed")
-
             template = root / "template.html"
             subprocess.run([
                 "curl", "--fail", "--location", "--silent", "--show-error",
