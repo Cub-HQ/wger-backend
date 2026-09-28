@@ -167,7 +167,7 @@ class WgerDeployTests(unittest.TestCase):
             'operations/cleanup-recovery.py': 'operations activation',
             'operations/com.cortana.fitness-wger.backup.plist': 'operations activation',
             'com.cortana.fitness-wger.vm.plist': 'operations activation',
-            'patches/patch_server_wave3.py': 'retired release input',
+            'patches/patch_ux_wave1.py': 'retired release input',
             'config/unknown.conf': 'unsupported surface',
         }
         for name, reason in cases.items():

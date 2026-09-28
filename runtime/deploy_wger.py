@@ -43,11 +43,11 @@ EVIDENCE_FILES = ('.gitignore', 'issue-83-deployment-plan.txt', 'config/private.
                   'patches/test_australian_dates.py', 'patches/check_pinned_artifacts.py',
                   'patches/test_powersync_storage.py', 'patches/test_backend_image.py',
                   'patches/test_patch_session_recovery.py', 'operations/test_backup_route.py')
-RETIRED_FILES = ('patches/patch_server_wave3.py', 'patches/patch_ux_wave1.py',
-                 'patches/patch_ux_wave3.py')
+RETIRED_FILES = ('patches/patch_ux_wave1.py', 'patches/patch_ux_wave3.py')
 REMOVED_FILES = ('Dockerfile', 'settings-main.py', 'patches/patch_footer.py',
                  'formats/en_AU/formats.py', 'patches/patch_australian_template_dates.py',
-                 'patches/patch_australian_pdf.py', 'patches/patch_session_recovery.py')
+                 'patches/patch_australian_pdf.py', 'patches/patch_session_recovery.py',
+                 'patches/patch_server_wave3.py')
 
 
 def normalize_bundle(data):
