@@ -7,14 +7,20 @@ set -euo pipefail
 PATCH_DIR=$(cd "$(dirname "$0")" && pwd)
 DEPLOY_DIR=$(cd "$PATCH_DIR/.." && pwd)
 DOCKER_HOST=${WGER_DOCKER_HOST-unix://$HOME/.colima/default/docker.sock}
-REACT_REPO=https://github.com/Cubatica/react
-REACT_COMMIT=3066f7693ac00632ad14ea0ef025371156f91d0d
 WGER_REPO=https://github.com/Cubatica/wger
 WGER_COMMIT=135d8569a3eb27c9f0f74e865d56372421a61294
 EXTRACTOR="fitness-wger-source-$$"
 BACKEND_REPO=https://github.com/Cub-HQ/wger-backend
-BACKEND_COMMIT=0812ca39a80e82c071c99a54300df73e28668776
+BACKEND_COMMIT=920a516968d7dd2ffea06064d4c5dadef4196782
+BACKEND_UPSTREAM='https://github.com/wger-project/wger 83005f7d487c814833f3943784370bb0149fbaa8'
 BACKEND_TAG=fitness-wger-backend:$BACKEND_COMMIT
+# The backend commit carries the reviewed frontend package; its source, archive and main.js are pinned here.
+FRONTEND_REPO=https://github.com/Cub-HQ/wger-frontend
+FRONTEND_COMMIT=b23cd36458ba921fe91b448bb3aded4a2bf99189
+FRONTEND_UPSTREAM='https://github.com/wger-project/react 89d234a800ba0f2097162f1d91444c7e3a5ccc5c'
+FRONTEND_PACKAGE=extras/docker/production/react-components/wger-project-react-components-26.8.28.tgz
+FRONTEND_SHA256=c8b3e6b6d251067758f14eb176f961dd881216ef1985e3506e08a2e13a0e4ec0
+FRONTEND_MAIN_JS_SHA256=b4396316a69dddfea75a16e78907c515ee5e27478a8c7e64dfc299f2a19074b4
 BACKEND_MATERIAL='wger/formats/en_AU/formats.py wger/utils/pdf.py wger/core/templates/template.html
   wger/exercises/templates/history/overview.html wger/core/templates/user/api_key.html
   wger/manager/models/session_recovery.py wger/manager/migrations/0031_workoutsessionrecovery.py
@@ -44,10 +50,14 @@ if [ "${1-}" = --backend-image ]; then
   [ "$archive_commit" = "$BACKEND_COMMIT" ] || failed "archive commit '$archive_commit' is not $BACKEND_COMMIT"
   mkdir "$BUILD_DIR/src"
   tar -xzf "$BUILD_DIR/source.tgz" --strip-components=1 -C "$BUILD_DIR/src"
+  frontend_sha256=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+    "$BUILD_DIR/src/$FRONTEND_PACKAGE" 2>/dev/null || true)
+  [ "$frontend_sha256" = "$FRONTEND_SHA256" ] ||
+    failed "frontend package $FRONTEND_PACKAGE is '$frontend_sha256', not the reviewed $FRONTEND_SHA256"
   # shellcheck disable=SC2086 # BACKEND_MATERIAL is a word list of fixed paths.
-  python3 - "$BUILD_DIR/src" $BACKEND_MATERIAL >"$BUILD_DIR/manifest.json" <<'PY'
-import hashlib, json, os, sys
-root, material = sys.argv[1], sys.argv[2:]
+  python3 - "$BUILD_DIR/src" "$FRONTEND_PACKAGE" "$FRONTEND_MAIN_JS_SHA256" $BACKEND_MATERIAL >"$BUILD_DIR/manifest.json" <<'PY'
+import hashlib, json, os, sys, tarfile
+root, package, main_js_sha256, material = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 manifest = {}
 for top in ('wger', 'settings'):
     for directory, _, names in os.walk(os.path.join(root, top)):
@@ -58,13 +68,24 @@ for top in ('wger', 'settings'):
 missing = [path for path in material if path not in manifest]
 if missing:
     sys.exit('source lacks accepted backend files: ' + ', '.join(missing))
+# The Dockerfile unpacks the package with --strip-components=1; every member must land byte-identical.
+installed = 'node_modules/@wger-project/react-components/'
+with tarfile.open(os.path.join(root, package)) as archive:
+    for member in archive.getmembers():
+        if not member.isfile():
+            continue
+        relative = member.name.split('/', 1)[1]
+        manifest[installed + relative] = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
+if manifest.get(installed + 'build/main.js') != main_js_sha256:
+    sys.exit(f'frontend package build/main.js is not the reviewed {main_js_sha256}')
 json.dump(manifest, sys.stdout, sort_keys=True)
 PY
-  # Runs inside the image with no network or mounts: every archived wger/settings file must be
-  # byte-identical in the application tree Django imports, with no private deploy files baked in.
+  # Runs inside the image with no network or mounts: every archived wger/settings file and every
+  # frontend package file must be byte-identical in the tree Django imports and serves, the
+  # installed package must hold nothing else, and no private deploy files may be baked in.
   VERIFY_IMAGE=$(cat <<'PY'
 import hashlib, json, os, sys
-root, commit = sys.argv[1], sys.argv[2]
+root, commit, ui_commit = sys.argv[1], sys.argv[2], sys.argv[3]
 manifest = json.load(sys.stdin)
 def digest(path):
     with open(path, 'rb') as source:
@@ -73,8 +94,16 @@ bad = sorted(path for path, expected in manifest.items()
              if not os.path.isfile(os.path.join(root, path)) or digest(os.path.join(root, path)) != expected)
 if bad:
     sys.exit(f'{len(bad)} files differ from source: ' + ', '.join(bad[:20]))
+installed = 'node_modules/@wger-project/react-components'
+extra = sorted(os.path.relpath(os.path.join(directory, name), root)
+               for directory, _, names in os.walk(os.path.join(root, installed)) for name in names)
+extra = [path for path in extra if path not in manifest]
+if extra:
+    sys.exit(f'{len(extra)} files in the installed frontend package are not in the reviewed package: ' + ', '.join(extra[:20]))
 if os.environ.get('APP_BUILD_COMMIT') != commit:
     sys.exit(f'APP_BUILD_COMMIT is {os.environ.get("APP_BUILD_COMMIT")!r}, expected {commit}')
+if os.environ.get('APP_UI_BUILD_COMMIT') != ui_commit:
+    sys.exit(f'APP_UI_BUILD_COMMIT is {os.environ.get("APP_UI_BUILD_COMMIT")!r}, expected {ui_commit}')
 import wger, wger.formats.en_AU.formats  # models need a database; their bytes are compared above
 if not os.path.realpath(wger.__file__).startswith(os.path.realpath(root) + os.sep):
     sys.exit('wger imports from ' + wger.__file__)
@@ -82,12 +111,12 @@ private = [os.path.join(directory, name) for directory, _, names in os.walk(root
            for name in names if name == 'private.env' or name.endswith('.dump')]
 if private:
     sys.exit('private files in image: ' + ', '.join(private))
-print(f'image matches {len(manifest)} source files at {commit}')
+print(f'image matches {len(manifest)} source and frontend package files at {commit}')
 PY
 )
   verify_image() {
     docker -H "$DOCKER_HOST" run --rm -i --network none --entrypoint python3 "$1" \
-      -c "$VERIFY_IMAGE" /home/wger/src "$BACKEND_COMMIT" <"$BUILD_DIR/manifest.json"
+      -c "$VERIFY_IMAGE" /home/wger/src "$BACKEND_COMMIT" "$FRONTEND_COMMIT" <"$BUILD_DIR/manifest.json"
   }
   label() {
     docker -H "$DOCKER_HOST" image inspect --format "{{index .Config.Labels \"$1\"}}" "$2"
@@ -121,14 +150,19 @@ PY
     sed -n 's/^APP_BUILD_COMMIT=//p')
   mkdir -p "$DEPLOY_DIR/overrides"
   python3 - "$DEPLOY_DIR/overrides/backend-image.json.next" "$BUILD_DIR/source.tgz" "$BACKEND_REPO" \
-    "$BACKEND_COMMIT" "$BACKEND_TAG" "$IMAGE_ID" "$APP_BUILD_COMMIT" "$BASE_IMAGE" <<'PY'
+    "$BACKEND_COMMIT" "$BACKEND_TAG" "$IMAGE_ID" "$APP_BUILD_COMMIT" "$BASE_IMAGE" \
+    "$FRONTEND_REPO" "$FRONTEND_COMMIT" "$FRONTEND_UPSTREAM" "$FRONTEND_PACKAGE" "$FRONTEND_SHA256" "$FRONTEND_MAIN_JS_SHA256" <<'PY'
 import hashlib, json, os, sys
-target, archive, repository, commit, tag, image_id, app_build_commit, base_image = sys.argv[1:]
+(target, archive, repository, commit, tag, image_id, app_build_commit, base_image,
+ frontend_repository, frontend_commit, frontend_upstream, package, package_sha256, main_js_sha256) = sys.argv[1:]
 with open(archive, 'rb') as source:
     archive_sha256 = hashlib.sha256(source.read()).hexdigest()
 record = {'repository': repository, 'commit': commit, 'archive_sha256': archive_sha256,
           'dockerfile': 'extras/docker/production/Dockerfile', 'base_image': base_image,
-          'image_id': image_id, 'tag': tag, 'app_build_commit': app_build_commit}
+          'image_id': image_id, 'tag': tag, 'app_build_commit': app_build_commit,
+          'frontend': {'repository': frontend_repository, 'commit': frontend_commit,
+                       'upstream': frontend_upstream, 'package': package,
+                       'package_sha256': package_sha256, 'main_js_sha256': main_js_sha256}}
 with open(target + '.tmp', 'w') as output:
     json.dump(record, output, indent=2, sort_keys=True)
     output.write('\n')
@@ -183,13 +217,7 @@ trap cleanup EXIT
 mkdir -p "$DEPLOY_DIR/overrides"
 
 docker -H "$DOCKER_HOST" create --name "$EXTRACTOR" --entrypoint /bin/true "$IMAGE" >/dev/null
-docker -H "$DOCKER_HOST" cp "$EXTRACTOR:/home/wger/src/node_modules/@wger-project/react-components/build/main.js" "$DEPLOY_DIR/overrides/react-original-main.js"
 docker -H "$DOCKER_HOST" cp "$EXTRACTOR:/home/wger/src/wger/core/templates/template.html" "$DEPLOY_DIR/overrides/template-original.html"
-
-curl --fail --location --silent --show-error "$REACT_REPO/archive/$REACT_COMMIT.tar.gz" --output "$BUILD_DIR/react-source.tgz"
-tar -xzf "$BUILD_DIR/react-source.tgz" --strip-components=1 -C "$BUILD_DIR"
-(cd "$BUILD_DIR" && npm ci --ignore-scripts --no-audit --no-fund && python3 "$PATCH_DIR/patch_australian_dates.py" "$BUILD_DIR" && python3 "$PATCH_DIR/patch_progression_chart.py" "$BUILD_DIR" && python3 "$PATCH_DIR/patch_session_recovery_ui.py" "$BUILD_DIR" && python3 "$PATCH_DIR/test_patch_session_recovery_ui.py" --install "$BUILD_DIR" && npm test -- src/core/lib/date.test.ts src/components/Routines/screens/Detail/SessionRecovery.test.tsx && npm run typecheck && npm run build)
-python3 "$PATCH_DIR/patch_muscle_diagram.py" "$BUILD_DIR/build/main.js" "$STAGED_DIR/react-main.js.next"
 
 curl --fail --location --silent --show-error "$WGER_REPO/raw/$WGER_COMMIT/wger/core/templates/template.html" --output "$BUILD_DIR/template.html"
 python3 "$PATCH_DIR/patch_footer.py" "$BUILD_DIR/template.html" "$STAGED_DIR/template.html.next"
@@ -213,12 +241,14 @@ docker -H "$DOCKER_HOST" run --rm --network none --user wger --entrypoint python
   "$IMAGE" /tests/test_patch_session_recovery.py --orm
 
 
+# Corresponding source for what the image actually serves: the backend commit it was built from
+# and the frontend commit its committed react-components package was built from.
 cat > "$STAGED_DIR/corresponding-source.json.next" <<EOF
-{"license":"AGPL-3.0","server":{"repository":"$WGER_REPO","commit":"$WGER_COMMIT"},"frontend":{"repository":"$REACT_REPO","commit":"$REACT_COMMIT","upstream_commit":"89d234a800ba0f2097162f1d91444c7e3a5ccc5c"}}
+{"license":"AGPL-3.0","server":{"repository":"$BACKEND_REPO","commit":"$BACKEND_COMMIT","upstream":"${BACKEND_UPSTREAM% *}","upstream_commit":"${BACKEND_UPSTREAM#* }"},"frontend":{"repository":"$FRONTEND_REPO","commit":"$FRONTEND_COMMIT","upstream":"${FRONTEND_UPSTREAM% *}","upstream_commit":"${FRONTEND_UPSTREAM#* }"}}
 EOF
 
 # Publish candidates only once every strict pinned-source transformation succeeds.
-for name in react-main.js template.html history-overview.html api-key.html pdf.py corresponding-source.json \
+for name in template.html history-overview.html api-key.html pdf.py corresponding-source.json \
   manager-session-recovery.py manager-models-init.py manager-api-views.py manager-tasks.py \
   manager-log.py manager-0030-workoutlog-cardio-metrics.py manager-0031-session-recovery.py; do
   test -f "$STAGED_DIR/$name.next"

@@ -42,11 +42,12 @@ WORKDIR /home/wger/src
 COPY README.md pyproject.toml package.json package-lock.json package-lock.json /home/wger/src/
 COPY wger/version.py wger/__init__.py /home/wger/src/wger/
 COPY wger/core/static /home/wger/src/wger/core/static
+COPY extras/docker/production/react-components /home/wger/src/extras/docker/production/react-components
 RUN npm ci --production \
     && npm run build:css:sass \
     && PACKAGE_NAME="@wger-project/react-components" \
-    && PACKAGE_VERSION=$(node -p "require('./package.json').devDependencies['$PACKAGE_NAME']") \
-    && TARBALL=$(npm pack ${PACKAGE_NAME}@${PACKAGE_VERSION}) \
+    && TARBALL=$(node -p "require('./package.json').devDependencies['$PACKAGE_NAME'].replace(/^file:/, '')") \
+    && (cd $(dirname ${TARBALL}) && grep "  $(basename ${TARBALL})\$" SHA256SUMS | sha256sum --check --strict -) \
     && mkdir -p node_modules/${PACKAGE_NAME} \
     && tar -xzf ${TARBALL} -C node_modules/${PACKAGE_NAME} --strip-components=1 \
     && pip3 wheel \
