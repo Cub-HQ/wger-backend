@@ -57,7 +57,7 @@
         {% regroup context by stream.timestamp.date as days %}
         {% for day in days %}
             <h6 class="text-uppercase text-muted small mt-4 mb-2">
-                {{ day.grouper|date:"l, j F Y" }}
+                {{ day.grouper|date:"SHORT_DATE_FORMAT" }}
             </h6>
             <ul class="list-group list-group-flush mb-3">
                 {% for event in day.list %}
@@ -159,7 +159,7 @@
                             {# Right column: timestamp + revert dropdown #}
                             <div class="d-flex flex-column align-items-end text-nowrap">
                                 <small class="text-muted"
-                                       title="{{ event.stream.timestamp|date:'Y-m-d H:i:s' }}">
+                                       title="{{ event.stream.timestamp|date:'SHORT_DATETIME_FORMAT' }}">
                                     {{ event.stream.timesince }}
                                 </small>
 
