@@ -155,6 +155,10 @@ def deploy(args):
         for step in (['--backend-image'], []):
             subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh'), *step], env=env, check=True)
         expected = hashlib.sha256((candidate / 'overrides/react-main.js.next').read_bytes()).hexdigest()
+        # A replayed UI revision must not downgrade independently installed proxy/sync fixes.
+        for name in ('config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml'):
+            if PREFIX + name not in args.changed_file:
+                shutil.copyfile(live / name, candidate / name)
         from wger_preflight import run
         # The candidate image restore is proven against the commit prep pinned, never a live/env value.
         pinned = re.search(r'^BACKEND_COMMIT=([0-9a-f]{40})$', (candidate / 'patches/prepare-react.sh').read_text(), re.M)
@@ -162,10 +166,6 @@ def deploy(args):
             raise ValueError('DEPLOY_MISSING: prepare-react.sh does not pin BACKEND_COMMIT')
         preflight = run(machinery, live, env, candidate_receipt=candidate / 'overrides/backend-image.json.next',
                         candidate_commit=pinned[1])
-        # A replayed UI revision must not downgrade independently installed proxy/sync fixes.
-        for name in ('config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml'):
-            if PREFIX + name not in args.changed_file:
-                shutil.copyfile(live / name, candidate / name)
         env.update(WGER_SOURCE_DEPLOY=str(candidate), WGER_EXPECTED_SHA256=expected,
                    WGER_RELEASE_COMMIT=args.commit)
         result = subprocess.run(['bash', str(machinery / PREFIX / 'patches/release-web.sh')],
