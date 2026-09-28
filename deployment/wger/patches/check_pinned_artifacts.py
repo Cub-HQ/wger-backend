@@ -58,38 +58,6 @@ class PinnedArtifactsTest(unittest.TestCase):
             )
             self.check_gate(root / "build/main.js", "patch_muscle_diagram.py", "Pinned React source changed")
 
-            history = root / "history-overview.html"
-            subprocess.run([
-                "curl", "--fail", "--location", "--silent", "--show-error",
-                f"{pins['WGER_REPO']}/raw/{pins['WGER_COMMIT']}/wger/exercises/templates/history/overview.html",
-                "--output", str(history),
-            ], check=True)
-            self.check_gate(
-                history, "patch_australian_template_dates.py",
-                "Pinned wger history-overview template changed", ("history-overview",),
-            )
-
-            api_key = root / "api-key.html"
-            subprocess.run([
-                "curl", "--fail", "--location", "--silent", "--show-error",
-                f"{pins['WGER_REPO']}/raw/{pins['WGER_COMMIT']}/wger/core/templates/user/api_key.html",
-                "--output", str(api_key),
-            ], check=True)
-            self.check_gate(
-                api_key, "patch_australian_template_dates.py",
-                "Pinned wger api-key template changed", ("api-key",),
-            )
-            pdf = root / "pdf.py"
-            subprocess.run([
-                "curl", "--fail", "--location", "--silent", "--show-error",
-                f"{pins['WGER_REPO']}/raw/{pins['WGER_COMMIT']}/wger/utils/pdf.py",
-                "--output", str(pdf),
-            ], check=True)
-            self.check_gate(
-                pdf, "patch_australian_pdf.py",
-                "Pinned wger PDF utility changed",
-            )
-
 
     def check_gate(self, source, patch_name, refusal, patch_args=()):
         patch = PATCH_DIR / patch_name

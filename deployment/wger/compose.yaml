@@ -21,12 +21,8 @@ services:
       - static:/home/wger/static
       - media:/home/wger/media
       - ./overrides/react-main.js:/home/wger/src/node_modules/@wger-project/react-components/build/main.js:ro
-      - ./overrides/history-overview.html:/home/wger/src/wger/exercises/templates/history/overview.html:ro
-      - ./overrides/api-key.html:/home/wger/src/wger/core/templates/user/api_key.html:ro
-      - ./overrides/pdf.py:/home/wger/src/wger/utils/pdf.py:ro
       - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
       - ./overrides/manager-urls.py:/home/wger/src/wger/manager/urls.py:ro
-      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
       - &recovery-model ./overrides/manager-session-recovery.py:/home/wger/src/wger/manager/models/session_recovery.py:ro
       - &recovery-exports ./overrides/manager-models-init.py:/home/wger/src/wger/manager/models/__init__.py:ro
       - &recovery-api ./overrides/manager-api-views.py:/home/wger/src/wger/manager/api/views.py:ro
@@ -101,7 +97,6 @@ services:
     volumes:
       - media:/home/wger/media
       - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
-      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
       - *recovery-model
       - *recovery-exports
       - *recovery-api
@@ -120,7 +115,6 @@ services:
     volumes:
       - beat:/home/wger/beat
       - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
-      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
       - *recovery-model
       - *recovery-exports
       - *recovery-api

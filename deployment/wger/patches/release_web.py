@@ -25,7 +25,7 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 
 source_deploy = Path(os.environ['WGER_SOURCE_DEPLOY']).resolve() if os.environ.get('WGER_SOURCE_DEPLOY') else None
-config_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
+config_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
 
 
 def public_response(request, timeout):
@@ -204,7 +204,7 @@ if not docker_host.startswith('unix://') or not Path(docker_host.removeprefix('u
 if not Path(docker_host.removeprefix('unix://')).is_socket():
     raise SystemExit('Docker socket is missing or not a socket: ' + docker_host)
 
-names = ('react-main.js', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
+names = ('react-main.js', 'corresponding-source.json',
          'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
          'manager-tasks.py', 'manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
          'manager-0031-session-recovery.py', 'backend-image.json')
