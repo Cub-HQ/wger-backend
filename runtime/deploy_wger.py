@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,33 @@ def existing_locks():
     return result
 
 
+def staging_root(home):
+    uid = os.geteuid()
+    writable_by_others = stat.S_IWGRP | stat.S_IWOTH
+    try:
+        home_stat = home.stat()
+    except OSError as error:
+        raise ValueError('DEPLOY_MISSING: resolved home unavailable') from error
+    if not stat.S_ISDIR(home_stat.st_mode):
+        raise ValueError('DEPLOY_MISSING: resolved home must be a directory')
+    if home_stat.st_uid != uid or home_stat.st_mode & writable_by_others:
+        raise ValueError('DEPLOY_MISSING: resolved home must be owned by the deployment uid and not group- or world-writable')
+    cache = home / '.cache'
+    try:
+        if cache.is_symlink():
+            raise ValueError('DEPLOY_MISSING: staging cache must not be a symlink')
+        cache.mkdir(mode=0o700, exist_ok=True)
+        resolved = cache.resolve(strict=True)
+        if cache.is_symlink() or not resolved.is_dir() or home not in resolved.parents:
+            raise ValueError('DEPLOY_MISSING: staging cache must be a directory beneath home')
+        cache_stat = resolved.stat()
+        if cache_stat.st_uid != uid or cache_stat.st_mode & writable_by_others:
+            raise ValueError('DEPLOY_MISSING: staging cache must be owned by the deployment uid and not group- or world-writable')
+    except (OSError, RuntimeError) as error:
+        raise ValueError('DEPLOY_MISSING: staging cache unavailable beneath home') from error
+    return resolved
+
+
 def deploy(args):
     source = Path(args.source).resolve()
     check_surfaces(args.changed_file, source)
@@ -99,8 +127,16 @@ def deploy(args):
            'WGER_PUBLIC_URL': os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098')}
     machinery = Path(__file__).resolve().parents[1]
     # Prepare in isolation before backup: a digest/toolchain failure cannot alter the gym.
-    with tempfile.TemporaryDirectory(prefix='wger-product-') as directory:
+    home = Path.home().resolve()
+    with tempfile.TemporaryDirectory(prefix='wger-product-', dir=staging_root(home)) as directory:
         candidate = Path(directory)
+        try:
+            resolved = candidate.resolve(strict=True)
+            if candidate.is_symlink() or not resolved.is_dir() or home not in resolved.parents:
+                raise ValueError('DEPLOY_MISSING: staging candidate must be a directory beneath home')
+        except (OSError, RuntimeError) as error:
+            raise ValueError('DEPLOY_MISSING: staging candidate unavailable beneath home') from error
+        candidate = resolved
         for name in PRODUCT_FILES:
             original = source / PREFIX / name
             if original.is_symlink() or not original.is_file():

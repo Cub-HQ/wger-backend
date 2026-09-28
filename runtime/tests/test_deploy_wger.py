@@ -214,13 +214,19 @@ class WgerDeployTests(unittest.TestCase):
         spec.loader.exec_module(module)
         source = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as directory:
-            live = Path(directory)
-            (live / 'config').mkdir()
+            home = Path(directory) / 'home'
+            home.mkdir()
+            live = Path(directory) / 'live'
+            (live / 'config').mkdir(parents=True)
             (live / 'config/private.env').write_text('private fixture')
 
             def prepare(args, **kwargs):
                 self.assertEqual(args[0], 'bash', 'stock image must not be rebuilt')
-                candidate = Path(args[1]).parents[1]
+                script = Path(args[1]).resolve()
+                self.assertEqual(script.name, 'prepare-react.sh')
+                self.assertTrue(script.is_relative_to(home.resolve()))
+                candidate = script.parents[1]
+                self.assertTrue(candidate.is_relative_to((home / '.cache').resolve()))
                 for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
                              'formats/en_AU/formats.py', 'patches/patch_session_recovery.py',
                              'patches/patch_session_recovery_ui.py',
@@ -235,11 +241,69 @@ class WgerDeployTests(unittest.TestCase):
             args = SimpleNamespace(source=str(source), commit='a' * 40,
                                    deploy_root=str(live),
                                    changed_file=['deployment/wger/operations/recovery-drill.py'])
-            with patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
+            with patch.object(module.Path, 'home', return_value=home), \
+                    patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
                     patch.object(module, 'existing_locks', return_value={}), \
                     patch.object(module.subprocess, 'run', side_effect=prepare):
                 with self.assertRaisesRegex(RuntimeError, 'stop before backup or live release'):
                     module.deploy(args)
+
+    def test_escaped_cache_refuses_before_preparation(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / 'home'
+            home.mkdir()
+            outside = Path(directory) / 'outside'
+            outside.mkdir()
+            try:
+                (home / '.cache').symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f'directory symlinks unavailable: {error}')
+            self.assertFalse((home / '.cache').resolve().is_relative_to(home.resolve()))
+            live = Path(directory) / 'live'
+            (live / 'config').mkdir(parents=True)
+            (live / 'config/private.env').write_text('private fixture')
+            args = SimpleNamespace(source=str(source), commit='a' * 40,
+                                   deploy_root=str(live), changed_file=[])
+            with patch.object(module.Path, 'home', return_value=home), \
+                    patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
+                    patch.object(module, 'existing_locks', return_value={}), \
+                    patch.object(module.subprocess, 'run') as prepare:
+                with self.assertRaises(ValueError):
+                    module.deploy(args)
+                prepare.assert_not_called()
+
+    def test_unsafe_cache_permissions_refuse_before_preparation(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / 'home'
+            home.mkdir(mode=0o700)
+            cache = home / '.cache'
+            cache.mkdir(mode=0o700)
+            live = Path(directory) / 'live'
+            (live / 'config').mkdir(parents=True)
+            (live / 'config/private.env').write_text('private fixture')
+            args = SimpleNamespace(source=str(source), commit='a' * 40,
+                                   deploy_root=str(live), changed_file=[])
+            try:
+                for mode in (0o770, 0o707):
+                    with self.subTest(mode=oct(mode)):
+                        cache.chmod(mode)
+                        with patch.object(module.Path, 'home', return_value=home), \
+                                patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
+                                patch.object(module, 'existing_locks', return_value={}), \
+                                patch.object(module.subprocess, 'run') as prepare:
+                            with self.assertRaisesRegex(ValueError, 'DEPLOY_MISSING: staging cache'):
+                                module.deploy(args)
+                            prepare.assert_not_called()
+            finally:
+                cache.chmod(0o700)
 
     def test_every_repository_gym_file_has_an_explicit_surface_class(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
