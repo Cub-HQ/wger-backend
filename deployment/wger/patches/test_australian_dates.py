@@ -6,14 +6,14 @@ import unittest
 
 ROOT = Path(__file__).parents[1]
 NGINX = ROOT / "config" / "nginx.conf"
-TEMPLATE_PATCH = Path(__file__).with_name("patch_australian_template_dates.py")
-PDF_PATCH = Path(__file__).with_name("patch_australian_pdf.py")
+SOURCE = Path(__file__).parents[3]
+FORMATS = SOURCE / "wger" / "formats" / "en_AU" / "formats.py"
 
 
 class AustralianDatesTest(unittest.TestCase):
     def test_django_forces_australian_language_and_numeric_date(self):
         source = (ROOT / "overrides" / "settings-main.py").read_text()
-        formats = (ROOT / "formats" / "en_AU" / "formats.py").read_text()
+        formats = FORMATS.read_text()
         namespace = {}
         exec(formats, namespace)
         date = __import__('datetime').date(2026, 9, 21)
@@ -35,30 +35,19 @@ class AustralianDatesTest(unittest.TestCase):
         self.assertIn("location ~ ^/(?:en|en-gb)(/.*)?$", config)
         self.assertIn("return 302 /en-au$1$is_args$args;", config)
         self.assertIn("absolute_redirect off;", config)
-        compose = (ROOT / "compose.yaml").read_text()
-        self.assertIn("history-overview.html:/home/wger/src/wger/exercises/templates/history/overview.html:ro", compose)
-        self.assertIn("api-key.html:/home/wger/src/wger/core/templates/user/api_key.html:ro", compose)
 
-    def test_pinned_human_facing_templates_use_shared_numeric_formats(self):
-        spec = importlib.util.spec_from_file_location("patch_australian_template_dates", TEMPLATE_PATCH)
-        patch = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(patch)
-
-        history = patch.patch_text("history-overview", '''
-<h6>{{ day.grouper|date:"l, j F Y" }}</h6>
-<small title="{{ event.stream.timestamp|date:'Y-m-d H:i:s' }}">
-''')
-        account = patch.patch_text("api-key", '''
-<td>{{ session.long_lived.created|date:"Y-m-d H:i" }}</td>
-<td>{{ session.expire_date|date:"Y-m-d H:i" }}</td>
-''')
+    def test_human_facing_templates_use_shared_numeric_formats(self):
+        history = (SOURCE / "wger/exercises/templates/history/overview.html").read_text()
+        account = (SOURCE / "wger/core/templates/user/api_key.html").read_text()
 
         self.assertIn('{{ day.grouper|date:"SHORT_DATE_FORMAT" }}', history)
         self.assertIn("event.stream.timestamp|date:'SHORT_DATETIME_FORMAT'", history)
         self.assertEqual(account.count('date:"SHORT_DATETIME_FORMAT"'), 2)
+        for text in (history, account):
+            self.assertNotRegex(text, r"\|date:[\"']?(l, j F Y|Y-m-d)")
 
         formats = {}
-        exec((ROOT / "formats" / "en_AU" / "formats.py").read_text(), formats)
+        exec(FORMATS.read_text(), formats)
         render_script = f'''
 from datetime import datetime
 from pathlib import Path
@@ -85,16 +74,10 @@ with TemporaryDirectory() as directory:
         self.assertEqual(result.returncode, 0, result.stderr)
         rendered = result.stdout.strip()
         self.assertEqual(rendered, "21/09/2026|21/09/2026 15:24")
-    def test_pinned_pdf_footer_uses_australian_numeric_date(self):
-        spec = importlib.util.spec_from_file_location("patch_australian_pdf", PDF_PATCH)
-        patch = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(patch)
-
-        source = "date = datetime.date.today().strftime('%d.%m.%Y')"
-        self.assertEqual(
-            patch.patch_text(source),
-            "date = datetime.date.today().strftime('%d/%m/%Y')",
-        )
+    def test_pdf_footer_uses_australian_numeric_date(self):
+        pdf = (SOURCE / "wger/utils/pdf.py").read_text()
+        self.assertEqual(pdf.count("datetime.date.today().strftime('%d/%m/%Y')"), 1)
+        self.assertNotIn("%d.%m.%Y", pdf)
 
 
 if __name__ == "__main__":

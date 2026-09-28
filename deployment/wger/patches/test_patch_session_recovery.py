@@ -10,14 +10,16 @@ import unittest
 from unittest.mock import patch
 
 
-GENERATOR = Path(__file__).with_name('patch_session_recovery.py')
+# The recovery model under test is the committed fork source the backend image ships.
+SOURCE = Path(__file__).parents[3]
+MODEL = SOURCE / 'wger/manager/models/session_recovery.py'
 
 
-def load_generator():
-    spec = importlib.util.spec_from_file_location('session_recovery_generator', GENERATOR)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def fork_view_methods():
+    # The shipped WorkoutSessionViewSet recovery actions, destroy through restore_recovery.
+    views = (SOURCE / 'wger/manager/api/views.py').read_text()
+    start = views.index('    def destroy(self, request, *args, **kwargs):\n')
+    return views[start:views.index('    def get_queryset(self):\n', start)]
 
 
 # These models retain the production concrete field names, types, nullability,
@@ -215,7 +217,7 @@ def configure_orm(directory):
     (models_dir / 'references.py').write_text(textwrap.dedent(REFERENCE_MODELS))
     (models_dir / 'session.py').write_text(textwrap.dedent(SESSION_MODEL))
     (models_dir / 'log.py').write_text(textwrap.dedent(LOG_MODEL))
-    (models_dir / 'recovery.py').write_text(load_generator().MODEL_SOURCE)
+    (models_dir / 'recovery.py').write_text(MODEL.read_text())
     (package / 'signals.py').write_text(textwrap.dedent(CACHE_SIGNALS))
     sys.path.insert(0, str(root))
     from django.conf import settings
@@ -237,7 +239,7 @@ def configure_orm(directory):
             editor.create_model(model)
 
 
-class GeneratedRecoveryORMTests(unittest.TestCase):
+class ForkRecoveryORMTests(unittest.TestCase):
     def setUp(self):
         from datetime import timedelta
         from django.contrib.auth import get_user_model
@@ -494,7 +496,7 @@ class GeneratedRecoveryORMTests(unittest.TestCase):
             'class RecoveryViewSet(viewsets.GenericViewSet):\n'
             '    serializer_class = SessionSerializer\n'
             '    permission_classes = [IsAuthenticated]\n'
-            + load_generator().VIEW_METHODS,
+            + fork_view_methods(),
             namespace,
         )
         viewset = namespace['RecoveryViewSet']
@@ -590,92 +592,8 @@ class GeneratedRecoveryORMTests(unittest.TestCase):
         self.assertIsNone(self.user.usercache.last_activity)
 
 
-class RecoveryPatchTests(unittest.TestCase):
-    @staticmethod
-    def source_fixture(root):
-        sources = {
-            'wger/manager/models/__init__.py': 'from .session import WorkoutSession\n',
-            'wger/manager/models/log.py': LOG_MODEL,
-            'wger/manager/api/views.py': (
-                'class WorkoutSessionViewSet(WgerOwnerObjectModelViewSet):\n'
-                '    serializer_class = WorkoutSessionSerializer\n'
-                '    is_private = True\n'
-                "    ordering_fields = '__all__'\n"
-                '    filterset_class = WorkoutSessionFilterSet\n'
-            ),
-            'wger/manager/migrations/0030_workoutlog_cardio_metrics.py': '# Existing cardio migration\n',
-        }
-        for relative, content in sources.items():
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
-        return sources
-
-    def test_build_outputs_stages_artifacts_without_mutating_source(self):
-        generator = load_generator()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            originals = self.source_fixture(root)
-            with patch.object(generator, 'PINNED_BLOBS', {}):
-                outputs = generator.build_outputs(root)
-            self.assertEqual(set(outputs), {name + '.next' for name in generator.ARTIFACT_TARGETS})
-            self.assertEqual(outputs['manager-session-recovery.py.next'], generator.MODEL_SOURCE)
-            for relative, original in originals.items():
-                self.assertEqual((root / relative).read_text(), original)
-            self.assertEqual({str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()}, set(originals))
-
-    def test_late_missing_or_duplicate_anchor_never_publishes_outputs(self):
-        generator = load_generator()
-        for mutation in ('missing', 'duplicate'):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory) / 'source'
-                output = Path(directory) / 'output'
-                self.source_fixture(root)
-                view_path = root / 'wger/manager/api/views.py'
-                original = view_path.read_text()
-                view_path.write_text(
-                    original.replace('    filterset_class = WorkoutSessionFilterSet\n', '')
-                    if mutation == 'missing' else original + original
-                )
-                with patch.object(generator, 'PINNED_BLOBS', {}), self.assertRaises(ValueError):
-                    generator.main([str(root), str(output)])
-                self.assertFalse(output.exists())
-
-    def test_source_drift_with_valid_anchors_rejects_before_output(self):
-        import hashlib
-        generator = load_generator()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / 'source'
-            output = Path(directory) / 'output'
-            self.source_fixture(root)
-            relative = 'wger/manager/api/views.py'
-            view = root / relative
-            original = view.read_bytes()
-            digest = hashlib.sha1(f'blob {len(original)}\0'.encode() + original).hexdigest()
-            view.write_bytes(original + b'\n# Source changed without removing an anchor\n')
-            with patch.object(generator, 'PINNED_BLOBS', {relative: digest}):
-                with self.assertRaisesRegex(ValueError, 'source drift'):
-                    generator.main([str(root), str(output)])
-            self.assertFalse(output.exists())
-
-    def test_rejected_source_does_not_publish_partial_outputs(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / 'source'
-            output = Path(directory) / 'output'
-            root.mkdir()
-            output.mkdir()
-            sentinel = output / 'existing.next'
-            sentinel.write_bytes(b'previous generation')
-            result = subprocess.run(
-                [sys.executable, str(GENERATOR), str(root), str(output)],
-                capture_output=True, text=True, timeout=30,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual({path.name: path.read_bytes() for path in output.iterdir()}, {
-                'existing.next': b'previous generation',
-            })
-
-    def test_generated_orm_behaviors(self):
+class RecoveryORMTests(unittest.TestCase):
+    def test_fork_recovery_orm_behaviors(self):
         missing = [name for name in ('django', 'rest_framework') if importlib.util.find_spec(name) is None]
         if missing:
             self.skipTest('Real ORM recovery tests require missing dependencies: ' + ', '.join(missing))
@@ -689,14 +607,14 @@ class RecoveryPatchTests(unittest.TestCase):
 
 def load_tests(loader, tests, pattern):
     # Discovery must never import a second app into another test's Django registry.
-    return loader.loadTestsFromTestCase(RecoveryPatchTests)
+    return loader.loadTestsFromTestCase(RecoveryORMTests)
 
 
 if __name__ == '__main__':
     if '--orm' in sys.argv:
         with tempfile.TemporaryDirectory(prefix='recovery-orm-') as directory:
             configure_orm(directory)
-            suite = unittest.defaultTestLoader.loadTestsFromTestCase(GeneratedRecoveryORMTests)
+            suite = unittest.defaultTestLoader.loadTestsFromTestCase(ForkRecoveryORMTests)
             result = unittest.TextTestRunner(verbosity=2).run(suite)
             sys.exit(not result.wasSuccessful())
     unittest.main()

@@ -25,7 +25,7 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 
 source_deploy = Path(os.environ['WGER_SOURCE_DEPLOY']).resolve() if os.environ.get('WGER_SOURCE_DEPLOY') else None
-config_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml', 'formats/en_AU/formats.py')
+config_names = ('compose.yaml', 'overrides/settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
 
 
 def public_response(request, timeout):
@@ -209,10 +209,7 @@ if not docker_host.startswith('unix://') or not Path(docker_host.removeprefix('u
 if not Path(docker_host.removeprefix('unix://')).is_socket():
     raise SystemExit('Docker socket is missing or not a socket: ' + docker_host)
 
-names = ('template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
-         'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
-         'manager-tasks.py', 'manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
-         'manager-0031-session-recovery.py', 'backend-image.json')
+names = ('corresponding-source.json', 'backend-image.json')
 for name in names:
     if not ((source_deploy or deploy_dir) / 'overrides' / f'{name}.next').is_file():
         raise SystemExit(f'missing staged override: {name}.next')
@@ -348,6 +345,9 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             'assert purge_session_recoveries.name == "wger.manager.tasks.purge_session_recoveries"; '
             'assert purge_session_recoveries.name in current_app.tasks; '
             'assert settings.CELERY_BEAT_SCHEDULE["purge-session-recoveries"]["task"] == purge_session_recoveries.name; '
+            # Image source registers the same entry name as settings; one merged entry, never two.
+            'current_app.finalize(auto=True); '
+            'assert [name for name, entry in current_app.conf.beat_schedule.items() if entry["task"] == purge_session_recoveries.name] == ["purge-session-recoveries"]; '
             'print("WGER_RECOVERY_READY")'
         )
         for service in services:
