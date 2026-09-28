@@ -13,6 +13,8 @@ import sys
 import tempfile
 
 from deploy_failure import failure_reason
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deployment/wger/patches'))
+from release_env import resolve_public_origin
 
 PREFIX = 'deployment/wger/'
 # Explicit custody: never copy a directory recursively into the live deployment.
@@ -122,6 +124,11 @@ def deploy(args):
     live = Path(args.deploy_root).expanduser().resolve()
     if not (live / 'config/private.env').is_file():
         raise ValueError('DEPLOY_MISSING: existing private gym environment unavailable')
+    try:
+        # Same check as release_web.py, before preparation makes its first Docker call.
+        resolve_public_origin(os.environ.get('WGER_PUBLIC_URL'), live / 'config/private.env')
+    except ValueError as error:
+        raise ValueError('DEPLOY_MISSING: ' + str(error)) from None
     env = {**os.environ, **existing_locks(), 'WGER_DEPLOY_DIR': str(live),
            'WGER_DOCKER_HOST': os.environ.get('WGER_DOCKER_HOST', f'unix://{Path.home()}/.colima/default/docker.sock')}
     machinery = Path(__file__).resolve().parents[1]
