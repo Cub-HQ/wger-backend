@@ -14,10 +14,10 @@ import threading
 from contextlib import contextmanager
 
 ROOT = pathlib.Path(__file__).parent
-# Retired recovery overrides a live deployment may still hold; the old compose (rollback) binds them.
-LEGACY_RECOVERY_FILES = ('manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
-                         'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
-                         'manager-tasks.py', 'manager-0031-session-recovery.py')
+# Retired backend overrides a live deployment may still hold; the old compose (rollback) binds them.
+LEGACY_OVERRIDES = ('manager-urls.py', 'manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
+                    'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
+                    'manager-tasks.py', 'manager-0031-session-recovery.py')
 ARTIFACT_NAMES = ('react-main.js', 'corresponding-source.json')
 RELEASE_NAMES = (*ARTIFACT_NAMES, 'backend-image.json')
 CANDIDATE_COMMIT = '0812ca39a80e82c071c99a54300df73e28668776'
@@ -270,11 +270,10 @@ class ReleaseRouteTest(unittest.TestCase):
                 config.mkdir()
                 (deploy / 'compose.yaml').write_text('services: {}\n')
                 (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
-                for name in ('settings-main.py', 'manager-urls.py'):
-                    (overrides / name).write_text(f'old {name}\n')
+                (overrides / 'settings-main.py').write_text('old settings-main.py\n')
                 for name in ARTIFACT_NAMES[1:]:
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
-                for name in LEGACY_RECOVERY_FILES:
+                for name in LEGACY_OVERRIDES:
                     (overrides / name).write_text(f'old {name}\n')
                 bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
                 (overrides / 'react-main.js.next').write_bytes(bundle)
@@ -381,15 +380,14 @@ elif "config" in args and "--format" in args:
         services[service]['image'] = 'fitness-wger-backend:stale' if fault == 'compose-tag' else json.loads(os.environ['CANDIDATE'])['tag']
     services['web']['volumes']=[
         {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py'},
-        {'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/manager-urls.py'),'target':'/home/wger/src/wger/manager/urls.py'},
     ]
     for service in ('web', 'celery_worker', 'celery_beat'):
         volumes = services[service].setdefault('volumes', [])
         if service != 'web':
             volumes.append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/settings-main.py'),'target':'/home/wger/src/settings/main.py','read_only':True})
-        # Only the prior (old-layout) compose still binds retired recovery overrides.
+        # Only the prior (old-layout) compose still binds retired backend overrides.
         if not any('candidate/compose.yaml' in arg for arg in args):
-            volumes.extend({'type':'bind','source':str(path),'target':'/home/wger/src/legacy/'+path.name,'read_only':True} for path in sorted((Path(os.environ['WGER_DEPLOY_DIR'])/'overrides').glob('manager-*.py')) if path.name != 'manager-urls.py')
+            volumes.extend({'type':'bind','source':str(path),'target':'/home/wger/src/legacy/'+path.name,'read_only':True} for path in sorted((Path(os.environ['WGER_DEPLOY_DIR'])/'overrides').glob('manager-*.py')))
     if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
     for arg in args:
         if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
@@ -475,7 +473,7 @@ elif "sha256sum" in args:
                 candidate = root / 'candidate'
                 (candidate / 'config').mkdir(parents=True)
                 (candidate / 'overrides').mkdir()
-                stage_names = ('compose.yaml', 'overrides/settings-main.py', 'overrides/manager-urls.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
+                stage_names = ('compose.yaml', 'overrides/settings-main.py', 'config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml')
                 # A first-release config file must return to absent on rollback.
                 absent_config = 'config/sync_rules.yaml'
                 for name in stage_names:
@@ -491,7 +489,7 @@ elif "sha256sum" in args:
                 private_before = (config / 'private.env').read_bytes()
                 staged_env = {**env, 'WGER_SOURCE_DEPLOY': str(candidate)}
                 legacy_before = {}
-                for index, name in enumerate(LEGACY_RECOVERY_FILES):
+                for index, name in enumerate(LEGACY_OVERRIDES):
                     target = overrides / name
                     target.unlink()
                     legacy_before[name] = None if index % 2 == 0 else f'prior deployment {name}\n'.encode()
@@ -635,7 +633,7 @@ elif "sha256sum" in args:
                 self.assertIn('bind source missing or wrong type',refused.stderr)
                 refused_commands=[json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
                 self.assertFalse(any('stop' in command or 'up' in command for command in refused_commands))
-                for name in ('settings-main.py', 'manager-urls.py'):
+                for name in ('settings-main.py',):
                     target = overrides / name
                     original = target.read_bytes()
                     target.unlink()
