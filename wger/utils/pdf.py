@@ -72,7 +72,7 @@ def render_footer(url, date=None):
     :return: a Paragraph object
     """
     if not date:
-        date = datetime.date.today().strftime('%d.%m.%Y')
+        date = datetime.date.today().strftime('%d/%m/%Y')
 
     style = ParagraphStyle(
         'FooterStyle',
