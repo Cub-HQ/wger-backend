@@ -27,6 +27,7 @@ from django.db import (
 )
 from django.db.models import Q
 from django.db.models.functions import Length
+from django.utils.translation import gettext_lazy as _
 
 # Third Party
 from actstream import action as actstream_action
@@ -250,13 +251,23 @@ class ExerciseImageSerializer(serializers.ModelSerializer):
 class ExerciseVideoSerializer(serializers.ModelSerializer):
     """Serializer for uploaded and linked exercise videos."""
 
-    video = serializers.SerializerMethodField()
-
-    def get_video(self, obj):
-        return obj.get_absolute_url()
-
     exercise_uuid = serializers.ReadOnlyField(source='exercise.uuid')
     author_history = serializers.ListSerializer(child=serializers.CharField(), read_only=True)
+
+    def validate(self, attrs):
+        # DRF never calls Model.clean, so enforce its upload-xor-link rule on the
+        # effective state: submitted values over the instance's current ones.
+        video = attrs.get('video', self.instance.video if self.instance else None)
+        source_url = attrs.get('source_url', self.instance.source_url if self.instance else '')
+        if bool(video) == bool(source_url):
+            raise serializers.ValidationError(_('Provide exactly one uploaded or linked video.'))
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not instance.video:
+            data['video'] = instance.source_url
+        return data
 
     class Meta:
         model = ExerciseVideo
