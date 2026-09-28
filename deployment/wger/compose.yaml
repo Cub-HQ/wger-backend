@@ -3,7 +3,9 @@ x-logging: &logging
   driver: json-file
   options: {max-size: 10m, max-file: '3'}
 x-wger: &wger
-  image: docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
+  # Built locally by prepare-react.sh --backend-image; release_web.py refuses unless the tag
+  # resolves to the image ID, revision and APP_BUILD_COMMIT in overrides/backend-image.json.next.
+  image: fitness-wger-backend:0812ca39a80e82c071c99a54300df73e28668776
   env_file: [./config/private.env]
   restart: unless-stopped
   logging: *logging

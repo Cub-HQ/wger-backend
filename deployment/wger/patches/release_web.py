@@ -207,7 +207,7 @@ if not Path(docker_host.removeprefix('unix://')).is_socket():
 names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
          'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
          'manager-tasks.py', 'manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
-         'manager-0031-session-recovery.py')
+         'manager-0031-session-recovery.py', 'backend-image.json')
 for name in names:
     if not ((source_deploy or deploy_dir) / 'overrides' / f'{name}.next').is_file():
         raise SystemExit(f'missing staged override: {name}.next')
@@ -248,6 +248,25 @@ if source_deploy:
     for service in ('db', 'cache', 'nginx'):
         if before_config['services'][service] != next_config['services'][service]:
             raise SystemExit('DEPLOY_MISSING: unsupported service change: ' + service)
+# The writers' image must be exactly the candidate prepare-react.sh built and verified. A tag is
+# mutable, so it is resolved here and compared with the receipt before the first Docker mutation.
+try:
+    receipt = json.loads(((source_deploy or deploy_dir) / 'overrides/backend-image.json.next').read_text())
+    candidate_tag, candidate_id, candidate_commit = receipt['tag'], receipt['image_id'], receipt['commit']
+    if (not re.fullmatch('[0-9a-f]{40}', candidate_commit) or receipt['app_build_commit'] != candidate_commit
+            or candidate_tag != 'fitness-wger-backend:' + candidate_commit
+            or not re.fullmatch('sha256:[0-9a-f]{64}', candidate_id)):
+        raise ValueError
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit('backend image receipt is missing or malformed; run prepare-react.sh --backend-image') from None
+for service in services:
+    if (next_config if source_deploy else before_config)['services'][service].get('image') != candidate_tag:
+        raise SystemExit(f'compose {service} image is not the receipt candidate {candidate_tag}')
+found = json.loads(run('docker', '-H', docker_host, 'image', 'inspect', '--format', '{{json .}}', candidate_tag, capture=True))
+found_env = dict(item.split('=', 1) for item in found['Config']['Env'] or () if '=' in item)
+if (found['Id'] != candidate_id or found_env.get('APP_BUILD_COMMIT') != candidate_commit
+        or (found['Config']['Labels'] or {}).get('org.opencontainers.image.revision') != candidate_commit):
+    raise SystemExit(f'{candidate_tag} no longer resolves to receipt image {candidate_id} at {candidate_commit}')
 
 with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-rollback.') as temporary:
     rollback = Path(temporary)
@@ -306,6 +325,9 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         # Prove the new schema, imports and beat configuration in every writer image.
         compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--check')
         compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'celery_worker', 'celery_beat')
+        for service in services:
+            if run('docker', '-H', docker_host, 'inspect', '-f', '{{.Image}}', container_id(service), capture=True) != candidate_id:
+                raise RuntimeError('writer is not running the receipt candidate image: ' + service)
         recovery_proof = (
             'from django.conf import settings; from celery import current_app; '
             'from wger.manager.models import WorkoutSessionRecovery; '
@@ -407,4 +429,6 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
                 fallback = f'final restore failed: {fallback_error}'
             raise SystemExit(f'release failed: {release_error}; rollback failed: {rollback_error}; {fallback}') from None
         raise SystemExit(f'web release failed: {release_error}; prior writer states, overrides, database schema/data and exact images restored') from None
-print(json.dumps({'status': 'deployed', 'adapter': 'wger', 'commit': os.environ.get('WGER_RELEASE_COMMIT'), 'live_proof': live_proof}))
+print(json.dumps({'status': 'deployed', 'adapter': 'wger', 'commit': os.environ.get('WGER_RELEASE_COMMIT'),
+                  'backend_image': {'tag': candidate_tag, 'image_id': candidate_id, 'commit': candidate_commit},
+                  'live_proof': live_proof}))
