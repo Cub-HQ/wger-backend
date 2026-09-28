@@ -35,13 +35,19 @@ class PinnedArtifactsTest(unittest.TestCase):
             subprocess.run([
                 "npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund",
             ], cwd=root, check=True)
-            for patch in ("patch_australian_dates.py", "patch_progression_chart.py"):
+            for patch in ("patch_australian_dates.py", "patch_progression_chart.py", "patch_session_recovery_ui.py"):
                 subprocess.run([sys.executable, str(PATCH_DIR / patch), str(root)], check=True)
-            subprocess.run(["npm", "test", "--", "src/core/lib/date.test.ts"], cwd=root, check=True)
+            subprocess.run([
+                sys.executable, str(PATCH_DIR / "test_patch_session_recovery_ui.py"), "--install", str(root),
+            ], check=True)
+            subprocess.run([
+                "npm", "test", "--", "src/core/lib/date.test.ts",
+                "src/components/Routines/screens/Detail/SessionRecovery.test.tsx",
+            ], cwd=root, check=True)
             subprocess.run(["npm", "run", "typecheck"], cwd=root, check=True)
             subprocess.run(["npm", "run", "build"], cwd=root, check=True)
             current_digest = re.search(
-                r"^CHART_HOVER_SHA256 = '([0-9a-f]{64})'$",
+                r"^SESSION_RECOVERY_SHA256 = '([0-9a-f]{64})'$",
                 (PATCH_DIR / "patch_muscle_diagram.py").read_text(), re.MULTILINE,
             )
             self.assertIsNotNone(current_digest, "Expected the named current-build digest")
