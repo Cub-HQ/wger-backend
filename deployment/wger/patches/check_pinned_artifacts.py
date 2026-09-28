@@ -58,14 +58,6 @@ class PinnedArtifactsTest(unittest.TestCase):
             )
             self.check_gate(root / "build/main.js", "patch_muscle_diagram.py", "Pinned React source changed")
 
-            template = root / "template.html"
-            subprocess.run([
-                "curl", "--fail", "--location", "--silent", "--show-error",
-                f"{pins['WGER_REPO']}/raw/{pins['WGER_COMMIT']}/wger/core/templates/template.html",
-                "--output", str(template),
-            ], check=True)
-            self.check_gate(template, "patch_footer.py", "Pinned wger template changed")
-
             history = root / "history-overview.html"
             subprocess.run([
                 "curl", "--fail", "--location", "--silent", "--show-error",

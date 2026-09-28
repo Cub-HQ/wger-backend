@@ -204,7 +204,7 @@ if not docker_host.startswith('unix://') or not Path(docker_host.removeprefix('u
 if not Path(docker_host.removeprefix('unix://')).is_socket():
     raise SystemExit('Docker socket is missing or not a socket: ' + docker_host)
 
-names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
+names = ('react-main.js', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
          'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
          'manager-tasks.py', 'manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
          'manager-0031-session-recovery.py', 'backend-image.json')

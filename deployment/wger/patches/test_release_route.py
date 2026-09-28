@@ -23,7 +23,7 @@ RECOVERY_TARGETS = {
     'manager-tasks.py': 'wger/manager/tasks.py',
     'manager-0031-session-recovery.py': 'wger/manager/migrations/0031_workoutsessionrecovery.py',
 }
-ARTIFACT_NAMES = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html',
+ARTIFACT_NAMES = ('react-main.js', 'history-overview.html', 'api-key.html',
                   'pdf.py', 'corresponding-source.json', *RECOVERY_TARGETS)
 RELEASE_NAMES = (*ARTIFACT_NAMES, 'backend-image.json')
 CANDIDATE_COMMIT = '0812ca39a80e82c071c99a54300df73e28668776'

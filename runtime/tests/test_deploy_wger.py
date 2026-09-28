@@ -183,7 +183,7 @@ class WgerDeployTests(unittest.TestCase):
                     'overrides/settings-main.py', 'overrides/manager-urls.py',
                     'formats/en_AU/formats.py', 'patches/prepare-react.sh',
                     'patches/release_web.py', 'patches/test_release_route.py',
-                    'patches/check_pinned_artifacts.py',
+                    'patches/check_pinned_artifacts.py', 'patches/patch_footer.py',
                     'operations/backup.py', 'operations/snapshot.py', 'operations/restore-drill.py',
                     'operations/recovery-drill.py', 'operations/test_backup_route.py')]
         with tempfile.TemporaryDirectory() as directory:
@@ -191,8 +191,9 @@ class WgerDeployTests(unittest.TestCase):
             root = source / module.PREFIX
             root.mkdir(parents=True)
             module.check_surfaces(changed, source)
-            for name in ('Dockerfile', 'settings-main.py'):
+            for name in module.REMOVED_FILES:
                 retired = root / name
+                retired.parent.mkdir(exist_ok=True)
                 for kind in ('file', 'directory', 'symlink'):
                     with self.subTest(name=name, kind=kind):
                         if kind == 'file':
