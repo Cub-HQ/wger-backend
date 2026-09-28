@@ -156,7 +156,12 @@ def deploy(args):
             subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh'), *step], env=env, check=True)
         expected = hashlib.sha256((candidate / 'overrides/react-main.js.next').read_bytes()).hexdigest()
         from wger_preflight import run
-        preflight = run(machinery, live, env)
+        # The candidate image restore is proven against the commit prep pinned, never a live/env value.
+        pinned = re.search(r'^BACKEND_COMMIT=([0-9a-f]{40})$', (candidate / 'patches/prepare-react.sh').read_text(), re.M)
+        if not pinned:
+            raise ValueError('DEPLOY_MISSING: prepare-react.sh does not pin BACKEND_COMMIT')
+        preflight = run(machinery, live, env, candidate_receipt=candidate / 'overrides/backend-image.json.next',
+                        candidate_commit=pinned[1])
         # A replayed UI revision must not downgrade independently installed proxy/sync fixes.
         for name in ('config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml'):
             if PREFIX + name not in args.changed_file:
