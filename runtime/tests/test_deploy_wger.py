@@ -231,8 +231,6 @@ class WgerDeployTests(unittest.TestCase):
                 self.assertTrue(candidate.is_relative_to((home / '.cache').resolve()))
                 for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
                              'formats/en_AU/formats.py', 'patches/patch_session_recovery.py',
-                             'patches/patch_session_recovery_ui.py',
-                             'patches/test_patch_session_recovery_ui.py',
                              'patches/test_patch_session_recovery.py'):
                     self.assertEqual((candidate / name).read_bytes(),
                                      (source / module.PREFIX / name).read_bytes())

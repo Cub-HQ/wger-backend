@@ -1,4 +1,7 @@
-"""prepare-react.sh --backend-image against fake docker/curl and a real git archive of a fixture repo."""
+"""prepare-react.sh --backend-image against fake docker/curl and a real git archive of a fixture repo.
+
+The fixture repo carries the real committed frontend package, and the fake build unpacks it the way
+the Dockerfile does, so image verification runs over the actual reviewed package bytes."""
 import json
 import os
 import pathlib
@@ -10,8 +13,12 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).parent
-MATERIAL = re.search(r"^BACKEND_MATERIAL='([^']*)'", (ROOT / 'prepare-react.sh').read_text(), re.MULTILINE).group(1).split()
-FAKE_DOCKER = f'#!{sys.executable}\n' + r'''import json, os, shutil, subprocess, sys
+SCRIPT = (ROOT / 'prepare-react.sh').read_text()
+MATERIAL = re.search(r"^BACKEND_MATERIAL='([^']*)'", SCRIPT, re.MULTILINE).group(1).split()
+PACKAGE = re.search(r'^FRONTEND_PACKAGE=(\S+)$', SCRIPT, re.MULTILINE).group(1)
+UI_COMMIT = re.search(r'^FRONTEND_COMMIT=(\S+)$', SCRIPT, re.MULTILINE).group(1)
+INSTALLED = 'node_modules/@wger-project/react-components'
+FAKE_DOCKER = f'#!{sys.executable}\n' + r'''import json, os, re, shutil, subprocess, sys, tarfile
 from pathlib import Path
 args = sys.argv[1:]
 with Path(os.environ['COMMAND_LOG']).open('a') as log:
@@ -43,18 +50,28 @@ elif args[0] == 'build':
     image_id = 'sha256:' + str(len(state['images'])).rjust(64, 'f')
     root = Path(os.environ['IMAGES']) / image_id.removeprefix('sha256:')
     shutil.copytree(context, root)
+    # The Dockerfile's builder stage: unpack the committed package with --strip-components=1.
+    with tarfile.open(root / os.environ['PACKAGE']) as archive:
+        for member in archive.getmembers():
+            if member.isfile():
+                target = root / os.environ['INSTALLED'] / member.name.split('/', 1)[1]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.extractfile(member).read())
     if os.environ.get('CORRUPT_BUILD'): (root / os.environ['CORRUPT_BUILD']).write_text('drift')
     labels = dict(value.split('=', 1) for flag, value in zip(args, args[1:]) if flag == '--label')
     commit = next(value.split('=', 1)[1] for flag, value in zip(args, args[1:])
                   if flag == '--build-arg' and value.startswith('BUILD_COMMIT='))
-    state['images'][image_id] = {'root': str(root), 'labels': labels, 'commit': commit}
+    dockerfile = Path(args[args.index('--file') + 1]).read_text()
+    ui_commit = re.search(r'^ARG UI_BUILD_COMMIT=(\S+)$', dockerfile, re.MULTILINE).group(1)
+    state['images'][image_id] = {'root': str(root), 'labels': labels, 'commit': commit, 'ui_commit': ui_commit}
     save()
     Path(args[args.index('--iidfile') + 1]).write_text(image_id)
 elif args[0] == 'run':
     found = image(args[args.index('--entrypoint') + 2])
     payload = args[args.index('--entrypoint') + 3:]
     payload = [found['root'] if arg == '/home/wger/src' else arg for arg in payload]
-    env = {**os.environ, 'APP_BUILD_COMMIT': found['commit'], 'PYTHONPATH': found['root']}
+    env = {**os.environ, 'APP_BUILD_COMMIT': found['commit'], 'APP_UI_BUILD_COMMIT': found['ui_commit'],
+           'PYTHONPATH': found['root']}
     sys.exit(subprocess.run([sys.executable, *payload], env=env, cwd=found['root']).returncode)
 elif args[0] == 'tag':
     state['tags'][args[2]] = args[1]
@@ -79,7 +96,10 @@ class BackendImageTest(unittest.TestCase):
             (repo / path).parent.mkdir(parents=True, exist_ok=True)
             (repo / path).write_text(f'# {path}\n')
         (repo / 'extras/docker/production').mkdir(parents=True)
-        (repo / 'extras/docker/production/Dockerfile').write_text('FROM wger/base:latest\n')
+        (repo / 'extras/docker/production/Dockerfile').write_text(
+            f'FROM wger/base:latest\nARG UI_BUILD_COMMIT={UI_COMMIT}\n')
+        (repo / PACKAGE).parent.mkdir(parents=True)
+        (repo / PACKAGE).write_bytes((ROOT.parents[2] / PACKAGE).read_bytes())
         git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t']
         subprocess.run([*git, 'init', '-q'], check=True)
         subprocess.run([*git, 'add', '.'], check=True)
@@ -108,7 +128,18 @@ class BackendImageTest(unittest.TestCase):
         self.env = {**os.environ, 'HOME': str(root / 'home'), 'PATH': f'{binary}:{os.environ["PATH"]}',
                     'WGER_DOCKER_HOST': f'unix://{root}/d.sock', 'COMMAND_LOG': str(root / 'commands.jsonl'),
                     'DOCKER_STATE': str(root / 'state.json'), 'IMAGES': str(root / 'images'),
-                    'ARCHIVE': str(root / 'source.tgz')}
+                    'ARCHIVE': str(root / 'source.tgz'), 'PACKAGE': PACKAGE, 'INSTALLED': INSTALLED}
+        self.repo, self.git = repo, git
+
+    def recommit(self, path, content):
+        """Commit a change to the fixture source and point the script's pin at the new commit."""
+        (self.repo / path).write_bytes(content)
+        subprocess.run([*self.git, 'commit', '-qam', 'change'], check=True)
+        old, self.commit = self.commit, subprocess.run([*self.git, 'rev-parse', 'HEAD'], check=True,
+                                                       capture_output=True, text=True).stdout.strip()
+        subprocess.run([*self.git, 'archive', '--format=tar.gz', '--prefix=wger-backend/',
+                        '-o', str(self.root / 'source.tgz'), 'HEAD'], check=True)
+        self.script.write_text(self.script.read_text().replace(old, self.commit))
 
     def tearDown(self):
         self.sock.close()
@@ -155,6 +186,13 @@ class BackendImageTest(unittest.TestCase):
                          {'commit': self.commit, 'image_id': image_id, 'tag': tag, 'app_build_commit': self.commit,
                           'base_image': 'wger/base@sha256:' + 'b' * 64})
         self.assertEqual(record['repository'], 'https://github.com/Cub-HQ/wger-backend')
+        self.assertEqual(record['frontend'], {
+            'repository': 'https://github.com/Cub-HQ/wger-frontend', 'commit': UI_COMMIT,
+            'upstream': 'https://github.com/wger-project/react 89d234a800ba0f2097162f1d91444c7e3a5ccc5c',
+            'package': PACKAGE,
+            'package_sha256': 'c8b3e6b6d251067758f14eb176f961dd881216ef1985e3506e08a2e13a0e4ec0',
+            'main_js_sha256': 'b4396316a69dddfea75a16e78907c515ee5e27478a8c7e64dfc299f2a19074b4'})
+        self.assertIn('source and frontend package files', result.stdout + result.stderr)
 
         (self.overrides / 'backend-image.json.next').unlink()
         again = self.prepare()
@@ -207,6 +245,27 @@ class BackendImageTest(unittest.TestCase):
         result = self.prepare()
         self.assert_refused(result, 'source lacks accepted backend files: wger/utils/absent.py')
         self.assertFalse({'build', 'pull', 'run'} & {call[0] for call in self.calls()})
+
+    def test_other_frontend_package_is_refused_before_any_build(self):
+        # Same name/version from anywhere else (e.g. the upstream registry) is not the reviewed fork build.
+        self.recommit(PACKAGE, (self.repo / PACKAGE).read_bytes() + b'\0')
+        result = self.prepare()
+        self.assert_refused(result, 'not the reviewed c8b3e6b6')
+        self.assertFalse({'build', 'pull', 'run'} & {call[0] for call in self.calls()})
+
+    def test_image_serving_other_frontend_bytes_is_not_tagged(self):
+        for corrupt in ('build/main.js', 'build/locales/de/translation.json', 'build/unreviewed.js'):
+            with self.subTest(corrupt=corrupt):
+                result = self.prepare(CORRUPT_BUILD=f'{INSTALLED}/{corrupt}')
+                self.assert_refused(result, 'failed source verification; not tagged')
+                self.assertIn(f'{INSTALLED}/{corrupt}', result.stderr)
+                self.assertEqual(self.state()['tags'], {})
+
+    def test_image_recording_other_frontend_commit_is_not_tagged(self):
+        self.recommit('extras/docker/production/Dockerfile', b'FROM wger/base:latest\nARG UI_BUILD_COMMIT=' + b'e' * 40 + b'\n')
+        result = self.prepare()
+        self.assert_refused(result, f"APP_UI_BUILD_COMMIT is '{'e' * 40}', expected {UI_COMMIT}")
+        self.assertEqual(self.state()['tags'], {})
 
 
 if __name__ == '__main__':
