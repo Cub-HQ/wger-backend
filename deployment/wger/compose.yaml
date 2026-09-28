@@ -110,7 +110,9 @@ services:
       - *recovery-migration
   celery_beat:
     <<: *wger
-    mem_limit: 192m
+    # Beat loads the full Django app to prove tasks and schedule at release, which
+    # peaks above 192m and was killed with 137 mid-release.
+    mem_limit: 384m
     cpus: 0.25
     command: /start-beat
     depends_on: [celery_worker]

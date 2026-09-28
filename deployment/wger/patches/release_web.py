@@ -257,7 +257,13 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
     verify_binds(rendered_config(deploy_dir / 'compose.yaml', (rollback_override,)))
     for name in names:
         current = deploy_dir / 'overrides' / name
-        if current.exists():
+        # Rendering compose above makes Docker create a directory for any bind source
+        # that does not exist yet, so a first release leaves empty directories where
+        # these files belong. They hold nothing to roll back to; treat them as absent
+        # and remove them so the release can write the real file.
+        if current.is_dir() and not current.is_symlink() and not any(current.iterdir()):
+            current.rmdir()
+        elif current.exists():
             shutil.copy2(current, rollback / name)
     snapshot_complete = False
     previous_config = {}
@@ -270,6 +276,10 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
                 raise SystemExit('DEPLOY_MISSING: symlink deployment target')
             if current.parent.exists() and not current.parent.is_dir():
                 raise SystemExit('DEPLOY_MISSING: deployment parent is not a directory')
+            # Same Docker-created placeholder as the overrides above: an empty
+            # directory here means the file has never existed, not that it changed.
+            if current.is_dir() and not any(current.iterdir()):
+                current.rmdir()
             previous_config[name] = current.read_bytes() if current.exists() else None
     try:
         compose('stop', 'powersync', *services)
@@ -285,8 +295,11 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
         for name in names:
             shutil.copy2((source_deploy or deploy_dir) / 'overrides' / f'{name}.next', deploy_dir / 'overrides' / name)
         compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'web')
-        compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--no-input')
+        # `up` returns when the container is created, not when it can serve. Migrating
+        # before it is healthy races the recreate: the exec attaches to the container
+        # being replaced and dies with 137 when that one is killed.
         wait_healthy(container_id('web'))
+        compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--no-input')
         # Prove the new schema, imports and beat configuration in every writer image.
         compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--check')
         compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'celery_worker', 'celery_beat')

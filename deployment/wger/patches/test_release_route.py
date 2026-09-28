@@ -496,7 +496,12 @@ elif "sha256sum" in args:
                 web_up = next(i for i, command in enumerate(commands) if 'up' in command and 'web' in command)
                 migrate = next(i for i, command in enumerate(commands) if 'migrate' in command and '--no-input' in command)
                 checked = next(i for i, command in enumerate(commands) if 'migrate' in command and '--check' in command)
-                self.assertLess(web_up, migrate)
+                # `up` returns at creation, not readiness. Migrating before the health
+                # wait attaches the exec to the container being replaced, which dies
+                # with 137 when the recreate kills it.
+                health = next(i for i, command in enumerate(commands) if 'inspect' in command and any('Health' in arg for arg in command))
+                self.assertLess(web_up, health)
+                self.assertLess(health, migrate)
                 self.assertLess(migrate, checked)
                 for service in ('celery_worker', 'celery_beat'):
                     started = next(i for i, command in enumerate(commands) if 'up' in command and service in command)
