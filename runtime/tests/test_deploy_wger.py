@@ -23,8 +23,8 @@ class WgerDeployTests(unittest.TestCase):
             (RuntimeError('rollback failed PS_DATABASE_URI=postgres://fitness_wger:secret@db/app REDIS_URL=redis://:abc@cache/0'), 'rollback failed'),
             (OSError('socket unavailable'), 'socket unavailable'),
             (ValueError('password=secret token: abc Authorization: Bearer xyz https://user:pass@host/path?key=private'), '[REDACTED]'),
-            (subprocess.CalledProcessError(17, ['docker', '--password', 'hidden'], output=b'private output', stderr=b'private error'), 'exit status 17'),
-            (subprocess.TimeoutExpired(['docker', '--password', 'hidden'], 30, output=b'private output'), 'timed out after 30'),
+            (subprocess.CalledProcessError(17, ['docker', '--password', 'hidden'], output=b'token=private', stderr=b'No space left on device password=secret'), 'No space left on device'),
+            (subprocess.TimeoutExpired(['docker', '--password', 'hidden'], 30, output=b'Permission denied token=private'), 'Permission denied'),
         )
         for error, diagnostic in errors:
             with self.subTest(error=type(error).__name__), patch.object(module, 'deploy', side_effect=error), patch.object(sys, 'argv', ['deploy_wger', '--source', '/unused', '--commit', 'a'*40]), patch('sys.stdout', new_callable=io.StringIO) as output:
@@ -33,6 +33,120 @@ class WgerDeployTests(unittest.TestCase):
                 self.assertIn(diagnostic, receipt['reason'])
                 for secret in ('secret', 'abc', 'xyz', 'user:pass', 'private', 'hidden'):
                     self.assertNotIn(secret, receipt['reason'])
+
+    def test_structured_child_failure_prefers_stderr_and_excludes_other_output(self):
+        from deploy_failure import failure_reason
+
+        reason = 'incomplete, foreign or drifted migration receipt'
+        error = subprocess.CalledProcessError(
+            78, ['argv-secret'],
+            output=json.dumps({'status': 'denied', 'reason': 'outdated stdout diagnosis'}),
+            stderr=('unrelated-private-output\n' + json.dumps({
+                'status': 'denied', 'reason': reason, 'extra': 'receipt-private-value',
+            }) + '\n').encode(),
+        )
+        detail = failure_reason(error)
+        self.assertIn(reason, detail)
+        for excluded in ('argv-secret', 'unrelated-private-output', 'receipt-private-value',
+                         'outdated stdout diagnosis', 'exit=78'):
+            self.assertNotIn(excluded, detail)
+
+    def test_structured_stdout_reason_is_redacted(self):
+        from deploy_failure import failure_reason
+
+        error = subprocess.CalledProcessError(
+            78, ['argv-secret'], stderr='unrelated-private-output',
+            output=json.dumps({'status': 'denied', 'reason':
+                'probe failed: Permission denied password=fake-password '
+                'Bearer fake-bearer https://fake-user:fake-pass@fake-host/path?token=fake-query'}),
+        )
+        detail = failure_reason(error)
+        self.assertIn('probe failed: Permission denied', detail)
+        for secret in ('argv-secret', 'unrelated-private-output', 'fake-password',
+                       'fake-bearer', 'fake-user', 'fake-pass', 'fake-host', 'fake-query'):
+            self.assertNotIn(secret, detail)
+
+    def test_structured_reason_redacts_whitespace_and_cli_secrets(self):
+        from deploy_failure import failure_reason
+
+        error = subprocess.CalledProcessError(
+            78, ['argv-secret'], stderr=json.dumps({'status': 'denied', 'reason':
+                'probe failed: Permission denied PASSWORD fake-password '
+                "API_KEY 'fake-api-key' --token fake-token Authorization Basic fake-basic"}),
+        )
+        detail = failure_reason(error)
+        self.assertIn('probe failed: Permission denied', detail)
+        for secret in ('argv-secret', 'fake-password', 'fake-api-key', 'fake-token', 'fake-basic'):
+            self.assertNotIn(secret, detail)
+
+    def test_unstructured_failure_excludes_unrelated_child_output(self):
+        from deploy_failure import failure_reason
+
+        error = subprocess.CalledProcessError(
+            1, ['argv-secret'],
+            stderr='athlete note: private medical detail\nNo space left on device\nHOME=/private/home',
+        )
+        detail = failure_reason(error)
+        self.assertIn('No space left on device', detail)
+        for excluded in ('private medical detail', '/private/home', 'argv-secret'):
+            self.assertNotIn(excluded, detail)
+
+    def test_only_terminal_json_line_is_accepted(self):
+        from deploy_failure import failure_reason
+
+        stale = subprocess.CalledProcessError(
+            1, ['argv-secret'],
+            stderr=json.dumps({'status': 'DEPLOY_MISSING', 'reason': 'stale diagnosis'})
+                   + '\nfinal crash output',
+        )
+        self.assertNotIn('stale diagnosis', failure_reason(stale))
+
+        final = subprocess.CalledProcessError(
+            1, ['argv-secret'],
+            stderr='progress output\n' + json.dumps({
+                'status': 'denied', 'reason': 'current diagnosis',
+            }),
+        )
+        self.assertIn('current diagnosis', failure_reason(final))
+
+    def test_blank_stderr_receipt_does_not_mask_stdout(self):
+        from deploy_failure import failure_reason
+
+        error = subprocess.CalledProcessError(
+            75, ['argv-secret'],
+            stderr=json.dumps({'status': 'DEPLOY_MISSING', 'reason': '   '}),
+            output=json.dumps({'status': 'retryable', 'error': 'Permission denied'}),
+        )
+        self.assertIn('Permission denied', failure_reason(error))
+    def test_unstructured_failures_preserve_distinct_redacted_causes(self):
+        from deploy_failure import failure_reason
+
+        details = []
+        for cause in ('No space left on device', 'Permission denied'):
+            with self.subTest(cause=cause):
+                error = subprocess.CalledProcessError(
+                    1, ['argv-secret'], stderr=cause + ' password=fake-password '
+                    'Bearer fake-bearer https://fake-host/path?token=fake-query',
+                )
+                detail = failure_reason(error)
+                self.assertIn(cause, detail)
+                for secret in ('argv-secret', 'fake-password', 'fake-bearer', 'fake-host', 'fake-query'):
+                    self.assertNotIn(secret, detail)
+                details.append(detail)
+        self.assertNotEqual(*details)
+
+    def test_no_output_failure_has_safe_nonempty_detail(self):
+        from deploy_failure import failure_reason
+
+        for error in (subprocess.CalledProcessError(17, ['argv-secret']),
+                      subprocess.TimeoutExpired(['argv-secret'], 30), RuntimeError()):
+            with self.subTest(error=type(error).__name__):
+                detail = failure_reason(error)
+                classification, separator, message = detail.partition(':')
+                self.assertEqual(classification, type(error).__name__)
+                self.assertEqual(separator, ':')
+                self.assertTrue(message.strip())
+                self.assertNotIn('argv-secret', detail)
 
     def test_unknown_surface_refuses_without_touching_live(self):
         with tempfile.TemporaryDirectory() as directory:
