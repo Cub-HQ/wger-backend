@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Private full wger snapshots from the local reviewed Colima runtime."""
+"""Private full wger snapshots from the reviewed local Docker runtime."""
 import argparse, datetime, fcntl, hashlib, json, os, pathlib, stat, subprocess, sys
 from snapshot import verify_snapshot, write_manifest
 
-DOCKER_HOST=f'unix://{pathlib.Path.home()}/.colima/docker.sock'
 DEPLOY=pathlib.Path.home()/'fitness-wger'
 WRITERS=('powersync','web','celery_worker','celery_beat')
 
+def docker_host():
+    host = os.environ.get('WGER_DOCKER_HOST', f'unix://{pathlib.Path.home()}/.colima/default/docker.sock')
+    if not host.startswith('unix://') or not pathlib.Path(host[7:]).is_absolute():
+        raise RuntimeError('Docker endpoint must be unix:// with an absolute socket path')
+    if not pathlib.Path(host[7:]).is_socket():
+        raise RuntimeError(f'Docker socket is unavailable: {host}')
+    return host
+
 
 def docker(*args, output=None, check=True):
-    return subprocess.run(['docker','-H',DOCKER_HOST,*args],stdout=output or subprocess.PIPE,stderr=subprocess.PIPE,check=check).stdout
+    return subprocess.run(['docker','-H',docker_host(),*args],stdout=output or subprocess.PIPE,stderr=subprocess.PIPE,check=check).stdout
 
 
 def compose(*args, output=None, check=True):
@@ -95,7 +102,8 @@ def encrypt_snapshot(root, output, passphrase_file, *, runner=subprocess.run):
 def media_inventory():
     return docker('run','--rm','-v','fitness-wger_media:/media:ro','alpine:3.22','sh','-c','cd /media && find . -type f -exec sha256sum {} + | sort')
 
-def deployment_services(work, docker_command=('docker',)):
+def deployment_services(work, docker_command=None):
+    docker_command = ('docker', '-H', docker_host()) if docker_command is None else docker_command
     work = pathlib.Path(work).absolute()
     deployment_file(work, 'compose.yaml')
     deployment_file(work, 'config/private.env')
@@ -167,8 +175,9 @@ def write_deployment_archive(path, *, deploy=None):
 def snapshot(destination):
     os.umask(0o077)
     destination=private_destination(destination)
-    if not pathlib.Path(DOCKER_HOST.removeprefix('unix://')).is_socket() or not (DEPLOY/'compose.yaml').is_file():
-        raise RuntimeError('reviewed local Colima gym is unavailable')
+    docker_host()
+    if not (DEPLOY/'compose.yaml').is_file():
+        raise RuntimeError('reviewed local gym deployment is unavailable')
     lock=(destination/'.snapshot.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     custody=acquire_custody(os.environ.get('WGER_WRITER_LOCK'),os.environ.get('WGER_HISTORY_LOCK'))
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
@@ -232,4 +241,4 @@ if __name__=='__main__':
         root=snapshot(args.destination)
         if args.encrypted_bundle:print(json.dumps({'encrypted_receipt':str(encrypt_snapshot(root,args.encrypted_bundle,args.passphrase_file))}))
     except subprocess.CalledProcessError as error:
-        print('Snapshot failed in local Colima command (details suppressed to protect configuration)',file=sys.stderr);sys.exit(error.returncode)
+        print('Snapshot failed in local Docker command (details suppressed to protect configuration)',file=sys.stderr);sys.exit(error.returncode)

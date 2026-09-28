@@ -200,9 +200,10 @@ def wait_healthy(container, attempts=450):
     raise subprocess.CalledProcessError(1, ('healthcheck', container))
 
 
-expected_host = f'unix://{Path.home()}/.colima/default/docker.sock'
-if docker_host != expected_host or not Path(docker_host.removeprefix('unix://')).is_socket():
-    raise SystemExit('Docker is not the reviewed Colima socket')
+if not docker_host.startswith('unix://') or not Path(docker_host.removeprefix('unix://')).is_absolute():
+    raise SystemExit('Docker endpoint must be unix:// followed by an absolute socket path')
+if not Path(docker_host.removeprefix('unix://')).is_socket():
+    raise SystemExit('Docker socket is missing or not a socket: ' + docker_host)
 
 names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
          'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',

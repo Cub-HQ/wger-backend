@@ -123,7 +123,7 @@ def deploy(args):
     if not (live / 'config/private.env').is_file():
         raise ValueError('DEPLOY_MISSING: existing private gym environment unavailable')
     env = {**os.environ, **existing_locks(), 'WGER_DEPLOY_DIR': str(live),
-           'WGER_DOCKER_HOST': f'unix://{Path.home()}/.colima/default/docker.sock',
+           'WGER_DOCKER_HOST': os.environ.get('WGER_DOCKER_HOST', f'unix://{Path.home()}/.colima/default/docker.sock'),
            'WGER_PUBLIC_URL': os.environ.get('WGER_PUBLIC_URL', 'https://gym.tailnet.invalid:8098')}
     machinery = Path(__file__).resolve().parents[1]
     # Prepare in isolation before backup: a digest/toolchain failure cannot alter the gym.

@@ -1,16 +1,63 @@
 #!/bin/bash
-# Build reviewed overrides locally against the current Colima Docker context.
+# Build reviewed overrides locally against the configured Docker endpoint.
 # Outputs .next files only; release-web.sh owns the separate release window.
 set -euo pipefail
 
 PATCH_DIR=$(cd "$(dirname "$0")" && pwd)
 DEPLOY_DIR=$(cd "$PATCH_DIR/.." && pwd)
-DOCKER_HOST=${WGER_DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}
+DOCKER_HOST=${WGER_DOCKER_HOST-unix://$HOME/.colima/default/docker.sock}
 REACT_REPO=https://github.com/Cubatica/react
 REACT_COMMIT=3066f7693ac00632ad14ea0ef025371156f91d0d
 WGER_REPO=https://github.com/Cubatica/wger
 WGER_COMMIT=135d8569a3eb27c9f0f74e865d56372421a61294
 EXTRACTOR="fitness-wger-source-$$"
+
+preflight_failed() {
+  echo "preflight failed: $*" >&2
+  exit 1
+}
+
+case "$DOCKER_HOST" in
+  unix:///*) ;;
+  *) preflight_failed "Docker endpoint unsupported: $DOCKER_HOST (expected unix:///path)" ;;
+esac
+[ -S "${DOCKER_HOST#unix://}" ] || preflight_failed "Docker socket unavailable: ${DOCKER_HOST#unix://}"
+docker -H "$DOCKER_HOST" info >/dev/null 2>&1 || preflight_failed "Docker daemon unreachable: $DOCKER_HOST"
+IMAGE=$(docker -H "$DOCKER_HOST" compose -f "$DEPLOY_DIR/compose.yaml" config --no-env-resolution --format json | python3 -c '
+import json, sys
+image = json.load(sys.stdin)["services"]["web"]["image"]
+if not isinstance(image, str) or not image.strip():
+    sys.exit(1)
+print(image)
+') || preflight_failed 'compose web image could not be resolved'
+docker -H "$DOCKER_HOST" image inspect "$IMAGE" >/dev/null 2>&1 || preflight_failed "image unavailable: $IMAGE"
+
+# Exercise the same bind, image user and Python environment as the ORM proof.
+probe_status=0
+docker -H "$DOCKER_HOST" run --rm --network none --user wger --entrypoint /bin/sh \
+  --env PYTHONDONTWRITEBYTECODE=1 \
+  --mount "type=bind,src=$PATCH_DIR,target=/tests,readonly" \
+  "$IMAGE" -c '
+    cat /tests/test_patch_session_recovery.py /tests/patch_session_recovery.py >/dev/null || exit 41
+    python3 -c "pass" || exit 42
+    python3 -c '\''
+import importlib, sys
+for module in ("django", "rest_framework.exceptions", "sqlite3"):
+    try:
+        importlib.import_module(module)
+    except Exception as error:
+        print(f"preflight failed: module importability: {module}: {error}", file=sys.stderr)
+        sys.exit(1)
+'\'' || exit 43
+  ' || probe_status=$?
+case "$probe_status" in
+  0) ;;
+  41) preflight_failed "staging path unreadable in image: $PATCH_DIR" ;;
+  42) preflight_failed "Python interpreter unavailable for wger in image: $IMAGE" ;;
+  43) exit 1 ;;
+  *) preflight_failed "staging path/container probe could not run: $PATCH_DIR (image $IMAGE, status $probe_status)" ;;
+esac
+
 BUILD_DIR=$(mktemp -d)
 STAGED_DIR="$BUILD_DIR/staged"
 mkdir -p "$STAGED_DIR"
@@ -19,11 +66,7 @@ cleanup() {
   rm -rf "$BUILD_DIR"
 }
 trap cleanup EXIT
-
-[ "$DOCKER_HOST" = "unix://$HOME/.colima/default/docker.sock" ] || { echo 'wrong Docker host' >&2; exit 1; }
-[ -S "${DOCKER_HOST#unix://}" ] || { echo 'reviewed Colima socket is unavailable' >&2; exit 1; }
 mkdir -p "$DEPLOY_DIR/overrides"
-IMAGE=$(docker -H "$DOCKER_HOST" compose -f "$DEPLOY_DIR/compose.yaml" config --no-env-resolution --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["web"]["image"])')
 
 docker -H "$DOCKER_HOST" create --name "$EXTRACTOR" --entrypoint /bin/true "$IMAGE" >/dev/null
 docker -H "$DOCKER_HOST" cp "$EXTRACTOR:/home/wger/src/node_modules/@wger-project/react-components/build/main.js" "$DEPLOY_DIR/overrides/react-original-main.js"
@@ -50,8 +93,8 @@ curl --fail --location --silent --show-error "$WGER_REPO/archive/$WGER_COMMIT.ta
 tar -xzf "$BUILD_DIR/server-source.tgz" --strip-components=1 -C "$BUILD_DIR/server"
 python3 "$PATCH_DIR/patch_session_recovery.py" "$BUILD_DIR/server" "$STAGED_DIR"
 # Use the released image's dependencies, never the host environment or live database.
-docker -H "$DOCKER_HOST" run --rm --network none --entrypoint python3 \
-  --env HOME=/tmp --env PYTHONDONTWRITEBYTECODE=1 \
+docker -H "$DOCKER_HOST" run --rm --network none --user wger --entrypoint python3 \
+  --env PYTHONDONTWRITEBYTECODE=1 \
   --mount "type=bind,src=$PATCH_DIR,target=/tests,readonly" \
   "$IMAGE" /tests/test_patch_session_recovery.py --orm
 
