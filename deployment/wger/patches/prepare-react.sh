@@ -34,6 +34,8 @@ docker -H "$DOCKER_HOST" info >/dev/null 2>&1 || preflight_failed "Docker daemon
 
 if [ "${1-}" = --backend-image ]; then
   failed() { echo "backend image failed: $*" >&2; exit 1; }
+  # A failed preparation must never leave an older receipt for release_web.py to trust.
+  rm -f "$DEPLOY_DIR/overrides/backend-image.json.next"
   mkdir -p "$HOME/.cache"
   BUILD_DIR=$(mktemp -d "$HOME/.cache/fitness-wger-backend.XXXXXX")
   trap 'rm -rf "$BUILD_DIR"' EXIT
