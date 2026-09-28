@@ -61,7 +61,10 @@ def normalize_bundle(data):
 def check_surfaces(paths, source=None):
     for path in paths:
         if not path.startswith(PREFIX):
-            raise ValueError('DEPLOY_MISSING: non-gym surface ' + path)
+            # Fork source (Dockerfile, package files, react-components tgz, wger/) ships only in
+            # the image built from prepare-react.sh's BACKEND_COMMIT; the release unit is that pin.
+            raise ValueError('DEPLOY_MISSING: non-gym surface (fork source deploys only via the '
+                             'BACKEND_COMMIT pin in patches/prepare-react.sh) ' + path)
         relative = path[len(PREFIX):]
         if relative in REMOVED_FILES and source is not None:
             removed = Path(source) / path
