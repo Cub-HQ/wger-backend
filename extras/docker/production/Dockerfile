@@ -54,21 +54,20 @@ RUN pip3 wheel \
     && npm install -g sass
 
 # Fetch the JS and CSS files.
-# The react-components package is the Cub-HQ/wger-frontend build committed next to
-# this Dockerfile, not the registry package: the fork keeps upstream's name and
-# version, so `npm pack NAME@VERSION` would silently install upstream. The build
-# fails unless the tarball matches its recorded SHA256SUMS line.
+# The react-components devDependency is the Cub-HQ/wger-frontend build committed
+# under react-components/ next to this Dockerfile, not the registry package: the
+# fork keeps upstream's name and version, so `npm pack NAME@VERSION` would silently
+# install upstream. The build fails unless the tarball matches SHA256SUMS.
 COPY package.json package-lock.json ./
 COPY wger/core/static /root/src/wger/core/static
-COPY extras/docker/production/react-components /root/src/react-components
+COPY extras/docker/production/react-components /root/src/extras/docker/production/react-components
 RUN npm ci --production \
     && npm run build:css:sass \
     && PACKAGE_NAME="@wger-project/react-components" \
-    && PACKAGE_VERSION=$(node -p "require('./package.json').devDependencies['$PACKAGE_NAME']") \
-    && TARBALL=wger-project-react-components-${PACKAGE_VERSION}.tgz \
-    && (cd react-components && grep "  ${TARBALL}\$" SHA256SUMS | sha256sum --check --strict -) \
+    && TARBALL=$(node -p "require('./package.json').devDependencies['$PACKAGE_NAME'].replace(/^file:/, '')") \
+    && (cd $(dirname ${TARBALL}) && grep "  $(basename ${TARBALL})\$" SHA256SUMS | sha256sum --check --strict -) \
     && mkdir -p node_modules/${PACKAGE_NAME} \
-    && tar -xzf react-components/${TARBALL} -C node_modules/${PACKAGE_NAME} --strip-components=1
+    && tar -xzf ${TARBALL} -C node_modules/${PACKAGE_NAME} --strip-components=1
 
 ########
 # Final
