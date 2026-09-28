@@ -93,6 +93,12 @@ def _candidate(docker, env, receipt_path, commit):
     """Return the immutable candidate image named by the prepared receipt, checked against Docker."""
     if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit):
         raise RuntimeError('candidate commit must be a full lowercase git sha')
+    receipt_path = Path(receipt_path)
+    if receipt_path.name != 'backend-image.json.next' or receipt_path.parent.name != 'overrides':
+        raise RuntimeError('candidate receipt must be <candidate>/overrides/backend-image.json.next')
+    deploy = receipt_path.resolve().parent.parent
+    if not (deploy / 'compose.yaml').is_file():
+        raise RuntimeError('candidate deployment has no compose.yaml')
     try:
         receipt = json.loads(Path(receipt_path).read_text())
     except (OSError, TypeError, ValueError) as error:
@@ -114,8 +120,7 @@ def _candidate(docker, env, receipt_path, commit):
             or 'APP_BUILD_COMMIT=' + commit not in ((record.get('Config') or {}).get('Env') or [])
             for record in records):
         raise RuntimeError('candidate image identity does not match receipt')
-    return {'commit': commit, 'image_id': image, 'tag': receipt['tag']}
-    return proof
+    return {'commit': commit, 'image_id': image, 'tag': receipt['tag'], 'deploy': str(deploy)}
 
 
 def _media(docker, volume, env):
@@ -269,13 +274,19 @@ def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candi
                 for service in ('powersync', 'web', 'celery_worker', 'celery_beat')}:
             raise RuntimeError('snapshot writer identities differ from baseline')
         output = _command([sys.executable, operations / 'restore-drill.py', snapshot,
-                           '--candidate-image', candidate['image_id']], env)
+                           '--candidate-image', candidate['image_id'], '--candidate-deploy', candidate['deploy']], env)
         receipt_path = Path(json.loads(output.splitlines()[-1])['receipt'])
         receipt = _receipt(receipt_path, snapshot)
         if receipt.get('state') != 'restored-awaiting-independent-application-check':
             raise RuntimeError('restore is incomplete')
         if receipt.get('image_source') != 'candidate' or receipt.get('web_image') != candidate['image_id']:
             raise RuntimeError('restore did not run the candidate image')
+        mounts = receipt.get('candidate_web_mounts')
+        if (receipt.get('candidate_deploy') != candidate['deploy'] or not isinstance(mounts, list) or not mounts
+                or any(not isinstance(mount, dict) or mount.get('sha256') != hashlib.sha256(
+                    (Path(candidate['deploy']) / mount.get('candidate_file', '')).read_bytes()).hexdigest()
+                    for mount in mounts)):
+            raise RuntimeError('restore did not run the candidate compose binds')
         application = _application(receipt['port'])
         restored = _database(docker, receipt['project'] + '-web', env)
         schema = {tuple(row) for row in restored['schema']}
@@ -290,7 +301,7 @@ def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candi
                     'application': application, 'counts': restored['counts'], 'schema': restored['schema'],
                     'media_sha256': hashlib.sha256(raw).hexdigest(), 'media_files': before['media'][1],
                     'candidate': candidate, 'rollback_images': json.loads((snapshot / 'images.json').read_text()),
-                    'protected_rows_unchanged': True}
+                    'candidate_web_mounts': mounts, 'protected_rows_unchanged': True}
     finally:
         failures = []
         # A failed restore may have written its ownership receipt before exiting.
