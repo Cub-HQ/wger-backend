@@ -147,6 +147,15 @@ USE_X_FORWARDED_HOST = env.bool('USE_X_FORWARDED_HOST', False)
 REST_FRAMEWORK['NUM_PROXIES'] = env.int('NUMBER_OF_PROXIES', 1)
 CELERY_BROKER_URL = env.str('CELERY_BROKER', 'redis://cache:6379/2')
 CELERY_RESULT_BACKEND = env.str('CELERY_BACKEND', 'redis://cache:6379/2')
+# Recovery expiry runs even when Celery-backed email is disabled.
+CELERY_IMPORTS = (*globals().get('CELERY_IMPORTS', ()), 'wger.manager.tasks')
+CELERY_BEAT_SCHEDULE = {
+    **globals().get('CELERY_BEAT_SCHEDULE', {}),
+    'purge-session-recoveries': {
+        'task': 'wger.manager.tasks.purge_session_recoveries',
+        'schedule': timedelta(hours=1),
+    },
+}
 EXPOSE_PROMETHEUS_METRICS = env.bool('EXPOSE_PROMETHEUS_METRICS', False)
 LOGGING = {'version': 1, 'disable_existing_loggers': False, 'formatters': {'simple': {'format': 'level={levelname} ts={asctime} module={module} path={pathname} line={lineno} message={message}', 'style': '{'}}, 'handlers': {'console': {'level': 'DEBUG', 'class': 'logging.StreamHandler', 'formatter': 'simple'}}, 'loggers': {'': {'handlers': ['console'], 'level': env.str('LOG_LEVEL_PYTHON', 'INFO').upper(), 'propagate': True}}}
 STORAGES = {'default': {'BACKEND': env.str('DJANGO_STORAGES_DEFAULT_BACKEND', 'django.core.files.storage.FileSystemStorage')}, 'staticfiles': {'BACKEND': env.str('DJANGO_STORAGES_STATICFILES_BACKEND', 'wger.core.storage.LenientManifestStaticFilesStorage')}}

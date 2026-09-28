@@ -18,7 +18,20 @@ import urllib.request
 DATABASE_PROOF = """import json
 from django.apps import apps
 from django.db.migrations.recorder import MigrationRecorder
-print(json.dumps({'counts': {name: apps.get_model(app, model).objects.count() for name, app, model in [('users','auth','User'),('sessions','manager','WorkoutSession'),('logs','manager','WorkoutLog'),('videos','exercises','ExerciseVideo')]}, 'schema': sorted([list(row) for row in MigrationRecorder.Migration.objects.values_list('app','name')])}))
+from django.db import connection
+schema = sorted([list(row) for row in MigrationRecorder.Migration.objects.values_list('app','name')])
+counts = {name: apps.get_model(app, model).objects.count() for name, app, model in [('users','auth','User'),('sessions','manager','WorkoutSession'),('logs','manager','WorkoutLog'),('videos','exercises','ExerciseVideo')]}
+recovery_table = 'manager_workoutsessionrecovery'
+if recovery_table in connection.introspection.table_names():
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT COUNT(*) FROM ' + connection.ops.quote_name(recovery_table))
+        counts['recoveries'] = cursor.fetchone()[0]
+elif ['manager', '0031_workoutsessionrecovery'] in schema:
+    raise RuntimeError('applied recovery migration is missing its table')
+else:
+    # Preflight runs against the live baseline before the first recovery release.
+    counts['recoveries'] = 0
+print(json.dumps({'counts': counts, 'schema': schema}))
 """
 
 
@@ -30,7 +43,7 @@ def _command(args, env):
 def _database(docker, container, env):
     output = _command([*docker, 'exec', container, 'python3', 'manage.py', 'shell', '-c', DATABASE_PROOF], env)
     proof = json.loads(output.splitlines()[-1])
-    if (set(proof['counts']) != {'users', 'sessions', 'logs', 'videos'}
+    if (set(proof['counts']) != {'users', 'sessions', 'logs', 'videos', 'recoveries'}
             or any(type(n) is not int or n < 0 for n in proof['counts'].values())
             or not proof['schema']):
         raise RuntimeError('incomplete database proof')

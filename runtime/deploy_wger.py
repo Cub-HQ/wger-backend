@@ -21,6 +21,8 @@ PRODUCT_FILES = (
     'patches/patch_australian_template_dates.py', 'patches/patch_australian_pdf.py',
     'patches/patch_progression_chart.py', 'patches/patch_muscle_diagram.py',
     'patches/patch_footer.py',
+    'patches/patch_session_recovery.py', 'patches/patch_session_recovery_ui.py',
+    'patches/test_patch_session_recovery_ui.py', 'patches/test_patch_session_recovery.py',
 )
 MACHINERY = ('patches/release-web.sh', 'patches/release_web.py', 'patches/release_env.py',
              'patches/setup-powersync-storage.py')

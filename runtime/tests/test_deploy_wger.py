@@ -108,7 +108,10 @@ class WgerDeployTests(unittest.TestCase):
                 self.assertEqual(args[0], 'bash', 'stock image must not be rebuilt')
                 candidate = Path(args[1]).parents[1]
                 for name in ('overrides/settings-main.py', 'overrides/manager-urls.py',
-                             'formats/en_AU/formats.py'):
+                             'formats/en_AU/formats.py', 'patches/patch_session_recovery.py',
+                             'patches/patch_session_recovery_ui.py',
+                             'patches/test_patch_session_recovery_ui.py',
+                             'patches/test_patch_session_recovery.py'):
                     self.assertEqual((candidate / name).read_bytes(),
                                      (source / module.PREFIX / name).read_bytes())
                 self.assertFalse((candidate / 'Dockerfile').exists())
