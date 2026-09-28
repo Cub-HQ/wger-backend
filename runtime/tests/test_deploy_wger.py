@@ -224,6 +224,7 @@ class WgerDeployTests(unittest.TestCase):
                 self.assertEqual(args[0], 'bash', 'stock image must not be rebuilt')
                 script = Path(args[1]).resolve()
                 self.assertEqual(script.name, 'prepare-react.sh')
+                self.assertEqual(kwargs['env']['WGER_DOCKER_HOST'], expected_host)
                 self.assertTrue(script.is_relative_to(home.resolve()))
                 candidate = script.parents[1]
                 self.assertTrue(candidate.is_relative_to((home / '.cache').resolve()))
@@ -241,12 +242,21 @@ class WgerDeployTests(unittest.TestCase):
             args = SimpleNamespace(source=str(source), commit='a' * 40,
                                    deploy_root=str(live),
                                    changed_file=['deployment/wger/operations/recovery-drill.py'])
-            with patch.object(module.Path, 'home', return_value=home), \
-                    patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
-                    patch.object(module, 'existing_locks', return_value={}), \
-                    patch.object(module.subprocess, 'run', side_effect=prepare):
-                with self.assertRaisesRegex(RuntimeError, 'stop before backup or live release'):
-                    module.deploy(args)
+            for configured_host in ('unix:///run/user/1000/docker.sock', None, ''):
+                with self.subTest(docker_host=configured_host):
+                    environment = dict(module.os.environ)
+                    environment.pop('WGER_DOCKER_HOST', None)
+                    expected_host = f'unix://{home}/.colima/default/docker.sock'
+                    if configured_host is not None:
+                        environment['WGER_DOCKER_HOST'] = configured_host
+                        expected_host = configured_host
+                    with patch.dict(module.os.environ, environment, clear=True), \
+                            patch.object(module.Path, 'home', return_value=home), \
+                            patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
+                            patch.object(module, 'existing_locks', return_value={}), \
+                            patch.object(module.subprocess, 'run', side_effect=prepare):
+                        with self.assertRaisesRegex(RuntimeError, 'stop before backup or live release'):
+                            module.deploy(args)
 
     def test_escaped_cache_refuses_before_preparation(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)

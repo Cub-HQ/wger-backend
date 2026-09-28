@@ -148,18 +148,21 @@ def run(source: Path, deploy: Path, env: dict) -> dict:
     source, deploy = Path(source), Path(deploy)
     env = {**os.environ, **env}
     home = Path.home()
-    canonical_socket = home / '.colima/docker.sock'
-    requested = env.get('WGER_DOCKER_HOST', 'unix://' + str(canonical_socket))
-    if (deploy.resolve() != (home / 'fitness-wger').resolve()
-            or not requested.startswith('unix://')
-            or Path(requested[7:]) not in {canonical_socket, home / '.colima/default/docker.sock'}
-            or not canonical_socket.is_socket() or not Path(requested[7:]).is_socket()):
-        raise RuntimeError('preflight requires the reviewed local gym and Colima socket')
-    if Path(requested[7:]).resolve() != canonical_socket.resolve():
-        identities = [_command(['docker', '-H', host, 'info', '--format', '{{.ID}}'], env).strip()
-                      for host in ('unix://' + str(canonical_socket), requested)]
-        if not identities[0] or identities[0] != identities[1]:
-            raise RuntimeError('reviewed Colima sockets address different Docker daemons')
+    requested = env.get('WGER_DOCKER_HOST', f'unix://{home}/.colima/default/docker.sock')
+    if deploy.resolve() != (home / 'fitness-wger').resolve():
+        raise RuntimeError('preflight requires the reviewed local gym')
+    if not requested.startswith('unix://') or not Path(requested[7:]).is_absolute():
+        raise RuntimeError('Docker endpoint must be an absolute Unix socket')
+    if not Path(requested[7:]).is_socket():
+        raise RuntimeError('Docker socket is unavailable: ' + requested)
+    env['WGER_DOCKER_HOST'] = requested
+    docker = ['docker', '-H', requested]
+    try:
+        identity = _command([*docker, 'info', '--format', '{{.ID}}'], env).strip()
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError('Docker daemon is unavailable: ' + requested) from error
+    if not identity:
+        raise RuntimeError('Docker daemon identity is unavailable: ' + requested)
     if not all(env.get(key) and Path(env[key]).is_file() for key in ('WGER_WRITER_LOCK', 'WGER_HISTORY_LOCK')):
         raise RuntimeError('reviewed writer and history locks required')
     destination = home / 'fitness-coach-migration'
@@ -170,7 +173,6 @@ def run(source: Path, deploy: Path, env: dict) -> dict:
     spec = importlib.util.spec_from_file_location('wger_snapshot_preflight', operations / 'snapshot.py')
     snapshot_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(snapshot_module)
-    docker = ['docker', '-H', 'unix://' + str(canonical_socket)]
     before = _baseline(docker, deploy, env)
     residues = _resources(docker, env)
     previous = set(destination.glob('wger-restore-*'))

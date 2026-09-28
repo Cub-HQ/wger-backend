@@ -4,6 +4,8 @@ import io
 import json
 import os
 import pathlib
+import runpy
+import socket
 import sqlite3
 import tarfile
 import tempfile
@@ -65,7 +67,7 @@ class BackupRouteTest(unittest.TestCase):
                 (root / 'overrides/unbound.py').write_text('not mounted')
                 services = services_for(root, mounts)
                 result = type('Result', (), {'stdout': json.dumps({'services': services}).encode()})()
-                with patch.object(backup.subprocess, 'run', return_value=result):
+                with patch.object(backup.subprocess, 'run', return_value=result), patch.object(backup.pathlib.Path, 'is_socket', return_value=True):
                     resolved = backup.deployment_services(root)
                 self.assertEqual(restore_drill.web_override_mounts(root, resolved), tuple(
                     f'{root / source}:{target}:ro' for source, target in mounts))
@@ -145,7 +147,7 @@ class BackupRouteTest(unittest.TestCase):
                 actions.append(args)
                 if args[:2]==('inspect','id-powersync'):raise RuntimeError('inspect transport failure')
                 raise AssertionError(args)
-            with patch.object(backup.pathlib.Path,'home',return_value=home),patch.object(backup,'DEPLOY',home),patch.object(backup,'DOCKER_HOST','unix:///tmp/proof.sock'),patch.object(backup.pathlib.Path,'is_socket',return_value=True),patch.object(backup,'compose',side_effect=compose),patch.object(backup,'docker',side_effect=docker),patch.dict(os.environ,{'WGER_WRITER_LOCK':str(native),'WGER_HISTORY_LOCK':str(state)}):
+            with patch.object(backup.pathlib.Path,'home',return_value=home),patch.object(backup,'DEPLOY',home),patch.dict(os.environ,{'WGER_DOCKER_HOST':'unix:///tmp/proof.sock'}),patch.object(backup.pathlib.Path,'is_socket',return_value=True),patch.object(backup,'compose',side_effect=compose),patch.object(backup,'docker',side_effect=docker),patch.dict(os.environ,{'WGER_WRITER_LOCK':str(native),'WGER_HISTORY_LOCK':str(state)}):
                 (home/'compose.yaml').touch()
                 with self.assertRaisesRegex(RuntimeError,'inspect transport failure'):backup.snapshot(destination)
             self.assertFalse(any(action[0] in {'stop','run'} for action in actions))
@@ -172,7 +174,7 @@ class BackupRouteTest(unittest.TestCase):
                 if args[0]=='stop':return b''
                 if args[0]=='start':starts.extend(args[1:]);return b''
                 raise AssertionError(args)
-            with patch.object(backup.pathlib.Path,'home',return_value=home),patch.object(backup,'DEPLOY',home),patch.object(backup,'DOCKER_HOST','unix:///tmp/proof.sock'),patch.object(backup.pathlib.Path,'is_socket',return_value=True),patch.object(backup,'compose',side_effect=compose),patch.object(backup,'docker',side_effect=docker),patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident.removeprefix('id-')]),patch.object(backup,'media_inventory',return_value=b''),patch.dict(os.environ,{'WGER_WRITER_LOCK':str(native),'WGER_HISTORY_LOCK':str(state)}):
+            with patch.object(backup.pathlib.Path,'home',return_value=home),patch.object(backup,'DEPLOY',home),patch.dict(os.environ,{'WGER_DOCKER_HOST':'unix:///tmp/proof.sock'}),patch.object(backup.pathlib.Path,'is_socket',return_value=True),patch.object(backup,'compose',side_effect=compose),patch.object(backup,'docker',side_effect=docker),patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident.removeprefix('id-')]),patch.object(backup,'media_inventory',return_value=b''),patch.dict(os.environ,{'WGER_WRITER_LOCK':str(native),'WGER_HISTORY_LOCK':str(state)}):
                 (home/'compose.yaml').touch()
                 with self.assertRaisesRegex(RuntimeError,'forced capture failure') as caught:backup.snapshot(destination)
             self.assertFalse(getattr(caught.exception,'__notes__',[]))
@@ -194,7 +196,7 @@ class BackupRouteTest(unittest.TestCase):
                 if args[0] in {'stop','start'}:return b''
                 raise AssertionError(args)
             def wait_for_state(*_):raise RuntimeError('resume health failure')
-            with patch.object(backup.pathlib.Path,'home',return_value=home),patch.object(backup,'DEPLOY',home),patch.object(backup,'DOCKER_HOST','unix:///tmp/proof.sock'),patch.object(backup.pathlib.Path,'is_socket',return_value=True),patch.object(backup,'compose',side_effect=compose),patch.object(backup,'docker',side_effect=docker),patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident.removeprefix('id-')]),patch.object(backup,'wait_for_state',side_effect=wait_for_state),patch.object(backup,'media_inventory',return_value=b''),patch.dict(os.environ,{'WGER_WRITER_LOCK':str(native),'WGER_HISTORY_LOCK':str(state)}):
+            with patch.object(backup.pathlib.Path,'home',return_value=home),patch.object(backup,'DEPLOY',home),patch.dict(os.environ,{'WGER_DOCKER_HOST':'unix:///tmp/proof.sock'}),patch.object(backup.pathlib.Path,'is_socket',return_value=True),patch.object(backup,'compose',side_effect=compose),patch.object(backup,'docker',side_effect=docker),patch.object(backup,'inspect_state',side_effect=lambda ident:states[ident.removeprefix('id-')]),patch.object(backup,'wait_for_state',side_effect=wait_for_state),patch.object(backup,'media_inventory',return_value=b''),patch.dict(os.environ,{'WGER_WRITER_LOCK':str(native),'WGER_HISTORY_LOCK':str(state)}):
                 (home/'compose.yaml').touch()
                 with self.assertRaisesRegex(RuntimeError,'primary capture failure') as caught:backup.snapshot(destination)
             self.assertTrue(any('writer recovery also failed: resume health failure' in note for note in getattr(caught.exception,'__notes__',[])))
@@ -267,7 +269,7 @@ class BackupRouteTest(unittest.TestCase):
             snapshot.mkdir()
             backup.write_deployment_archive(snapshot / 'deployment.tar', deploy=deploy)
             (snapshot / 'manifest.json').write_text('{"files": {}}')
-            with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch.object(restore_drill, 'deployment_services', return_value=services_for(deploy, ())), patch.object(restore_drill, 'run', side_effect=RuntimeError('stop before Docker')):
+            with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch.object(backup.pathlib.Path, 'is_socket', return_value=True), patch.object(restore_drill, 'deployment_services', return_value=services_for(deploy, ())), patch.object(restore_drill, 'run', side_effect=RuntimeError('stop before Docker')):
                 with self.assertRaisesRegex(RuntimeError, 'stop before Docker'):
                     restore_drill.main()
             environment = dict(line.split('=', 1) for line in next(root.glob('wger-restore-*/restore.env')).read_text().splitlines())
@@ -476,14 +478,222 @@ class DatabaseRecoveryProofTest(unittest.TestCase):
 
 
 class DrillRouteTest(unittest.TestCase):
-    def test_restore_and_cleanup_pin_colima_socket_without_duplicate_binary(self):
-        root=pathlib.Path(__file__).parent;restore=(root/'restore-drill.py').read_text();cleanup=(root/'cleanup-drill.py').read_text()
-        self.assertIn("DOCKER=('docker','-H',DOCKER_HOST)",restore);self.assertIn("subprocess.run([*DOCKER,*a]",restore)
-        self.assertNotIn("run('docker'",restore)
-        for command in ("run('network','create'","run('volume','create'","run('run','-d'","run('exec'"):
-            self.assertIn(command,restore)
-        self.assertIn("DOCKER=['docker','-H'",cleanup);self.assertIn("[*DOCKER,kind,'inspect',ident]",cleanup)
-        self.assertNotIn("'network','ls'",cleanup);self.assertIn('fitness.backup.restore-drill',cleanup)
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = pathlib.Path(self.directory.name)
+        self.socket = socket.socket(socket.AF_UNIX)
+        self.addCleanup(self.socket.close)
+        self.socket.bind(str(self.root / 'docker.sock'))
+        self.host = 'unix://' + str(self.root / 'docker.sock')
+        self.environment = patch.dict(os.environ, {'WGER_DOCKER_HOST': self.host})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def cleanup_route(self, recovery=False, mismatch=False):
+        name = ('wger-recovery-' if recovery else 'wger-restore-') + '0123456789'
+        receipt = {'project': name, 'created_containers': [name + '-db', name + '-web', name + '-nginx'],
+                   'volumes': [name + '-db', name + '-media', name + '-static'],
+                   'network': name, 'networks': [name, name + '-front']}
+        path = self.root / 'receipt.json'
+        path.write_text(json.dumps(receipt))
+        calls = []
+        label = 'fitness.backup.' + ('recovery-drill' if recovery else 'restore-drill')
+
+        def command(argv, **kwargs):
+            calls.append(argv)
+            self.assertEqual(argv[:3], ['docker', '-H', self.host])
+            self.assertEqual(kwargs.get('env', os.environ)['WGER_DOCKER_HOST'], self.host)
+            args = argv[3:]
+            if 'ls' in args:
+                key = {'container': 'created_containers', 'volume': 'volumes', 'network': 'networks'}[args[0]]
+                return '\n'.join(receipt[key])
+            payload = json.dumps([{'Config': {'Labels': {label: 'other' if mismatch else name}},
+                                   'Labels': {label: 'other' if mismatch else name}}])
+            if recovery:
+                return payload.encode()
+            return types.SimpleNamespace(stdout=payload, returncode=0)
+
+        script = 'cleanup-recovery.py' if recovery else 'cleanup-drill.py'
+        with patch('sys.argv', [script, str(path)]), patch('subprocess.run', side_effect=command), patch('subprocess.check_output', side_effect=command):
+            if mismatch:
+                with self.assertRaisesRegex(ValueError, 'owned|ownership'):
+                    runpy.run_path(str(pathlib.Path(__file__).with_name(script)), run_name='__main__')
+                self.assertFalse(any('rm' in call for call in calls))
+            else:
+                runpy.run_path(str(pathlib.Path(__file__).with_name(script)), run_name='__main__')
+                self.assertEqual({call[-1] for call in calls if 'rm' in call},
+                                 set(receipt['created_containers'] + receipt['volumes'] + receipt['networks']))
+
+    def test_cleanup_routes_pin_every_inspection_and_removal(self):
+        for recovery in (False, True):
+            with self.subTest(recovery=recovery):
+                self.cleanup_route(recovery)
+
+    def test_cleanup_routes_preserve_ownership_refusal(self):
+        for recovery in (False, True):
+            with self.subTest(recovery=recovery):
+                self.cleanup_route(recovery, mismatch=True)
+
+    def test_restore_pins_every_docker_command(self):
+        deploy = self.root / 'deploy'
+        (deploy / 'config').mkdir(parents=True)
+        (deploy / 'overrides').mkdir()
+        (deploy / 'compose.yaml').write_text('services: {}')
+        (deploy / 'config/private.env').write_text('PRIVATE=yes\n')
+        snapshot = self.root / 'snapshot'
+        snapshot.mkdir()
+        backup.write_deployment_archive(snapshot / 'deployment.tar', deploy=deploy)
+        for name in ('database.dump', 'media.tar'):
+            (snapshot / name).write_bytes(b'fixture')
+        (snapshot / 'manifest.json').write_text('{"files": {}}')
+        calls = []
+
+        def command(argv, **kwargs):
+            calls.append(argv)
+            self.assertEqual(argv[:3], ['docker', '-H', self.host])
+            self.assertEqual(kwargs.get('env', os.environ)['WGER_DOCKER_HOST'], self.host)
+            services = services_for(deploy, ())
+            services.update(db={'image': 'postgres:15'}, nginx={'image': 'nginx:alpine'})
+            return types.SimpleNamespace(stdout=json.dumps({'services': services}).encode())
+
+        with patch('sys.argv', ['restore-drill.py', str(snapshot)]), patch('subprocess.run', side_effect=command):
+            restore_drill.main()
+        self.assertEqual({call[3] for call in calls}, {'compose', 'network', 'volume', 'run', 'exec'})
+        receipt = json.loads(next(self.root.glob('wger-restore-*/receipt.json')).read_text())
+        self.assertEqual(receipt['state'], 'restored-awaiting-independent-application-check')
+
+    def test_recovery_creation_and_cleanup_use_same_selected_endpoint(self):
+        deploy = self.root / 'deploy'
+        (deploy / 'config').mkdir(parents=True)
+        (deploy / 'overrides').mkdir()
+        (deploy / 'compose.yaml').write_text('services: {}')
+        (deploy / 'config/private.env').write_text('PRIVATE=yes\n')
+        snapshot = self.root / 'snapshot'
+        snapshot.mkdir()
+        backup.write_deployment_archive(snapshot / 'deployment.tar', deploy=deploy)
+        for name in ('database.dump', 'media.tar'):
+            (snapshot / name).write_bytes(b'fixture')
+        backup.write_manifest(snapshot, 'synthetic')
+        calls = []
+        resources = {'container': {}, 'volume': {}, 'network': {}}
+
+        def command(argv, **kwargs):
+            argv = list(argv)
+            calls.append(argv)
+            self.assertEqual(argv[:3], ['docker', '-H', self.host])
+            args = argv[3:]
+            payload = b''
+            if args[0] == 'compose':
+                services = services_for(deploy, ())
+                services.update(db={'image': 'postgres:15'}, powersync={'image': 'powersync:fixture'})
+                payload = json.dumps({'services': services}).encode()
+            elif args[0] == 'run' or args[:2] in (['network', 'create'], ['volume', 'create']):
+                label = args[args.index('--label') + 1].split('=', 1)
+                if args[0] != 'run':
+                    resources[args[0]][args[-1]] = dict([label])
+                elif '--name' in args:
+                    resources['container'][args[args.index('--name') + 1]] = dict([label])
+            elif args[0] == 'inspect':
+                payload = b'true\n'
+            elif args[0] == 'rm':
+                del resources['container'][args[-1]]
+            elif args[1:2] == ['rm']:
+                del resources[args[0]][args[-1]]
+            return types.SimpleNamespace(stdout=payload)
+
+        def output(argv, **kwargs):
+            self.assertEqual(argv[:3], ['docker', '-H', self.host])
+            calls.append(argv)
+            kind, action = argv[3:5]
+            if action == 'ls':
+                return '\n'.join(resources[kind])
+            labels = resources[kind][argv[-1]]
+            return json.dumps([{'Config': {'Labels': labels}, 'Labels': labels}]).encode()
+
+        with patch('sys.argv', ['recovery-drill.py', str(snapshot)]), patch('subprocess.run', side_effect=command), patch('time.sleep'), patch('os.umask'):
+            runpy.run_path(str(pathlib.Path(__file__).with_name('recovery-drill.py')), run_name='__main__')
+        self.assertEqual({call[3] for call in calls}, {'compose', 'network', 'volume', 'run', 'exec', 'inspect', 'logs'})
+        receipt_path = next(self.root.glob('wger-recovery-*/receipt.json'))
+        receipt = json.loads(receipt_path.read_text())
+        self.assertTrue(receipt['powersync_container_running'])
+        self.assertEqual(set(resources['container']), set(receipt['created_containers']))
+        self.assertEqual(set(resources['volume']), set(receipt['volumes']))
+        self.assertEqual(set(resources['network']), set(receipt['networks']))
+        with patch('sys.argv', ['cleanup-recovery.py', str(receipt_path)]), patch('subprocess.run', side_effect=command), patch('subprocess.check_output', side_effect=output):
+            runpy.run_path(str(pathlib.Path(__file__).with_name('cleanup-recovery.py')), run_name='__main__')
+        self.assertEqual(resources, {'container': {}, 'volume': {}, 'network': {}})
+        backup.verify_snapshot(snapshot)
+
+    def test_backup_commands_use_selected_endpoint_and_default_only_when_absent(self):
+        for host in (self.host, None):
+            with self.subTest(host=host), patch.dict(os.environ):
+                if host is None:
+                    os.environ.pop('WGER_DOCKER_HOST', None)
+                    default = self.root / '.colima/default/docker.sock'
+                    default.parent.mkdir(parents=True)
+                    with socket.socket(socket.AF_UNIX) as sock:
+                        sock.bind(str(default))
+                        self.assert_backup_endpoint('unix://' + str(default))
+                else:
+                    self.assert_backup_endpoint(host)
+
+    def test_snapshot_pins_capture_and_writer_recovery_commands(self):
+        deploy = self.root / 'deploy'
+        (deploy / 'config').mkdir(parents=True)
+        (deploy / 'overrides').mkdir()
+        (deploy / 'compose.yaml').write_text('services: {}')
+        (deploy / 'config/private.env').write_text('PRIVATE=yes\n')
+        destination = self.root / 'fitness-coach-migration'
+        for name in ('writer.lock', 'history.lock'):
+            (self.root / name).touch()
+        calls = []
+
+        def command(argv, **kwargs):
+            if argv[0] != 'docker':
+                raise AssertionError(argv)
+            calls.append(argv)
+            self.assertEqual(argv[:3], ['docker', '-H', self.host])
+            self.assertEqual(kwargs.get('env', os.environ)['WGER_DOCKER_HOST'], self.host)
+            args = argv[3:]
+            if args[0] == 'inspect':
+                payload = json.dumps([{'Image': args[1], 'State': {'Status': 'running'}}]).encode()
+            elif args[0] == 'compose' and args[3:6] == ['ps', '-a', '-q']:
+                payload = args[-1].encode()
+            else:
+                payload = b''
+            return types.SimpleNamespace(stdout=payload)
+
+        with patch.object(pathlib.Path, 'home', return_value=self.root), patch.object(backup, 'DEPLOY', deploy), patch.dict(os.environ, {'WGER_WRITER_LOCK': str(self.root / 'writer.lock'), 'WGER_HISTORY_LOCK': str(self.root / 'history.lock')}), patch('subprocess.run', side_effect=command), patch.object(backup, 'write_deployment_archive'), patch.object(backup, 'write_manifest'):
+            snapshot = backup.snapshot(destination)
+        self.assertEqual(json.loads((destination / 'latest.json').read_text())['snapshot'], str(snapshot))
+        self.assertEqual({call[3] for call in calls}, {'compose', 'inspect', 'stop', 'start', 'run'})
+        self.assertIn(['docker', '-H', self.host, 'compose', '-f', str(deploy / 'compose.yaml'),
+                       'exec', '-T', 'nginx', 'nginx', '-s', 'reload'], calls)
+
+    def assert_backup_endpoint(self, host):
+        with patch.object(pathlib.Path, 'home', return_value=self.root), patch('subprocess.run', return_value=types.SimpleNamespace(stdout=b'')) as command:
+            backup.docker('stop', 'writer')
+            backup.compose('ps', '-a')
+            backup.media_inventory()
+        for call in command.call_args_list:
+            self.assertEqual(call.args[0][:3], ['docker', '-H', host])
+
+    def test_invalid_endpoints_refuse_before_docker_or_cleanup(self):
+        regular = self.root / 'regular'; regular.touch()
+        endpoints = ('', 'tcp://127.0.0.1:2375', 'unix://', 'unix://relative.sock',
+                     'unix://' + str(self.root / 'missing.sock'), 'unix://' + str(regular))
+        for endpoint in endpoints:
+            for route in ('backup', 'restore-drill.py', 'recovery-drill.py', 'cleanup-drill.py', 'cleanup-recovery.py'):
+                with self.subTest(endpoint=endpoint, route=route), patch.dict(os.environ, {'WGER_DOCKER_HOST': endpoint}), patch('subprocess.run') as command, patch('subprocess.check_output') as output:
+                    with self.assertRaisesRegex(RuntimeError, 'Docker (endpoint|socket)'):
+                        if route == 'backup':
+                            backup.docker('stop', 'writer')
+                        else:
+                            with patch('sys.argv', [route, str(self.root / 'absent')]):
+                                runpy.run_path(str(pathlib.Path(__file__).with_name(route)), run_name='__main__')
+                    command.assert_not_called()
+                    output.assert_not_called()
 
 
 class PlanRouteTest(unittest.TestCase):

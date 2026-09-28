@@ -15,7 +15,7 @@ import time
 import uuid
 
 from snapshot import verify_snapshot
-from backup import deployment_services, service_bind_mounts
+from backup import deployment_services, docker_host, service_bind_mounts
 
 
 
@@ -28,6 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('snapshot')
     args = parser.parse_args()
+    docker = ('docker', '-H', docker_host())
     source = Path(args.snapshot).resolve()
     verify_snapshot(source)
     name = 'wger-recovery-' + uuid.uuid4().hex[:10]
@@ -48,31 +49,31 @@ def main():
                   PS_STORAGE_PG_URI=f'postgres://restore:{database_password}@db:5432/wger', PS_PORT='8080')
     env = work / 'recovery.env'; env.write_text('\n'.join(k + '=' + v for k, v in config.items()) + '\n')
     labels = ['--label', 'fitness.backup.recovery-drill=' + name]
-    run('docker', 'network', 'create', *labels, '--internal', name)
+    run(*docker, 'network', 'create', *labels, '--internal', name)
     for volume in ['db', 'media']:
-        run('docker', 'volume', 'create', *labels, name + '-' + volume)
+        run(*docker, 'volume', 'create', *labels, name + '-' + volume)
     receipt = {'snapshot': str(source), 'project': name, 'created_containers': [name + '-db', name + '-powersync'],
                'volumes': [name + '-db', name + '-media'], 'networks': [name], 'live_project_untouched': True, 'state': 'starting'}
     receipt_path = work / 'receipt.json'; receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
-    run('docker', 'run', '-d', '--name', name + '-db', *labels, '--network', name, '--network-alias', 'db',
+    run(*docker, 'run', '-d', '--name', name + '-db', *labels, '--network', name, '--network-alias', 'db',
         '--memory', '384m', '--cpus', '0.25', '--env-file', str(env), '-v', name + '-db:/var/lib/postgresql/data', services['db']['image'])
     for _ in range(60):
         try:
-            run('docker', 'exec', name + '-db', 'pg_isready', '-h', '127.0.0.1', '-U', 'restore'); break
+            run(*docker, 'exec', name + '-db', 'pg_isready', '-h', '127.0.0.1', '-U', 'restore'); break
         except subprocess.CalledProcessError:
             time.sleep(1)
     else:
         raise RuntimeError('disposable database did not become ready')
-    run('docker', 'exec', '-i', name + '-db', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-U', 'restore', '-d', 'wger', data=(source / 'database.dump').read_bytes())
-    run('docker', 'run', '--rm', '-i', *labels, '--network', 'none', '--memory', '128m', '--cpus', '0.25',
+    run(*docker, 'exec', '-i', name + '-db', 'pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-U', 'restore', '-d', 'wger', data=(source / 'database.dump').read_bytes())
+    run(*docker, 'run', '--rm', '-i', *labels, '--network', 'none', '--memory', '128m', '--cpus', '0.25',
         '--entrypoint', 'tar', '-v', name + '-media:/home/wger/media', services['web']['image'], '-C', '/home/wger/media', '-xf', '-', data=(source / 'media.tar').read_bytes())
-    run('docker', 'run', '-d', '--name', name + '-powersync', *labels, '--network', name, '--memory', '384m', '--cpus', '0.25',
+    run(*docker, 'run', '-d', '--name', name + '-powersync', *labels, '--network', name, '--memory', '384m', '--cpus', '0.25',
         '--env-file', str(env), '-e', 'POWERSYNC_CONFIG_PATH=/config/powersync.yaml', '-e', 'PS_JWKS_URL=http://127.0.0.1:9/unavailable',
         *powersync_mounts, services['powersync']['image'], 'start', '-r', 'unified')
     time.sleep(5)
-    if run('docker', 'inspect', '-f', '{{.State.Running}}', name + '-powersync').decode().strip() != 'true':
+    if run(*docker, 'inspect', '-f', '{{.State.Running}}', name + '-powersync').decode().strip() != 'true':
         raise RuntimeError('restored PowerSync state did not start')
-    logs = run('docker', 'logs', name + '-powersync').decode(errors='replace')
+    logs = run(*docker, 'logs', name + '-powersync').decode(errors='replace')
     if re.search(r'(?i)(migration|schema).*(error|failed)', logs):
         raise RuntimeError('restored PowerSync state failed compatibility check')
     receipt.update(state='database-media-and-powersync-state-restored-awaiting-independent-app-check', powersync_container_running=True)

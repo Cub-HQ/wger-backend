@@ -5,10 +5,8 @@ Only run in the fitness-wger VM. Never addresses production containers/volumes.
 The drill uses a new named network and volumes and does not start workers or sync.
 """
 import argparse,hashlib,json,os,pathlib,secrets,subprocess,tarfile,time,uuid
-from backup import deployment_services, service_bind_mounts
-DOCKER_HOST=f'unix://{pathlib.Path.home()}/.colima/docker.sock'
-DOCKER=('docker','-H',DOCKER_HOST)
-def run(*a,data=None):return subprocess.run([*DOCKER,*a],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout
+from backup import deployment_services, service_bind_mounts, docker_host
+def run(*a,data=None):return subprocess.run(['docker','-H',docker_host(),*a],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout
 def wait_for_database(name, *, attempts=60, delay=1):
     for _ in range(attempts):
         try:
@@ -18,7 +16,7 @@ def wait_for_database(name, *, attempts=60, delay=1):
             time.sleep(delay)
     raise RuntimeError('disposable database did not become ready')
 def web_override_mounts(work, services=None):
-    services = deployment_services(work, DOCKER) if services is None else services
+    services = deployment_services(work) if services is None else services
     return service_bind_mounts(work, services['web'])
 
 
@@ -27,6 +25,7 @@ def web_override_mounts(work, services=None):
 def main():
     os.umask(0o077)
     ap=argparse.ArgumentParser();ap.add_argument('snapshot');ap.add_argument('--port',type=int,default=18197);args=ap.parse_args()
+    docker_host()
     src=pathlib.Path(args.snapshot).resolve();manifest=json.loads((src/'manifest.json').read_text())
     if (src/'INCOMPLETE').exists():raise ValueError('Incomplete snapshot')
     for name,wanted in manifest['files'].items():
@@ -34,7 +33,7 @@ def main():
         if p.parent!=src or hashlib.sha256(p.read_bytes()).hexdigest()!=wanted:raise ValueError('Snapshot checksum mismatch')
     name='wger-restore-'+uuid.uuid4().hex[:10];work=src.parent/name;work.mkdir(mode=0o700)
     with tarfile.open(src/'deployment.tar') as t:t.extractall(work,filter='data')
-    services = deployment_services(work, DOCKER)
+    services = deployment_services(work)
     override_mounts=sum((('-v',mount) for mount in web_override_mounts(work, services)),())
     config={}
     for line in (work/'config/private.env').read_text().splitlines():

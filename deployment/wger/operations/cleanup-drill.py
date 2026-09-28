@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Remove only labelled disposable restore resources named by a receipt."""
 import argparse, json, pathlib, re, subprocess
-DOCKER=['docker','-H',f'unix://{pathlib.Path.home()}/.colima/docker.sock']
+from backup import docker_host
 
 parser=argparse.ArgumentParser();parser.add_argument('receipt');args=parser.parse_args()
+DOCKER=['docker','-H',docker_host()]
 receipt_path=pathlib.Path(args.receipt);receipt=json.loads(receipt_path.read_text());name=receipt['project']
 if not re.fullmatch(r'wger-restore-[0-9a-f]{10}',name):raise ValueError('Not a drill project')
 expected={

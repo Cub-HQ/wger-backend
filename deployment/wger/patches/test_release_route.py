@@ -11,6 +11,7 @@ import time
 import unittest
 import http.server
 import threading
+from contextlib import contextmanager
 
 ROOT = pathlib.Path(__file__).parent
 RECOVERY_TARGETS = {
@@ -24,6 +25,101 @@ RECOVERY_TARGETS = {
 }
 ARTIFACT_NAMES = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html',
                   'pdf.py', 'corresponding-source.json', *RECOVERY_TARGETS)
+
+
+@contextmanager
+def preparation_fixture():
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory).resolve()
+        patches = root / 'deployment/patches'
+        patches.mkdir(parents=True)
+        for name in ('prepare-react.sh', 'test_patch_session_recovery.py', 'patch_session_recovery.py'):
+            (patches / name).write_bytes((ROOT / name).read_bytes())
+        overrides = patches.parent / 'overrides'
+        overrides.mkdir()
+        for name in ARTIFACT_NAMES:
+            (overrides / (name + '.next')).write_text('previous candidate ' + name)
+            (overrides / name).write_text('live ' + name)
+        modules = root / 'modules'
+        for name in ('django', 'rest_framework'):
+            package = modules / name
+            package.mkdir(parents=True)
+            (package / '__init__.py').write_text('')
+        for name in ('django/__init__.py', 'rest_framework/exceptions.py', 'sqlite3.py'):
+            module = name.removesuffix('/__init__.py').removesuffix('.py').replace('/', '.')
+            (modules / name).write_text(
+                'import os\nfrom pathlib import Path\n'
+                f'with Path(os.environ["IMPORT_LOG"]).open("a") as log: log.write({module!r} + "\\n")\n'
+                f'if os.environ.get("FAIL_MODULE") == {module!r}: raise ImportError("missing {module}")\n'
+            )
+        binary = root / 'bin'
+        binary.mkdir()
+        fake = f'#!{sys.executable}\n' + '''import json, os, subprocess, sys
+from pathlib import Path
+tool = Path(sys.argv[0]).name
+args = sys.argv[1:]
+with Path(os.environ['COMMAND_LOG']).open('a') as log:
+    log.write(json.dumps([tool, *args]) + '\\n')
+if tool == 'docker':
+    if 'info' in args: sys.exit(1 if os.environ.get('FAIL_PREFLIGHT') == 'daemon' else 0)
+    elif 'config' in args:
+        if os.environ.get('FAIL_PREFLIGHT') == 'resolve': sys.exit(1)
+        image = None if os.environ.get('FAIL_PREFLIGHT') == 'empty-image' else 'fixture-image'
+        print(json.dumps({'services': {'web': {'image': image}}}))
+    elif 'inspect' in args: sys.exit(1 if os.environ.get('FAIL_PREFLIGHT') == 'image' else 0)
+    elif 'create' in args and os.environ.get('STOP_AT_CREATE') == '1': sys.exit(7)
+    elif 'run' in args:
+        assert args[args.index('--user') + 1] == 'wger', args
+        assert args[args.index('--network') + 1] == 'none', args
+        assert '--rm' in args and not any(arg.startswith('HOME=') for arg in args), args
+        mount = args[args.index('--mount') + 1]
+        assert 'target=/tests' in mount and 'readonly' in mount.split(','), args
+        source = next(part[4:] for part in mount.split(',') if part.startswith('src='))
+        if '--orm' not in args:
+            if os.environ.get('FAIL_PREFLIGHT') == 'mount': sys.exit(125)
+            entrypoint = args[args.index('--entrypoint') + 1]
+            payload = args[args.index('fixture-image') + 1:]
+            if os.environ.get('FAIL_PREFLIGHT') == 'bind': source += '/missing'
+            payload = [arg.replace('/tests', source) for arg in payload]
+            sys.exit(subprocess.run([entrypoint, *payload], env={**os.environ, 'PYTHONPATH': os.environ['PROBE_MODULES']}).returncode)
+        overrides = Path(os.environ['PREPARE_OVERRIDES'])
+        candidates = {path.name: path.read_text() for path in overrides.glob('*.next')}
+        if candidates != json.loads(os.environ['PRIOR_CANDIDATES']):
+            print('candidates published before ORM proof', file=sys.stderr)
+            sys.exit(11)
+        Path(os.environ['ORM_LOG']).write_text(json.dumps(args))
+        if os.environ.get('FAIL_ORM') == '1':
+            print('ORM recovery proof rejected', file=sys.stderr)
+            sys.exit(10)
+elif tool == 'python3':
+    if args[0] == '-c':
+        if os.environ.get('PYTHONPATH') == os.environ['PROBE_MODULES'] and os.environ.get('FAIL_PREFLIGHT') == 'python': sys.exit(127)
+        os.execv(os.environ['REAL_PYTHON'], [os.environ['REAL_PYTHON'], *args])
+    generator = Path(args[0]).name
+    if generator == 'patch_session_recovery.py':
+        for name in json.loads(os.environ['RECOVERY_TARGETS']):
+            (Path(args[-1]) / (name + '.next')).write_text('prepared ' + name)
+        if os.environ.get('FAIL_RECOVERY') == '1':
+            print('backend anchor rejected', file=sys.stderr)
+            sys.exit(9)
+    elif args[-1].endswith('.next'):
+        Path(args[-1]).write_text('prepared ' + Path(args[-1]).name.removesuffix('.next'))
+'''
+        for name in ('docker', 'curl', 'tar', 'npm', 'python3'):
+            command = binary / name
+            command.write_text(fake)
+            command.chmod(0o755)
+        socket_path = root / 'docker.sock'
+        env = {**os.environ, 'HOME': str(root), 'PATH': str(binary) + ':' + os.environ['PATH'],
+               'WGER_DOCKER_HOST': 'unix://' + str(socket_path), 'REAL_PYTHON': sys.executable,
+               'PREPARE_OVERRIDES': str(overrides), 'ORM_LOG': str(root / 'orm.json'),
+               'COMMAND_LOG': str(root / 'commands.jsonl'), 'IMPORT_LOG': str(root / 'imports'),
+               'PROBE_MODULES': str(modules),
+               'PRIOR_CANDIDATES': json.dumps({name + '.next': 'previous candidate ' + name for name in ARTIFACT_NAMES}),
+               'RECOVERY_TARGETS': json.dumps(RECOVERY_TARGETS)}
+        with socket.socket(socket.AF_UNIX) as docker_socket:
+            docker_socket.bind(str(socket_path))
+            yield root, patches / 'prepare-react.sh', overrides, env
 
 
 class ReleaseRouteTest(unittest.TestCase):
@@ -117,138 +213,98 @@ class ReleaseRouteTest(unittest.TestCase):
         self.assertEqual(namespace['public_response'].call_count, 2)
 
     def test_preparation_extracts_the_compose_image(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory).resolve()
-            socket_path = root / '.colima/default/docker.sock'
-            socket_path.parent.mkdir(parents=True)
-            with socket.socket(socket.AF_UNIX) as docker_socket:
-                docker_socket.bind(str(socket_path))
-                patches = root / 'deployment/patches'
-                patches.mkdir(parents=True)
-                script = patches / 'prepare-react.sh'
-                script.write_bytes((ROOT / 'prepare-react.sh').read_bytes())
-                binary = root / 'bin/docker'
-                binary.parent.mkdir()
-                binary.write_text('''#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-args = sys.argv[1:]
-with Path(os.environ['DOCKER_LOG']).open('a') as log: log.write(json.dumps(args) + '\\n')
-if 'config' in args: print(json.dumps({'services': {'web': {'image': 'stock-fixture@sha256:abc'}}}))
-elif 'create' in args: sys.exit(7)
-''')
-                binary.chmod(0o755)
-                log = root / 'docker.jsonl'
-                env = {**os.environ, 'HOME': str(root), 'WGER_DOCKER_HOST': 'unix://' + str(socket_path),
-                       'PATH': str(binary.parent) + ':' + os.environ['PATH'], 'DOCKER_LOG': str(log)}
-                result = subprocess.run(['bash', str(script)], env=env, text=True, capture_output=True)
-                self.assertEqual(result.returncode, 7, result.stderr)
-                commands = [json.loads(line) for line in log.read_text().splitlines()]
-                create = next(command for command in commands if 'create' in command)
-                self.assertEqual(create[-1], 'stock-fixture@sha256:abc')
-                self.assertFalse(any('up' in command or 'build' in command for command in commands))
+        with preparation_fixture() as (root, script, overrides, env):
+            result = subprocess.run(['bash', str(script)], env={**env, 'STOP_AT_CREATE': '1'},
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 7, result.stderr)
+            commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]
+            for command in commands:
+                if command[0] == 'docker':
+                    self.assertEqual(command[1:3], ['-H', env['WGER_DOCKER_HOST']])
+            create = next(command for command in commands if 'create' in command)
+            self.assertEqual(create[-1], 'fixture-image')
+            self.assertFalse(any('up' in command or 'build' in command for command in commands))
+            self.assertEqual((root / 'imports').read_text().splitlines(),
+                             ['django', 'rest_framework.exceptions', 'sqlite3'])
+
+    def test_preparation_rejects_preflight_failures_before_work(self):
+        cases = [
+            ({'WGER_DOCKER_HOST': ''}, 'Docker endpoint'),
+            ({'WGER_DOCKER_HOST': 'unix://'}, 'Docker endpoint'),
+            ({'WGER_DOCKER_HOST': 'unix://relative.sock'}, 'Docker endpoint'),
+            ({'WGER_DOCKER_HOST': 'tcp://localhost:2375'}, 'Docker endpoint'),
+            ({'WGER_DOCKER_HOST': 'unix:///absent-wger-test.sock'}, 'Docker socket'),
+            ({'FAIL_PREFLIGHT': 'daemon'}, 'Docker daemon'),
+            ({'FAIL_PREFLIGHT': 'resolve'}, 'compose web image'),
+            ({'FAIL_PREFLIGHT': 'empty-image'}, 'compose web image'),
+            ({'FAIL_PREFLIGHT': 'image'}, 'image unavailable'),
+            ({'FAIL_PREFLIGHT': 'mount'}, 'staging path'),
+            ({'FAIL_PREFLIGHT': 'bind'}, 'staging path'),
+            ({'FAIL_PREFLIGHT': 'python'}, 'Python interpreter'),
+            *[({'FAIL_MODULE': module}, 'module importability: ' + module)
+              for module in ('django', 'rest_framework.exceptions', 'sqlite3')],
+        ]
+        for failure, condition in cases:
+            with self.subTest(failure=failure), preparation_fixture() as (root, script, overrides, env):
+                before = {path.name: path.read_bytes() for path in overrides.iterdir()}
+                result = subprocess.run(['bash', str(script)], env={**env, **failure},
+                                        text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('preflight failed: ' + condition, result.stderr)
+                self.assertEqual({path.name: path.read_bytes() for path in overrides.iterdir()}, before)
+                commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()] if (root / 'commands.jsonl').exists() else []
+                self.assertFalse(any(command[0] in ('curl', 'tar', 'npm') for command in commands))
+                self.assertFalse(any(command[0] == 'python3' and command[1] != '-c' for command in commands))
+                self.assertFalse(any('create' in command or 'cp' in command or '--orm' in command for command in commands))
 
     def test_preparation_publishes_only_complete_candidates(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory).resolve()
-            socket_path = root / '.colima/default/docker.sock'
-            socket_path.parent.mkdir(parents=True)
-            patches = root / 'deployment/patches'
-            patches.mkdir(parents=True)
-            script = patches / 'prepare-react.sh'
-            script.write_bytes((ROOT / 'prepare-react.sh').read_bytes())
-            overrides = patches.parent / 'overrides'
-            overrides.mkdir()
-            for name in ARTIFACT_NAMES:
-                (overrides / (name + '.next')).write_text('previous candidate ' + name)
-                (overrides / name).write_text('live ' + name)
-            binary = root / 'bin'
-            binary.mkdir()
-            fake = f'#!{sys.executable}\n' + '''import json, os, sys
-from pathlib import Path
-tool = Path(sys.argv[0]).name
-args = sys.argv[1:]
-if tool == 'docker':
-    if 'config' in args: print(json.dumps({'services': {'web': {'image': 'fixture-image'}}}))
-    elif 'run' in args:
-        overrides = Path(os.environ['PREPARE_OVERRIDES'])
-        candidates = {path.name: path.read_text() for path in overrides.glob('*.next')}
-        if candidates != json.loads(os.environ['PRIOR_CANDIDATES']):
-            print('candidates published before ORM proof', file=sys.stderr)
-            sys.exit(11)
-        Path(os.environ['ORM_LOG']).write_text(json.dumps(args))
-        if os.environ.get('FAIL_ORM') == '1':
-            print('ORM recovery proof rejected', file=sys.stderr)
-            sys.exit(10)
-elif tool == 'python3':
-    if args[0] == '-c': os.execv(os.environ['REAL_PYTHON'], [os.environ['REAL_PYTHON'], *args])
-    generator = Path(args[0]).name
-    if generator == 'patch_session_recovery.py':
-        for name in json.loads(os.environ['RECOVERY_TARGETS']):
-            (Path(args[-1]) / (name + '.next')).write_text('prepared ' + name)
-        if os.environ.get('FAIL_RECOVERY') == '1':
-            print('backend anchor rejected', file=sys.stderr)
-            sys.exit(9)
-    elif args[-1].endswith('.next'):
-        Path(args[-1]).write_text('prepared ' + Path(args[-1]).name.removesuffix('.next'))
-'''
-            for name in ('docker', 'curl', 'tar', 'npm', 'python3'):
-                command = binary / name
-                command.write_text(fake)
-                command.chmod(0o755)
-            env = {**os.environ, 'HOME': str(root), 'PATH': str(binary) + ':' + os.environ['PATH'],
-                   'WGER_DOCKER_HOST': 'unix://' + str(socket_path), 'REAL_PYTHON': sys.executable,
-                   'PREPARE_OVERRIDES': str(overrides), 'ORM_LOG': str(root / 'orm.json'),
-                   'PRIOR_CANDIDATES': json.dumps({name + '.next': 'previous candidate ' + name for name in ARTIFACT_NAMES}),
-                   'RECOVERY_TARGETS': json.dumps(RECOVERY_TARGETS)}
-            with socket.socket(socket.AF_UNIX) as docker_socket:
-                docker_socket.bind(str(socket_path))
-                failed = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '1'},
+        with preparation_fixture() as (root, script, overrides, env):
+            failed = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '1'},
+                                    text=True, capture_output=True)
+            self.assertEqual(failed.returncode, 9, failed.stderr)
+            self.assertIn('backend anchor rejected', failed.stderr)
+            orm_failed = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '0', 'FAIL_ORM': '1'},
                                         text=True, capture_output=True)
-                self.assertEqual(failed.returncode, 9, failed.stderr)
-                self.assertIn('backend anchor rejected', failed.stderr)
-                orm_failed = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '0', 'FAIL_ORM': '1'},
-                                            text=True, capture_output=True)
-                self.assertEqual(orm_failed.returncode, 10, orm_failed.stderr)
-                self.assertIn('ORM recovery proof rejected', orm_failed.stderr)
-                for name in ARTIFACT_NAMES:
-                    self.assertEqual((overrides / (name + '.next')).read_text(), 'previous candidate ' + name)
-                    self.assertEqual((overrides / name).read_text(), 'live ' + name)
-                    (overrides / (name + '.next')).unlink()
-                env['PRIOR_CANDIDATES'] = '{}'
-                failed_fresh = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '1'},
-                                              text=True, capture_output=True)
-                self.assertEqual(failed_fresh.returncode, 9, failed_fresh.stderr)
-                self.assertEqual(list(overrides.glob('*.next')), [])
-                orm_failed_fresh = subprocess.run(['bash', str(script)],
-                                                  env={**env, 'FAIL_RECOVERY': '0', 'FAIL_ORM': '1'},
-                                                  text=True, capture_output=True)
-                self.assertEqual(orm_failed_fresh.returncode, 10, orm_failed_fresh.stderr)
-                self.assertEqual(list(overrides.glob('*.next')), [])
-                (root / 'orm.json').unlink()
-                prepared = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '0'},
+            self.assertEqual(orm_failed.returncode, 10, orm_failed.stderr)
+            self.assertIn('ORM recovery proof rejected', orm_failed.stderr)
+            for name in ARTIFACT_NAMES:
+                self.assertEqual((overrides / (name + '.next')).read_text(), 'previous candidate ' + name)
+                self.assertEqual((overrides / name).read_text(), 'live ' + name)
+                (overrides / (name + '.next')).unlink()
+            env['PRIOR_CANDIDATES'] = '{}'
+            failed_fresh = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '1'},
                                           text=True, capture_output=True)
-                self.assertEqual(prepared.returncode, 0, prepared.stderr)
-                orm_command = json.loads((root / 'orm.json').read_text())
-                self.assertIn('--rm', orm_command)
-                self.assertEqual(orm_command[orm_command.index('--network') + 1], 'none')
-                self.assertEqual(orm_command[orm_command.index('--entrypoint') + 1], 'python3')
-                self.assertEqual(orm_command[-3:], ['fixture-image', '/tests/test_patch_session_recovery.py', '--orm'])
-                self.assertTrue(any('target=/tests' in argument and ('readonly' in argument or 'ro' in argument.split(','))
-                                    for argument in orm_command))
-                self.assertEqual({path.name for path in overrides.glob('*.next')},
-                                 {name + '.next' for name in ARTIFACT_NAMES})
-                for name in ARTIFACT_NAMES:
-                    self.assertEqual((overrides / name).read_text(), 'live ' + name)
-                    if name != 'corresponding-source.json':
-                        self.assertEqual((overrides / (name + '.next')).read_text(), 'prepared ' + name)
-                self.assertEqual(json.loads((overrides / 'corresponding-source.json.next').read_text())['license'], 'AGPL-3.0')
+            self.assertEqual(failed_fresh.returncode, 9, failed_fresh.stderr)
+            self.assertEqual(list(overrides.glob('*.next')), [])
+            orm_failed_fresh = subprocess.run(['bash', str(script)],
+                                              env={**env, 'FAIL_RECOVERY': '0', 'FAIL_ORM': '1'},
+                                              text=True, capture_output=True)
+            self.assertEqual(orm_failed_fresh.returncode, 10, orm_failed_fresh.stderr)
+            self.assertEqual(list(overrides.glob('*.next')), [])
+            (root / 'orm.json').unlink()
+            prepared = subprocess.run(['bash', str(script)], env={**env, 'FAIL_RECOVERY': '0'},
+                                      text=True, capture_output=True)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            orm_command = json.loads((root / 'orm.json').read_text())
+            self.assertIn('--rm', orm_command)
+            self.assertEqual(orm_command[orm_command.index('--network') + 1], 'none')
+            self.assertEqual(orm_command[orm_command.index('--entrypoint') + 1], 'python3')
+            self.assertEqual(orm_command[-3:], ['fixture-image', '/tests/test_patch_session_recovery.py', '--orm'])
+            self.assertTrue(any('target=/tests' in argument and ('readonly' in argument or 'ro' in argument.split(','))
+                                for argument in orm_command))
+            self.assertEqual({path.name for path in overrides.glob('*.next')},
+                             {name + '.next' for name in ARTIFACT_NAMES})
+            for name in ARTIFACT_NAMES:
+                self.assertEqual((overrides / name).read_text(), 'live ' + name)
+                if name != 'corresponding-source.json':
+                    self.assertEqual((overrides / (name + '.next')).read_text(), 'prepared ' + name)
+            self.assertEqual(json.loads((overrides / 'corresponding-source.json.next').read_text())['license'], 'AGPL-3.0')
 
     def test_release_targets_selected_live_deployment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory).resolve()
             home = root / 'home'
-            socket_path = home / '.colima/default/docker.sock'
+            socket_path = home / 'selected-engine/docker.sock'
             socket_path.parent.mkdir(parents=True)
             docker_socket = socket.socket(socket.AF_UNIX)
             docker_socket.bind(str(socket_path))
@@ -412,6 +468,7 @@ elif "sha256sum" in args:
                 manifest = root / 'staticfiles.json'
                 manifest.write_text(json.dumps({'paths': {'node/@wger-project/react-components/build/main.js': served_name}}))
                 env = {**os.environ, 'HOME': str(home), 'PATH': str(binary.parent) + ':' + os.environ['PATH'],
+                       'WGER_DOCKER_HOST': 'unix://' + str(socket_path),
                        'DOCKER_LOG': str(docker_log), 'WGER_DEPLOY_DIR': str(deploy),
                        'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history),
                        'WGER_PUBLIC_URL': 'http://127.0.0.1:' + str(server.server_port),
@@ -430,6 +487,8 @@ elif "sha256sum" in args:
                 for name in ARTIFACT_NAMES[1:]:
                     self.assertEqual((overrides / name).read_text(), f'new {name}\n')
                 commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
+                for command in commands:
+                    self.assertEqual(command[:2], ['-H', env['WGER_DOCKER_HOST']])
                 self.assertTrue(any(str(deploy / 'compose.yaml') in command for command in map(' '.join, commands)))
                 self.assertTrue(any('cp nginx:/wger/static/' + served_name in ' '.join(command) for command in commands))
                 self.assertFalse(any('build' in command for command in commands))
@@ -633,6 +692,8 @@ elif "sha256sum" in args:
                                           text=True, capture_output=True)
                 self.assertNotEqual(fallback.returncode, 0)
                 self.assertIn('web release failed', fallback.stderr)
+                for line in docker_log.read_text().splitlines():
+                    self.assertEqual(json.loads(line)[:2], ['-H', env['WGER_DOCKER_HOST']])
             finally:
                 docker_socket.close()
 
@@ -645,6 +706,48 @@ elif "sha256sum" in args:
             fixture.write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\nGUNICORN_CMD_ARGS=--workers 1 --threads 2 --timeout 240\nPOSTGRES_PASSWORD=never-return-this\n')
             self.assertEqual(read_database_environment(fixture), {'POSTGRES_USER': 'fitness_wger', 'POSTGRES_DB': 'fitness_wger'})
 
+
+    def test_release_validates_selected_endpoint_before_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            writer, history = root / 'writer.lock', root / 'history.lock'
+            writer.touch(); history.touch()
+            default_socket = root / '.colima/default/docker.sock'
+            default_socket.parent.mkdir(parents=True)
+            marker = root / 'candidate.next'
+            marker.write_bytes(b'untouched candidate')
+            docker_log = root / 'docker.log'
+            binary = root / 'bin/docker'
+            binary.parent.mkdir()
+            binary.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(docker_log)!r}).touch()\nraise SystemExit(99)\n')
+            binary.chmod(0o755)
+            env = {**os.environ, 'HOME': str(root), 'WGER_DEPLOY_DIR': str(root),
+                   'PATH': str(binary.parent) + ':' + os.environ['PATH'],
+                   'WGER_WRITER_LOCK': str(writer), 'WGER_HISTORY_LOCK': str(history)}
+            env.pop('WGER_DOCKER_HOST', None)
+            with socket.socket(socket.AF_UNIX) as docker_socket:
+                docker_socket.bind(str(default_socket))
+                for endpoint, cause in (
+                    ('', 'Docker endpoint'),
+                    ('tcp://localhost:2375', 'Docker endpoint'),
+                    ('unix://', 'Docker endpoint'),
+                    ('unix://relative.sock', 'Docker endpoint'),
+                    ('unix://' + str(root / 'missing.sock'), 'Docker socket'),
+                    ('unix://' + str(marker), 'Docker socket'),
+                ):
+                    with self.subTest(endpoint=endpoint):
+                        result = subprocess.run([sys.executable, str(ROOT / 'release_web.py')],
+                                                env={**env, 'WGER_DOCKER_HOST': endpoint},
+                                                text=True, capture_output=True)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(cause, result.stderr)
+                        self.assertEqual(marker.read_bytes(), b'untouched candidate')
+                        self.assertFalse((root / 'overrides').exists())
+                        self.assertFalse(docker_log.exists())
+                default = subprocess.run([sys.executable, str(ROOT / 'release_web.py')],
+                                         env=env, text=True, capture_output=True)
+                self.assertNotEqual(default.returncode, 0)
+                self.assertIn('missing staged override', default.stderr)
 
     def test_release_refuses_cross_process_history_lockf_owner(self):
         with tempfile.TemporaryDirectory() as directory:

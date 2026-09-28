@@ -20,20 +20,15 @@ class PreflightTest(unittest.TestCase):
             home = Path(tmp)
             destination = home / 'fitness-coach-migration'
             destination.mkdir(mode=0o700)
-            (home / '.colima').mkdir()
             sock = socket.socket(socket.AF_UNIX)
-            sock.bind(str(home / '.colima/docker.sock'))
+            sock.bind(str(home / 'selected-docker.sock'))
             self.addCleanup(sock.close)
-            (home / '.colima/default').mkdir()
-            alternate = socket.socket(socket.AF_UNIX)
-            alternate.bind(str(home / '.colima/default/docker.sock'))
-            self.addCleanup(alternate.close)
             deploy = home / 'fitness-wger'
             deploy.mkdir()
             for name in ('writer', 'history'):
                 (home / name).touch()
             env = {'WGER_WRITER_LOCK': str(home / 'writer'), 'WGER_HISTORY_LOCK': str(home / 'history')}
-            env['WGER_DOCKER_HOST'] = 'unix://' + str(home / '.colima/default/docker.sock')
+            env['WGER_DOCKER_HOST'] = 'unix://' + str(home / 'selected-docker.sock')
             counts = {'users': 5, 'sessions': 387, 'logs': 4564, 'videos': 0, 'recoveries': 2}
             before = {'database': {'counts': counts, 'schema': [['manager', '0029']]},
                       'media': (b'', 0), 'containers': {name: {'Image': name, 'state': ('running', 'healthy')}
@@ -67,8 +62,11 @@ class PreflightTest(unittest.TestCase):
                 nonlocal residue
                 args = [str(arg) for arg in args]
                 calls.append(args)
+                self.assertEqual(environment['WGER_DOCKER_HOST'], env['WGER_DOCKER_HOST'])
+                if args[0] == 'docker':
+                    self.assertEqual(args[:3], ['docker', '-H', env['WGER_DOCKER_HOST']])
                 if 'info' in args:
-                    return b'wrong-daemon' if fault == 'daemon' and 'default/' in args[2] else b'same-daemon'
+                    return b'' if fault == 'daemon' else b'selected-daemon'
                 script = Path(args[1]).name if len(args) > 1 else ''
                 if script == 'backup.py':
                     snapshot = destination / 'wger-20260925T000000000000Z'
@@ -112,6 +110,7 @@ class PreflightTest(unittest.TestCase):
                 raise AssertionError(args)
 
             def resources(*args):
+                self.assertEqual(args[0], ['docker', '-H', env['WGER_DOCKER_HOST']])
                 return {'container': [project] if residue else [], 'volume': [], 'network': []}
 
             with patch.object(gate.Path, 'home', return_value=home), \
@@ -125,6 +124,8 @@ class PreflightTest(unittest.TestCase):
                 if fault and fault != 'reload':
                     with self.assertRaises((RuntimeError, ValueError)) as caught:
                         gate.run(source, deploy, env)
+                    if fault == 'daemon':
+                        self.assertIn('Docker daemon', str(caught.exception))
                     if fault == 'recoveries':
                         self.assertEqual(str(caught.exception), 'restored counts or applied migration proof mismatch')
                     category = {'bundle': 'bundle_sha256', 'migration': 'migrations', 'live': 'images'}.get(fault)
@@ -146,6 +147,15 @@ class PreflightTest(unittest.TestCase):
         for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'recoveries', 'schema', 'pending-migration', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
             with self.subTest(fault=fault):
                 self.exercise(fault)
+
+    def test_invalid_endpoint_refuses_before_backup(self):
+        for endpoint, cause in (('', 'Docker endpoint'), ('tcp://localhost:2375', 'Docker endpoint'),
+                                ('unix://relative.sock', 'Docker endpoint'),
+                                ('unix:///absent-wger-test.sock', 'Docker socket')):
+            with self.subTest(endpoint=endpoint), patch.object(gate, '_command') as command:
+                with self.assertRaisesRegex(RuntimeError, cause):
+                    gate.run(Path('.'), Path.home() / 'fitness-wger', {'WGER_DOCKER_HOST': endpoint})
+                command.assert_not_called()
 
     def test_real_baseline_identity_ignores_restart_but_detects_bundle_bytes(self):
         services = ('web', 'celery_worker', 'celery_beat', 'powersync', 'db', 'cache', 'nginx')
