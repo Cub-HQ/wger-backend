@@ -23,12 +23,15 @@ RECOVERY_TARGETS = {
     'manager-tasks.py': 'wger/manager/tasks.py',
     'manager-0031-session-recovery.py': 'wger/manager/migrations/0031_workoutsessionrecovery.py',
 }
-ARTIFACT_NAMES = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html',
+ARTIFACT_NAMES = ('template.html', 'history-overview.html', 'api-key.html',
                   'pdf.py', 'corresponding-source.json', *RECOVERY_TARGETS)
 RELEASE_NAMES = (*ARTIFACT_NAMES, 'backend-image.json')
 CANDIDATE_COMMIT = '0812ca39a80e82c071c99a54300df73e28668776'
+# The browser bundle is the image's own package file; the receipt pins its digest.
+BUNDLE = b'new graph code\n//# sourceMappingURL=main.js.map\n'
 CANDIDATE = {'tag': 'fitness-wger-backend:' + CANDIDATE_COMMIT, 'image_id': 'sha256:' + 'c' * 64,
-             'commit': CANDIDATE_COMMIT, 'app_build_commit': CANDIDATE_COMMIT}
+             'commit': CANDIDATE_COMMIT, 'app_build_commit': CANDIDATE_COMMIT,
+             'frontend': {'main_js_sha256': hashlib.sha256(BUNDLE).hexdigest()}}
 
 
 @contextmanager
@@ -232,14 +235,15 @@ class ReleaseRouteTest(unittest.TestCase):
         from urllib.parse import urljoin
         from urllib.request import Request
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'http_bundle')
-        namespace.update({'public_url': 'https://gym.invalid', 'Request': Request, 'urljoin': urljoin, 're': re})
+        namespace.update({'public_url': 'https://gym.invalid', 'Request': Request, 'urljoin': urljoin, 're': re,
+                          'hashlib': hashlib})
         exec(compile(ast.Module(body=[function], type_ignores=[]), '<http_bundle>', 'exec'), namespace)
         login = io.BytesIO(b'<script src="/static/node/@wger-project/react-components/build/main.abc123.js"></script>')
         bundle = io.BytesIO(b'wrong bundle')
         bundle.headers = {'Date': 'today', 'Last-Modified': 'yesterday'}
         namespace['public_response'] = Mock(side_effect=[login, bundle])
         with self.assertRaisesRegex(OSError, 'does not match staged release'):
-            namespace['http_bundle'](b'correct bundle')
+            namespace['http_bundle'](hashlib.sha256(b'correct bundle').hexdigest())
         self.assertEqual(namespace['public_response'].call_count, 2)
 
     def test_preparation_extracts_the_compose_image(self):
@@ -348,12 +352,11 @@ class ReleaseRouteTest(unittest.TestCase):
                 (config / 'private.env').write_text('POSTGRES_USER=fitness_wger\nPOSTGRES_DB=fitness_wger\n')
                 for name in ('settings-main.py', 'manager-urls.py'):
                     (overrides / name).write_text(f'old {name}\n')
-                for name in ARTIFACT_NAMES[1:]:
+                for name in ARTIFACT_NAMES:
                     (overrides / f'{name}.next').write_text(f'new {name}\n')
                     if name in {'history-overview.html', 'api-key.html', 'pdf.py', *RECOVERY_TARGETS}:
                         (overrides / name).write_text(f'old {name}\n')
-                bundle = b'new graph code\n//# sourceMappingURL=main.js.map\n'
-                (overrides / 'react-main.js.next').write_bytes(bundle)
+                bundle = BUNDLE
                 (overrides / 'backend-image.json.next').write_text(json.dumps(CANDIDATE))
                 writer, history = root / 'writer.lock', root / 'history.lock'
                 writer.touch(); history.touch()
@@ -471,6 +474,7 @@ elif "config" in args and "--format" in args:
     if any('candidate/compose.yaml' in arg for arg in args) or (Path(os.environ['WGER_DEPLOY_DIR'])/'formats/en_AU/formats.py').exists():
         services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'formats/en_AU/formats.py'),'target':'/home/wger/src/wger/formats/en_AU/formats.py'})
     if fault=='missing':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'missing.py'),'target':'/home/wger/src/settings/main.py'})
+    if fault=='frontend-bind':services['web']['volumes'].append({'type':'bind','source':str(Path(os.environ['WGER_DEPLOY_DIR'])/'overrides/template.html'),'target':'/home/wger/src/node_modules/@wger-project/react-components/build/main.js'})
     for arg in args:
         if 'compose.rollback.yaml' in arg and 'build: null' in Path(arg).read_text():
             print('services.web.build must be a string',file=sys.stderr);sys.exit(1)
@@ -517,14 +521,14 @@ elif "sha256sum" in args:
                 result = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=env,
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual((overrides / 'react-main.js').read_bytes(), bundle)
+                self.assertFalse((overrides / 'react-main.js').exists(), 'release must not stage a browser bundle overlay')
                 proof = json.loads(result.stdout.splitlines()[-1])['live_proof']
                 self.assertEqual(proof['expected_sha256'], hashlib.sha256(bundle).hexdigest())
                 self.assertEqual(proof['normalized_sha256'], proof['expected_sha256'])
                 self.assertNotEqual(proof['served_sha256'], proof['expected_sha256'])
                 self.assertTrue(proof['date'])
                 self.assertEqual(proof['last_modified'], 'Fri, 25 Sep 2026 00:00:00 GMT')
-                for name in ARTIFACT_NAMES[1:]:
+                for name in ARTIFACT_NAMES:
                     self.assertEqual((overrides / name).read_text(), f'new {name}\n')
                 commands = [json.loads(line) for line in docker_log.read_text().splitlines()]
                 for command in commands:
@@ -597,7 +601,6 @@ elif "sha256sum" in args:
                 assert_recovery_restored()
                 (root / 'stale-http').unlink()
                 (root / 'malformed-http').touch()
-                (overrides / 'react-main.js').write_bytes(b'prior browser bundle')
                 offset = len(docker_log.read_text().splitlines())
                 malformed = subprocess.run([sys.executable, str(ROOT / 'release_web.py')], env=staged_env, text=True, capture_output=True)
                 self.assertNotEqual(malformed.returncode, 0)
@@ -607,7 +610,7 @@ elif "sha256sum" in args:
                         self.assertFalse((deploy / name).exists())
                     else:
                         self.assertEqual((deploy / name).read_text(), 'old ' + name)
-                self.assertEqual((overrides / 'react-main.js').read_bytes(), b'prior browser bundle')
+                self.assertFalse((overrides / 'react-main.js').exists())
                 self.assertEqual((config / 'private.env').read_bytes(), private_before)
                 assert_recovery_restored()
                 recovery = [json.loads(line) for line in docker_log.read_text().splitlines()[offset:]]
@@ -672,9 +675,12 @@ elif "sha256sum" in args:
                     ('image-moved', None, 'no longer resolves to receipt image'),
                     ('image-commit', None, 'no longer resolves to receipt image'),
                     ('compose-tag', None, 'is not the receipt candidate'),
+                    ('frontend-bind', None, 'bind overrides the image frontend package'),
                     ('', '{}', 'receipt is missing or malformed'),
                     ('', json.dumps({**CANDIDATE, 'app_build_commit': 'f' * 40}), 'receipt is missing or malformed'),
                     ('', json.dumps({**CANDIDATE, 'tag': 'fitness-wger-backend:latest'}), 'receipt is missing or malformed'),
+                    ('', json.dumps({key: value for key, value in CANDIDATE.items() if key != 'frontend'}), 'receipt is missing or malformed'),
+                    ('', json.dumps({**CANDIDATE, 'frontend': {'main_js_sha256': 'upstream'}}), 'receipt is missing or malformed'),
                 ):
                     with self.subTest(candidate_refusal=fault or content):
                         if content is not None:
