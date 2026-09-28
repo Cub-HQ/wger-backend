@@ -174,6 +174,18 @@ class WgerDeployTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, reason):
                 module.check_surfaces(['deployment/wger/' + name])
 
+    def test_native_fork_source_releases_only_through_the_backend_pin(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Source F changes fork files; they reach the gym only in the image G pins.
+        for path in ('extras/docker/production/Dockerfile', 'package.json', 'package-lock.json',
+                     'extras/docker/production/react-components/wger-project-react-components-26.8.28.tgz',
+                     'wger/manager/tasks.py'):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'non-gym surface.*BACKEND_COMMIT pin'):
+                module.check_surfaces([path, 'deployment/wger/patches/prepare-react.sh'])
+        module.check_surfaces(['deployment/wger/patches/prepare-react.sh'])
+
     def test_layout_cutover_accepts_only_absent_retired_inputs(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
         module = importlib.util.module_from_spec(spec)
