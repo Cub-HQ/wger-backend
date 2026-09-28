@@ -24,7 +24,10 @@ from django.contrib.auth.models import User
 from django.contrib.sessions.models import Session
 from django.test import override_settings
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import (
+    formats,
+    timezone,
+)
 from django.utils.dateparse import parse_datetime
 
 # Third Party
@@ -496,7 +499,10 @@ class LongLivedRefreshTokenTestCase(WgerTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(decoded, [])
-        self.assertContains(response, timezone.localtime(entry.created).strftime('%Y-%m-%d %H:%M'))
+        self.assertContains(
+            response,
+            formats.date_format(timezone.localtime(entry.created), 'SHORT_DATETIME_FORMAT'),
+        )
 
     def test_deleting_the_user_removes_the_index(self):
         """

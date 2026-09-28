@@ -188,6 +188,11 @@ class WorkoutLog(models.Model):
     Target amount of weight
     """
 
+    average_speed = models.DecimalField(max_digits=8, decimal_places=2, validators=[NullMinValueValidator(0)], null=True, blank=True)
+    pace = models.DecimalField(max_digits=8, decimal_places=2, validators=[NullMinValueValidator(0)], null=True, blank=True)
+    incline = models.DecimalField(max_digits=6, decimal_places=2, validators=[NullMinValueValidator(0)], null=True, blank=True)
+    calories = models.DecimalField(max_digits=8, decimal_places=2, validators=[NullMinValueValidator(0)], null=True, blank=True)
+
     rir = models.DecimalField(
         max_digits=2,
         decimal_places=1,
@@ -245,8 +250,10 @@ class WorkoutLog(models.Model):
 
     def clean(self):
         super().clean()
-        if self.repetitions is None and self.weight is None:
-            raise ValidationError('Both repetitions and weight cannot be null at the same time.')
+        if self.repetitions is None and self.weight is None and all(
+            value is None for value in (self.average_speed, self.pace, self.incline, self.calories)
+        ):
+            raise ValidationError('A workout log must contain at least one metric.')
 
         if self.repetitions is not None and self.repetitions_unit is None:
             raise ValidationError('Repetitions unit must be present if repetitions have a value.')

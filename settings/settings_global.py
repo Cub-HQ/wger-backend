@@ -435,6 +435,10 @@ AVAILABLE_LANGUAGES = (
 # Default language code for this installation.
 LANGUAGE_CODE = 'en'
 
+# Locale format overrides (only en_AU for now). Selecting that locale through
+# LANGUAGE_CODE is left to each deployment's settings.
+FORMAT_MODULE_PATH = 'wger.formats'
+
 # All translation files are in one place
 LOCALE_PATHS = (os.path.join(SITE_ROOT, 'locale'),)
 
@@ -690,6 +694,15 @@ WGER_SOCIAL_PROVIDERS = []
 
 # Whether to link to the mobile app in the app stores in the footer and on the landing page.
 WGER_SHOW_APP_STORE_LINKS = True
+
+# AGPL corresponding source, linked from the footer. Builds pin the exact commits
+# through APP_BUILD_COMMIT (see the production Dockerfile) and APP_UI_BUILD_COMMIT.
+WGER_SERVER_SOURCE_URL = 'https://github.com/Cub-HQ/wger-backend/tree/' + (
+    os.environ.get('APP_BUILD_COMMIT') or 'cubatica-main'
+)
+WGER_UI_SOURCE_URL = 'https://github.com/Cub-HQ/wger-frontend/tree/' + (
+    os.environ.get('APP_UI_BUILD_COMMIT') or 'cubatica-main'
+)
 
 
 #

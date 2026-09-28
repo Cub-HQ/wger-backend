@@ -32,7 +32,10 @@ from rest_framework import status
 # wger
 from wger.core.tests import api_base_test
 from wger.core.tests.base_testcase import WgerTestCase
-from wger.manager.models import WorkoutSession
+from wger.manager.models import (
+    WorkoutSession,
+    WorkoutSessionRecovery,
+)
 
 
 class WorkoutSessionApiTestCase(api_base_test.ApiBaseResourceTestCase):
@@ -50,6 +53,25 @@ class WorkoutSessionApiTestCase(api_base_test.ApiBaseResourceTestCase):
         'datetime_start': timezone.make_aware(datetime.datetime(2014, 1, 25, 10, 0)),
         'datetime_end': timezone.make_aware(datetime.datetime(2014, 1, 25, 13, 0)),
     }
+
+    def test_delete_detail(self):
+        """
+        DELETE archives the session for recovery and answers with its summary
+        """
+        detail = self.url_detail
+        self.assertEqual(self.client.delete(detail).status_code, status.HTTP_403_FORBIDDEN)
+
+        self.authenticate(self.user_fail)
+        self.assertEqual(self.client.delete(detail).status_code, status.HTTP_404_NOT_FOUND)
+
+        self.authenticate()
+        response = self.client.delete(detail)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()['original_session_id'], self.pk)
+        self.assertFalse(WorkoutSession.objects.filter(pk=self.pk).exists())
+        self.assertTrue(
+            WorkoutSessionRecovery.objects.filter(original_session_id=self.pk).exists()
+        )
 
 
 class WorkoutSessionDurationTestCase(WgerTestCase):

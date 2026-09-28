@@ -123,6 +123,21 @@ patterns_routine = [
         ReactView.as_view(login_required=True),
         name='calendar',
     ),
+    path(
+        'workouts',
+        ReactView.as_view(login_required=True),
+        name='workouts',
+    ),
+    path(
+        'quick',
+        ReactView.as_view(login_required=True),
+        name='quick',
+    ),
+    path(
+        'session/<uuid:sessionId>',
+        ReactView.as_view(login_required=True),
+        name='session',
+    ),
 ]
 
 urlpatterns = [

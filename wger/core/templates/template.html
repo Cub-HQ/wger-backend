@@ -164,7 +164,10 @@
             {#                                         #}
             {# Render the links to the other languages #}
             {#                                         #}
-            <div class="col-md-2">
+            <div class="col-12 col-md-auto">
+                <a href="{{ server_source_url }}" class="text-muted small">Server source</a>
+                <span class="text-muted small"> · </span>
+                <a href="{{ ui_source_url }}" class="text-muted small">UI source</a>
                 {% if not is_api_path %}
                     {# Don't show language switcher in the generated API views #}
                     <div class="btn-group dropup">
