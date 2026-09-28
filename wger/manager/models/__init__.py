@@ -33,6 +33,7 @@ from .rir_config import (
 )
 from .routine import Routine
 from .session import WorkoutSession
+from .session_recovery import WorkoutSessionRecovery
 from .sets_config import (
     MaxSetsConfig,
     SetsConfig,

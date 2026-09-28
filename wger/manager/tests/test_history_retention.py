@@ -18,7 +18,15 @@ from rest_framework import status
 
 # wger
 from wger.core.tests.base_testcase import WgerTestCase, get_field_snapshot
-from wger.manager.models import Day, Routine, Slot, SlotEntry, WorkoutLog, WorkoutSession
+from wger.manager.models import (
+    Day,
+    Routine,
+    Slot,
+    SlotEntry,
+    WorkoutLog,
+    WorkoutSession,
+    WorkoutSessionRecovery,
+)
 
 
 class WorkoutHistoryRetentionTestCase(WgerTestCase):
@@ -122,11 +130,15 @@ class WorkoutHistoryRetentionTestCase(WgerTestCase):
             self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_explicit_session_deletion_still_removes_its_logs(self):
+        # Deletion archives the session for recovery (200 + summary) instead of 204.
         response = self.client.delete(
             reverse('workoutsession-detail', kwargs={'pk': self.session.pk})
         )
-        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(WorkoutLog.objects.filter(pk=self.log.pk).exists())
+        self.assertTrue(
+            WorkoutSessionRecovery.objects.filter(original_session_id=self.session.pk).exists()
+        )
         self.assertTrue(Routine.objects.filter(pk=self.routine.pk).exists())
 
     def test_account_deletion_still_removes_history(self):
