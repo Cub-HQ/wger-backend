@@ -414,8 +414,8 @@ class ExerciseVideoViewSet(ModelViewSet):
     queryset = ExerciseVideo.objects.all()
     serializer_class = ExerciseVideoSerializer
     permission_classes = (CanContributeExercises,)
-    # the video is uploaded as a file, which JSON cannot carry
-    parser_classes = (MultiPartParser,)
+    # Accept uploads and JSON-linked videos.
+    parser_classes = [*ModelViewSet.parser_classes, MultiPartParser]
     ordering_fields = '__all__'
     filterset_fields = (
         'is_main',
