@@ -14,11 +14,11 @@ BACKEND_UPSTREAM='https://github.com/wger-project/wger 83005f7d487c814833f394378
 BACKEND_TAG=fitness-wger-backend:$BACKEND_COMMIT
 # The backend commit carries the reviewed frontend package; its source, archive and main.js are pinned here.
 FRONTEND_REPO=https://github.com/Cub-HQ/wger-frontend
-FRONTEND_COMMIT=b23cd36458ba921fe91b448bb3aded4a2bf99189
+FRONTEND_COMMIT=35269fabbf988b9d681c9fd304771690a39a8b34
 FRONTEND_UPSTREAM='https://github.com/wger-project/react 89d234a800ba0f2097162f1d91444c7e3a5ccc5c'
 FRONTEND_PACKAGE=extras/docker/production/react-components/wger-project-react-components-26.8.28.tgz
-FRONTEND_SHA256=c8b3e6b6d251067758f14eb176f961dd881216ef1985e3506e08a2e13a0e4ec0
-FRONTEND_MAIN_JS_SHA256=b4396316a69dddfea75a16e78907c515ee5e27478a8c7e64dfc299f2a19074b4
+FRONTEND_SHA256=eee46be70533c44e5b5f3da25fcd1e63c2abcb9e638063d35b23e07990ce2a0f
+FRONTEND_MAIN_JS_SHA256=3bc9b51957e7c819dc48d2f381a922637de3042ab6b4108e31876299df2e2383
 BACKEND_MATERIAL='wger/formats/en_AU/formats.py wger/utils/pdf.py wger/core/templates/template.html
   wger/exercises/templates/history/overview.html wger/core/templates/user/api_key.html
   wger/manager/models/session_recovery.py wger/manager/migrations/0031_workoutsessionrecovery.py
