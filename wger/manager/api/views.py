@@ -251,6 +251,18 @@ class PublicRoutineTemplateViewSet(viewsets.ReadOnlyModelViewSet):
         return Routine.public.all()
 
 
+from wger.manager.models.session_recovery import (
+    WorkoutSessionRecovery,
+    archive_session,
+    purge_expired_recoveries,
+    recovery_summary,
+    restore_session,
+)
+from django.core.exceptions import ValidationError as RecoveryValidationError
+from django.utils import timezone as recovery_timezone
+from rest_framework.exceptions import NotFound as RecoveryNotFound
+
+
 class WorkoutSessionViewSet(WgerOwnerObjectModelViewSet):
     """
     API endpoint for workout sessions objects
@@ -260,6 +272,47 @@ class WorkoutSessionViewSet(WgerOwnerObjectModelViewSet):
     is_private = True
     ordering_fields = '__all__'
     filterset_class = WorkoutSessionFilterSet
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            row = archive_session(request.user, kwargs['pk'])
+        except (RecoveryValidationError, ValueError):
+            raise RecoveryNotFound()
+        return Response(recovery_summary(row))
+
+    @action(detail=False, methods=['get'], url_path='recoveries')
+    def recoveries(self, request):
+        purge_expired_recoveries(user=request.user)
+        rows = WorkoutSessionRecovery.objects.filter(
+            user=request.user, expires_at__gt=recovery_timezone.now()
+        ).order_by('-deleted_at', 'pk')
+        if 'routine' in request.query_params:
+            try:
+                routine_id = int(request.query_params['routine'])
+            except (TypeError, ValueError):
+                raise RecoveryNotFound()
+            rows = rows.filter(routine_id=routine_id)
+        summaries = rows.values(
+            'id', 'original_session_id', 'routine_id', 'deleted_at', 'expires_at',
+            'snapshot__session__datetime_start',
+        )
+        return Response([{
+            'id': str(row['id']),
+            'original_session_id': str(row['original_session_id']),
+            'routine_id': row['routine_id'],
+            'deleted_at': row['deleted_at'].isoformat(),
+            'expires_at': row['expires_at'].isoformat(),
+            'datetime_start': row['snapshot__session__datetime_start'],
+        } for row in summaries])
+
+    @action(detail=False, methods=['post'], url_path=r'recoveries/(?P<recovery_id>[^/.]+)/restore')
+    def restore_recovery(self, request, recovery_id=None):
+        try:
+            session = restore_session(request.user, recovery_id)
+        except (RecoveryValidationError, ValueError):
+            raise RecoveryNotFound()
+        return Response(self.get_serializer(session).data)
+
 
     def get_queryset(self):
         """
