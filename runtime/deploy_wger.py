@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 
+from deploy_failure import failure_reason
+
 PREFIX = 'deployment/wger/'
 # Explicit custody: never copy a directory recursively into the live deployment.
 PRODUCT_FILES = (
@@ -161,20 +163,6 @@ def deploy(args):
             raise ValueError('release did not return matching live proof')
         proof['preflight'] = {key: preflight[key] for key in ('live_baseline_unchanged', 'disposable_resources_removed', 'media_sha256')}
         return proof
-
-
-def failure_reason(error):
-    # Subprocess exception text includes argv; stdout/stderr can contain configuration.
-    if isinstance(error, subprocess.CalledProcessError):
-        message = f'command failed with exit status {error.returncode}'
-    elif isinstance(error, subprocess.TimeoutExpired):
-        message = f'command timed out after {error.timeout} seconds'
-    else:
-        message = str(error)
-    message = re.sub(r'[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"\'<>]+', '[REDACTED]', message)
-    message = re.sub(r'(?i)\b(?:authorization\s*[:=]\s*)?(?:bearer|basic)\s+\S+', '[REDACTED]', message)
-    message = re.sub(r'''(?ix)([\w-]*(?:password|passwd|secret|token|api[_-]?key|authorization)[\w-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)''', r'\1[REDACTED]', message)
-    return f'{type(error).__name__}: ' + ' '.join(message.split())[:1000]
 
 
 def main():
