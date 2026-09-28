@@ -190,8 +190,8 @@ class BackendImageTest(unittest.TestCase):
             'repository': 'https://github.com/Cub-HQ/wger-frontend', 'commit': UI_COMMIT,
             'upstream': 'https://github.com/wger-project/react 89d234a800ba0f2097162f1d91444c7e3a5ccc5c',
             'package': PACKAGE,
-            'package_sha256': 'c8b3e6b6d251067758f14eb176f961dd881216ef1985e3506e08a2e13a0e4ec0',
-            'main_js_sha256': 'b4396316a69dddfea75a16e78907c515ee5e27478a8c7e64dfc299f2a19074b4'})
+            'package_sha256': 'eee46be70533c44e5b5f3da25fcd1e63c2abcb9e638063d35b23e07990ce2a0f',
+            'main_js_sha256': '3bc9b51957e7c819dc48d2f381a922637de3042ab6b4108e31876299df2e2383'})
         self.assertIn('source and frontend package files', result.stdout + result.stderr)
 
         (self.overrides / 'backend-image.json.next').unlink()
@@ -250,7 +250,7 @@ class BackendImageTest(unittest.TestCase):
         # Same name/version from anywhere else (e.g. the upstream registry) is not the reviewed fork build.
         self.recommit(PACKAGE, (self.repo / PACKAGE).read_bytes() + b'\0')
         result = self.prepare()
-        self.assert_refused(result, 'not the reviewed c8b3e6b6')
+        self.assert_refused(result, 'not the reviewed eee46be7')
         self.assertFalse({'build', 'pull', 'run'} & {call[0] for call in self.calls()})
 
     def test_image_serving_other_frontend_bytes_is_not_tagged(self):
