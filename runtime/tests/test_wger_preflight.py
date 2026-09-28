@@ -34,7 +34,7 @@ class PreflightTest(unittest.TestCase):
                 (home / name).touch()
             env = {'WGER_WRITER_LOCK': str(home / 'writer'), 'WGER_HISTORY_LOCK': str(home / 'history')}
             env['WGER_DOCKER_HOST'] = 'unix://' + str(home / '.colima/default/docker.sock')
-            counts = {'users': 5, 'sessions': 387, 'logs': 4564, 'videos': 0}
+            counts = {'users': 5, 'sessions': 387, 'logs': 4564, 'videos': 0, 'recoveries': 2}
             before = {'database': {'counts': counts, 'schema': [['manager', '0029']]},
                       'media': (b'', 0), 'containers': {name: {'Image': name, 'state': ('running', 'healthy')}
                        for name in ('web', 'powersync', 'celery_worker', 'celery_beat')}}
@@ -55,6 +55,8 @@ class PreflightTest(unittest.TestCase):
             restored = copy.deepcopy(before['database'])
             if fault == 'counts':
                 restored['counts'] = {**counts, 'logs': 0}
+            if fault == 'recoveries':
+                restored['counts']['recoveries'] -= 1
             if fault == 'schema':
                 restored['schema'] = [['manager', '0028']]
             project = 'wger-restore-1234567890'
@@ -123,6 +125,8 @@ class PreflightTest(unittest.TestCase):
                 if fault and fault != 'reload':
                     with self.assertRaises((RuntimeError, ValueError)) as caught:
                         gate.run(source, deploy, env)
+                    if fault == 'recoveries':
+                        self.assertEqual(str(caught.exception), 'restored counts or applied migration proof mismatch')
                     category = {'bundle': 'bundle_sha256', 'migration': 'migrations', 'live': 'images'}.get(fault)
                     if category:
                         self.assertEqual(str(caught.exception), 'live release identity changed during backup/restore preflight: ' + category)
@@ -139,7 +143,7 @@ class PreflightTest(unittest.TestCase):
                 self.assertNotIn('restore-drill.py', scripts)
 
     def test_success_and_fail_closed_proof_matrix(self):
-        for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'schema', 'pending-migration', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
+        for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'recoveries', 'schema', 'pending-migration', 'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon'):
             with self.subTest(fault=fault):
                 self.exercise(fault)
 
@@ -149,7 +153,7 @@ class PreflightTest(unittest.TestCase):
                     'Config': {'Labels': {'com.docker.compose.service': name}},
                     'HostConfig': {}, 'Mounts': [], 'RestartCount': 0,
                     'State': {'Status': 'running', 'Health': {'Status': 'healthy'}}} for name in services]
-        database = {'counts': {'users': 1, 'sessions': 2, 'logs': 3, 'videos': 0}, 'schema': [['manager', '0029']]}
+        database = {'counts': {'users': 1, 'sessions': 2, 'logs': 3, 'videos': 0, 'recoveries': 0}, 'schema': [['manager', '0029']]}
         def command(args, env):
             return json.dumps(records).encode() if 'inspect' in args else b'web worker beat powersync db cache nginx'
         with tempfile.TemporaryDirectory() as temporary:

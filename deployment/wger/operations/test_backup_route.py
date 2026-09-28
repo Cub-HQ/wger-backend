@@ -1,9 +1,13 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
+import sqlite3
 import tarfile
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +16,10 @@ RESTORE_MODULE = pathlib.Path(__file__).with_name('restore-drill.py')
 RESTORE_SPEC = importlib.util.spec_from_file_location('restore_drill', RESTORE_MODULE)
 restore_drill = importlib.util.module_from_spec(RESTORE_SPEC)
 RESTORE_SPEC.loader.exec_module(restore_drill)
+PREFLIGHT_SPEC = importlib.util.spec_from_file_location(
+    'wger_preflight', pathlib.Path(__file__).resolve().parents[3] / 'runtime/wger_preflight.py')
+preflight = importlib.util.module_from_spec(PREFLIGHT_SPEC)
+PREFLIGHT_SPEC.loader.exec_module(preflight)
 
 CURRENT_MOUNTS = (
     ('overrides/react-main.js', '/home/wger/src/node_modules/@wger-project/react-components/build/main.js'),
@@ -24,6 +32,13 @@ REVIEWED_MOUNTS = CURRENT_MOUNTS + (
     ('overrides/api-key.html', '/home/wger/src/wger/core/templates/user/api_key.html'),
     ('overrides/pdf.py', '/home/wger/src/wger/utils/pdf.py'),
     ('formats/en_AU/formats.py', '/home/wger/src/wger/formats/en_AU/formats.py'),
+    ('overrides/manager-session-recovery.py', '/home/wger/src/wger/manager/models/session_recovery.py'),
+    ('overrides/manager-models-init.py', '/home/wger/src/wger/manager/models/__init__.py'),
+    ('overrides/manager-api-views.py', '/home/wger/src/wger/manager/api/views.py'),
+    ('overrides/manager-tasks.py', '/home/wger/src/wger/manager/tasks.py'),
+    ('overrides/manager-log.py', '/home/wger/src/wger/manager/models/log.py'),
+    ('overrides/manager-0030-workoutlog-cardio-metrics.py', '/home/wger/src/wger/manager/migrations/0030_workoutlog_cardio_metrics.py'),
+    ('overrides/manager-0031-session-recovery.py', '/home/wger/src/wger/manager/migrations/0031_workoutsessionrecovery.py'),
 )
 
 
@@ -260,7 +275,7 @@ class BackupRouteTest(unittest.TestCase):
             self.assertNotIn('PS_DATABASE_URI', environment)
             self.assertEqual(environment['DJANGO_DB_USER'], 'restore')
 
-    def test_pre_release_snapshot_and_restore_skip_not_yet_installed_date_overrides(self):
+    def test_pre_release_snapshot_and_restore_skip_not_yet_installed_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             deploy = root / 'deploy'
@@ -280,16 +295,12 @@ class BackupRouteTest(unittest.TestCase):
                 captured.extractall(restored, filter='data')
                 names = set(captured.getnames())
             self.assertTrue({'compose.yaml', 'config/private.env', *(source for source, _ in CURRENT_MOUNTS)} <= names)
-            self.assertTrue({
-                'formats/en_AU/formats.py',
-                'overrides/history-overview.html',
-                'overrides/api-key.html',
-                'overrides/pdf.py',
-            }.isdisjoint(names))
+            self.assertTrue({source for source, _ in REVIEWED_MOUNTS
+                             if source not in dict(CURRENT_MOUNTS)}.isdisjoint(names))
             expected = tuple(str(restored / source) + ':' + target + ':ro' for source, target in CURRENT_MOUNTS)
             self.assertEqual(restore_drill.web_override_mounts(restored, services_for(restored, CURRENT_MOUNTS)), expected)
 
-    def test_snapshot_and_restore_keep_all_australian_date_overrides(self):
+    def test_snapshot_and_restore_keep_all_reviewed_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             deploy = root / 'deploy'
@@ -367,6 +378,101 @@ class BackupRouteTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'deployment bind source has wrong type'):
                         restore_drill.web_override_mounts(work, services_for(work))
 
+
+
+class DatabaseRecoveryProofTest(unittest.TestCase):
+    def setUp(self):
+        self.database = sqlite3.connect(':memory:')
+        self.addCleanup(self.database.close)
+        self.database.execute('CREATE TABLE django_migrations (app TEXT, name TEXT)')
+        self.database.execute("INSERT INTO django_migrations VALUES ('manager', '0030_baseline')")
+        for table in ('User', 'WorkoutSession', 'WorkoutLog', 'ExerciseVideo'):
+            self.database.execute(f'CREATE TABLE {table} (id INTEGER PRIMARY KEY)')
+            self.database.execute(f'INSERT INTO {table} VALUES (1)')
+
+    def install_recovery(self, database=None):
+        database = database if database is not None else self.database
+        database.execute('CREATE TABLE manager_workoutsessionrecovery (id INTEGER PRIMARY KEY, payload TEXT)')
+        database.executemany('INSERT INTO manager_workoutsessionrecovery VALUES (?, ?)',
+                             [(1, 'private synthetic draft'), (2, 'private synthetic completed draft')])
+        database.execute("INSERT INTO django_migrations VALUES ('manager', '0031_workoutsessionrecovery')")
+
+    def proof(self, database=None, introspection_error=None):
+        database = database if database is not None else self.database
+
+        def table_names():
+            if introspection_error is not None:
+                raise introspection_error
+            return [row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+
+        def get_model(app, model):
+            return types.SimpleNamespace(objects=types.SimpleNamespace(
+                count=lambda: database.execute(f'SELECT COUNT(*) FROM {model}').fetchone()[0]))
+
+        modules = {
+            'django.apps': types.SimpleNamespace(apps=types.SimpleNamespace(get_model=get_model)),
+            'django.db': types.SimpleNamespace(connection=types.SimpleNamespace(
+                introspection=types.SimpleNamespace(table_names=table_names),
+                cursor=lambda: contextlib.closing(database.cursor()),
+                ops=types.SimpleNamespace(quote_name=lambda name: '"' + name + '"'))),
+            'django.db.migrations.recorder': types.SimpleNamespace(MigrationRecorder=types.SimpleNamespace(
+                Migration=types.SimpleNamespace(objects=types.SimpleNamespace(
+                    values_list=lambda *fields: database.execute('SELECT app, name FROM django_migrations').fetchall())))),
+        }
+        output = io.StringIO()
+        with patch.dict('sys.modules', modules), contextlib.redirect_stdout(output):
+            exec(preflight.DATABASE_PROOF, {})
+        raw = output.getvalue()
+        with patch.object(preflight, '_command', return_value=raw.encode()):
+            result = preflight._database(['docker'], 'synthetic-web', {})
+        self.assertNotIn('private synthetic', raw)
+        return result
+
+    def test_legacy_table_absence_allows_initial_rollout(self):
+        self.assertEqual(self.proof()['counts']['recoveries'], 0)
+
+    def test_restored_synthetic_recovery_rows_are_counted_without_payloads(self):
+        self.install_recovery()
+        self.database.commit()
+        restored = sqlite3.connect(':memory:')
+        self.addCleanup(restored.close)
+        self.database.backup(restored)
+        baseline = self.proof()
+        self.assertEqual(baseline['counts']['recoveries'], 2)
+        self.assertEqual(self.proof(restored), baseline)
+        restored.execute('DELETE FROM manager_workoutsessionrecovery WHERE id = 1')
+        self.assertNotEqual(self.proof(restored)['counts'], baseline['counts'])
+
+    def test_migrated_missing_table_fails_closed(self):
+        self.install_recovery()
+        self.database.execute('DROP TABLE manager_workoutsessionrecovery')
+        with self.assertRaisesRegex(RuntimeError, 'recovery.*table'):
+            self.proof()
+
+    def test_introspection_failure_is_not_legacy_absence(self):
+        with self.assertRaisesRegex(RuntimeError, 'introspection unavailable'):
+            self.proof(introspection_error=RuntimeError('introspection unavailable'))
+
+    def test_existing_recovery_table_query_failure_fails_closed(self):
+        self.install_recovery()
+        self.database.set_authorizer(lambda action, table, *args:
+                                     sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ
+                                     and table == 'manager_workoutsessionrecovery' else sqlite3.SQLITE_OK)
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.proof()
+
+    def test_validator_requires_nonnegative_integer_recovery_count(self):
+        baseline = self.proof()
+        for count in (None, -1, True, '2'):
+            with self.subTest(count=count):
+                proof = {**baseline, 'counts': dict(baseline['counts'])}
+                if count is None:
+                    proof['counts'].pop('recoveries')
+                else:
+                    proof['counts']['recoveries'] = count
+                with patch.object(preflight, '_command', return_value=json.dumps(proof).encode()):
+                    with self.assertRaisesRegex(RuntimeError, 'incomplete database proof'):
+                        preflight._database(['docker'], 'synthetic-web', {})
 
 
 class DrillRouteTest(unittest.TestCase):

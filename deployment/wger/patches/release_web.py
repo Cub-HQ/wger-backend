@@ -204,7 +204,10 @@ expected_host = f'unix://{Path.home()}/.colima/default/docker.sock'
 if docker_host != expected_host or not Path(docker_host.removeprefix('unix://')).is_socket():
     raise SystemExit('Docker is not the reviewed Colima socket')
 
-names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json')
+names = ('react-main.js', 'template.html', 'history-overview.html', 'api-key.html', 'pdf.py', 'corresponding-source.json',
+         'manager-session-recovery.py', 'manager-models-init.py', 'manager-api-views.py',
+         'manager-tasks.py', 'manager-log.py', 'manager-0030-workoutlog-cardio-metrics.py',
+         'manager-0031-session-recovery.py')
 for name in names:
     if not ((source_deploy or deploy_dir) / 'overrides' / f'{name}.next').is_file():
         raise SystemExit(f'missing staged override: {name}.next')
@@ -280,9 +283,31 @@ with tempfile.TemporaryDirectory(dir=deploy_dir / 'overrides', prefix='.web-roll
             compose('config', '--quiet')
         for name in names:
             shutil.copy2((source_deploy or deploy_dir) / 'overrides' / f'{name}.next', deploy_dir / 'overrides' / name)
-        compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', *services)
+        compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'web')
         compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--no-input')
         wait_healthy(container_id('web'))
+        # Prove the new schema, imports and beat configuration in every writer image.
+        compose('exec', '-T', 'web', 'python3', 'manage.py', 'migrate', '--check')
+        compose('up', '-d', '--no-build', '--no-deps', '--force-recreate', 'celery_worker', 'celery_beat')
+        recovery_proof = (
+            'from django.conf import settings; from celery import current_app; '
+            'from wger.manager.models import WorkoutSessionRecovery; '
+            'from wger.manager.tasks import purge_session_recoveries; '
+            'from django.db import connection; '
+            'from django.db.migrations.loader import MigrationLoader; '
+            'loader = MigrationLoader(connection); '
+            'assert ("manager", "0030_workoutlog_cardio_metrics") in loader.graph.forwards_plan(("manager", "0031_workoutsessionrecovery")); '
+            'assert {("manager", "0030_workoutlog_cardio_metrics"), ("manager", "0031_workoutsessionrecovery")} <= set(loader.applied_migrations); '
+            'assert WorkoutSessionRecovery.objects.count() >= 0; '
+            'assert purge_session_recoveries.name == "wger.manager.tasks.purge_session_recoveries"; '
+            'assert purge_session_recoveries.name in current_app.tasks; '
+            'assert settings.CELERY_BEAT_SCHEDULE["purge-session-recoveries"]["task"] == purge_session_recoveries.name; '
+            'print("WGER_RECOVERY_READY")'
+        )
+        for service in services:
+            output = compose('exec', '-T', service, 'python3', 'manage.py', 'shell', '-c', recovery_proof, capture=True)
+            if output.splitlines()[-1:] != ['WGER_RECOVERY_READY']:
+                raise RuntimeError('recovery task/schema unavailable: ' + service)
         logical_bundle = 'node/@wger-project/react-components/build/main.js'
         manifest_lookup = f'from django.contrib.staticfiles.storage import staticfiles_storage; print(staticfiles_storage.stored_name({logical_bundle!r}))'
         served_name = compose('exec', '-T', 'web', 'python3', 'manage.py', 'shell', '-c', manifest_lookup, capture=True).splitlines()[-1]

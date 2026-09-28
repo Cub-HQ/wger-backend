@@ -26,6 +26,13 @@ services:
       - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
       - ./overrides/manager-urls.py:/home/wger/src/wger/manager/urls.py:ro
       - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
+      - &recovery-model ./overrides/manager-session-recovery.py:/home/wger/src/wger/manager/models/session_recovery.py:ro
+      - &recovery-exports ./overrides/manager-models-init.py:/home/wger/src/wger/manager/models/__init__.py:ro
+      - &recovery-api ./overrides/manager-api-views.py:/home/wger/src/wger/manager/api/views.py:ro
+      - &recovery-tasks ./overrides/manager-tasks.py:/home/wger/src/wger/manager/tasks.py:ro
+      - &recovery-log ./overrides/manager-log.py:/home/wger/src/wger/manager/models/log.py:ro
+      - &recovery-cardio-migration ./overrides/manager-0030-workoutlog-cardio-metrics.py:/home/wger/src/wger/manager/migrations/0030_workoutlog_cardio_metrics.py:ro
+      - &recovery-migration ./overrides/manager-0031-session-recovery.py:/home/wger/src/wger/manager/migrations/0031_workoutsessionrecovery.py:ro
     expose: ['8000']
     stop_grace_period: 60s
     healthcheck:
@@ -90,14 +97,34 @@ services:
     command: /start-worker
     depends_on:
       web: {condition: service_healthy}
-    volumes: [media:/home/wger/media]
+    volumes:
+      - media:/home/wger/media
+      - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
+      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
+      - *recovery-model
+      - *recovery-exports
+      - *recovery-api
+      - *recovery-tasks
+      - *recovery-log
+      - *recovery-cardio-migration
+      - *recovery-migration
   celery_beat:
     <<: *wger
     mem_limit: 192m
     cpus: 0.25
     command: /start-beat
     depends_on: [celery_worker]
-    volumes: [beat:/home/wger/beat]
+    volumes:
+      - beat:/home/wger/beat
+      - ./overrides/settings-main.py:/home/wger/src/settings/main.py:ro
+      - ./formats/en_AU/formats.py:/home/wger/src/wger/formats/en_AU/formats.py:ro
+      - *recovery-model
+      - *recovery-exports
+      - *recovery-api
+      - *recovery-tasks
+      - *recovery-log
+      - *recovery-cardio-migration
+      - *recovery-migration
 volumes:
   database: {}
   redis: {}
