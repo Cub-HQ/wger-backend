@@ -83,7 +83,12 @@ class PreflightTest(unittest.TestCase):
                 restored['protected']['manager_workoutsession']['columns'].pop('date')
             if fault == 'added-column':
                 restored['protected']['manager_workoutlog']['columns']['cardio'] = 'f' * 64
-            (home / 'receipt.json').write_text(json.dumps(candidate_receipt()))
+            staged = home / 'wger-product-candidate'
+            (staged / 'overrides').mkdir(parents=True)
+            (staged / 'compose.yaml').write_text('services: {}')
+            (staged / 'overrides/pdf.py.next').write_text('candidate pdf')
+            receipt_file = staged / 'overrides/backend-image.json.next'
+            receipt_file.write_text(json.dumps(candidate_receipt()))
             project = 'wger-restore-1234567890'
             calls = []
             residue = False
@@ -117,7 +122,7 @@ class PreflightTest(unittest.TestCase):
                         (snapshot / 'database.dump').write_bytes(b'corrupt')
                     return json.dumps({'snapshot': str(snapshot)}).encode()
                 if script == 'restore-drill.py':
-                    self.assertEqual(args[3:], ['--candidate-image', CANDIDATE])
+                    self.assertEqual(args[3:], ['--candidate-image', CANDIDATE, '--candidate-deploy', str(staged.resolve())])
                     work = destination / project
                     work.mkdir()
                     image_source = 'snapshot' if fault == 'snapshot-image' else 'candidate'
@@ -126,8 +131,14 @@ class PreflightTest(unittest.TestCase):
                                'volumes': [project + '-' + n for n in ('db', 'media', 'static')],
                                'networks': [project, project + '-front'],
                                'image_source': image_source, 'web_image': BACKUP if image_source == 'snapshot' else CANDIDATE,
-                               'snapshot_web_image': BACKUP,
+                               'snapshot_web_image': BACKUP, 'candidate_deploy': str(staged.resolve()),
+                               'candidate_web_mounts': [{'source': 'overrides/pdf.py', 'candidate_file': 'overrides/pdf.py.next',
+                                                         'target': '/home/wger/src/wger/utils/pdf.py',
+                                                         'sha256': hashlib.sha256(b'snapshot pdf' if fault == 'snapshot-binds'
+                                                                                  else b'candidate pdf').hexdigest()}],
                                'state': 'restored-awaiting-independent-application-check'}
+                    if fault == 'no-binds':
+                        receipt.pop('candidate_web_mounts')
                     (work / 'receipt.json').write_text(json.dumps(receipt))
                     residue = True
                     if fault == 'restore':
@@ -162,7 +173,7 @@ class PreflightTest(unittest.TestCase):
                                  return_value={'version': '2.7'}):
                 if fault and fault not in ('reload', 'added-column'):
                     with self.assertRaises((RuntimeError, ValueError)) as caught:
-                        gate.run(source, deploy, env, candidate_receipt=home / 'receipt.json', candidate_commit=COMMIT)
+                        gate.run(source, deploy, env, candidate_receipt=receipt_file, candidate_commit=COMMIT)
                     if fault == 'daemon':
                         self.assertIn('Docker daemon', str(caught.exception))
                     if fault == 'recoveries':
@@ -174,16 +185,21 @@ class PreflightTest(unittest.TestCase):
                         self.assertEqual(str(caught.exception), 'restore did not run the candidate image')
                     if fault == 'moved-tag':
                         self.assertEqual(str(caught.exception), 'candidate image identity does not match receipt')
+                    if fault in ('snapshot-binds', 'no-binds'):
+                        self.assertEqual(str(caught.exception), 'restore did not run the candidate compose binds')
                     category = {'bundle': 'bundle_sha256', 'migration': 'migrations', 'live': 'images'}.get(fault)
                     if category:
                         self.assertEqual(str(caught.exception), 'live release identity changed during backup/restore preflight: ' + category)
                 else:
-                    result = gate.run(source, deploy, env, candidate_receipt=home / 'receipt.json', candidate_commit=COMMIT)
+                    result = gate.run(source, deploy, env, candidate_receipt=receipt_file, candidate_commit=COMMIT)
                     self.assertTrue(result['live_baseline_unchanged'])
                     self.assertTrue(result['disposable_resources_removed'])
                     self.assertTrue(result['protected_rows_unchanged'])
                     self.assertEqual(result['counts'], counts)
-                    self.assertEqual(result['candidate'], {'commit': COMMIT, 'image_id': CANDIDATE, 'tag': 'fitness-wger-backend:' + COMMIT})
+                    self.assertEqual(result['candidate'], {'commit': COMMIT, 'image_id': CANDIDATE, 'tag': 'fitness-wger-backend:' + COMMIT,
+                                                           'deploy': str(staged.resolve())})
+                    self.assertEqual([mount['sha256'] for mount in result['candidate_web_mounts']],
+                                     [hashlib.sha256(b'candidate pdf').hexdigest()])
                     self.assertEqual({record['image'] for record in result['rollback_images'].values()},
                                      {'web', 'powersync', 'celery_worker', 'celery_beat'})
                 self.assertEqual(baseline.call_count, 0 if fault in ('daemon', 'moved-tag') else 2)
@@ -198,7 +214,7 @@ class PreflightTest(unittest.TestCase):
     def test_success_and_fail_closed_proof_matrix(self):
         for fault in (None, 'reload', 'bundle', 'migration', 'checksum', 'counts', 'recoveries', 'schema', 'pending-migration',
                       'media', 'http', 'restore', 'live', 'residue', 'cleanup', 'daemon', 'protected-value',
-                      'protected-column', 'added-column', 'snapshot-image', 'moved-tag'):
+                      'protected-column', 'added-column', 'snapshot-image', 'moved-tag', 'snapshot-binds', 'no-binds'):
             with self.subTest(fault=fault):
                 self.exercise(fault)
 
@@ -222,7 +238,9 @@ class PreflightTest(unittest.TestCase):
         }
         for name, (receipt, records, cause) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / 'backend-image.json.next'
+                path = Path(tmp) / 'overrides/backend-image.json.next'
+                path.parent.mkdir()
+                (path.parent.parent / 'compose.yaml').write_text('services: {}')
                 path.write_text(receipt if isinstance(receipt, str) else json.dumps(receipt))
 
                 def command(args, env):
@@ -233,11 +251,17 @@ class PreflightTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, cause):
                         gate._candidate(['docker'], {}, path, COMMIT)
         with tempfile.TemporaryDirectory() as tmp:
+            absent = Path(tmp) / 'overrides/backend-image.json.next'
             for commit in ('0812ca39', COMMIT.upper(), None):
                 with self.subTest(commit=commit), self.assertRaisesRegex(RuntimeError, 'full lowercase git sha'):
-                    gate._candidate(['docker'], {}, Path(tmp) / 'absent', commit)
+                    gate._candidate(['docker'], {}, absent, commit)
+            with self.assertRaisesRegex(RuntimeError, 'no compose.yaml'):
+                gate._candidate(['docker'], {}, absent, COMMIT)
+            (Path(tmp) / 'compose.yaml').write_text('services: {}')
             with self.assertRaisesRegex(RuntimeError, 'unreadable'):
-                gate._candidate(['docker'], {}, Path(tmp) / 'absent', COMMIT)
+                gate._candidate(['docker'], {}, absent, COMMIT)
+            with self.assertRaisesRegex(RuntimeError, 'must be <candidate>/overrides'):
+                gate._candidate(['docker'], {}, Path(tmp) / 'backend-image.json.next', COMMIT)
 
     def test_invalid_endpoint_refuses_before_backup(self):
         for endpoint, cause in (('', 'Docker endpoint'), ('tcp://localhost:2375', 'Docker endpoint'),
