@@ -75,3 +75,43 @@ class EnduranceEntry(models.Model):
 
     def get_owner_object(self):
         return self
+
+
+class IntervalsEventLink(models.Model):
+    """Push ledger: one wger planned gym occurrence written to Intervals.
+
+    external_id is `wger-gym:{routine_id}:{date}` (outbound.external_id). Only
+    events with an active row here are ever updated or deleted remotely, and
+    only while the remote id matches intervals_event_id. A row with no
+    intervals_event_id is pending: saved just before its POST. Rows outlive
+    their routine/day (SET_NULL) so a removed routine's event can still be
+    deleted. `deleted` rows are history; one is reactivated only by a previewed
+    `adopt` of an identical remote event.
+    """
+
+    id = models.UUIDField(default=uuid7, primary_key=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    external_id = models.CharField(max_length=64)
+    routine = models.ForeignKey('manager.Routine', null=True, on_delete=models.SET_NULL)
+    day = models.ForeignKey('manager.Day', null=True, on_delete=models.SET_NULL)
+    date = models.DateField()
+    intervals_event_id = models.BigIntegerField(null=True)
+    pushed_hash = models.CharField(max_length=64)
+    state = models.CharField(
+        max_length=7,
+        choices=[('active', 'active'), ('deleted', 'deleted')],
+        default='active',
+    )
+    pushed_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['date', 'external_id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'external_id'],
+                name='intervals_event_link_identity',
+            ),
+        ]
+
+    def get_owner_object(self):
+        return self

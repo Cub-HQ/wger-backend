@@ -12,8 +12,9 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 
-"""GET-only Intervals.icu client for the inbound mirror. Personal API key,
-HTTP Basic `API_KEY:<key>`. Error messages never contain the key."""
+"""Intervals.icu client. Personal API key, HTTP Basic `API_KEY:<key>`. Event
+writes are single calls, each followed by a GET readback. Error messages never
+contain the key."""
 
 # Third Party
 import requests
@@ -31,12 +32,14 @@ class RateLimited(IntervalsError):
     pass
 
 
-def _get(api_key, path, params=None):
+def _request(method, api_key, path, params=None, body=None, parse=True):
     error = None
     try:
-        response = requests.get(
+        response = requests.request(
+            method,
             f'{BASE_URL}/{path}',
             params=params,
+            json=body,
             auth=('API_KEY', api_key),
             timeout=TIMEOUT_S,
         )
@@ -53,24 +56,56 @@ def _get(api_key, path, params=None):
             error = IntervalsError(f'HTTP {response.status_code}, API key rejected')
         elif response.status_code != 200:
             error = IntervalsError(f'HTTP {response.status_code}')
+        elif not parse:
+            return None
         else:
             try:
                 return response.json()
             except ValueError:
                 error = IntervalsError('response is not JSON')
-    error.args = (f'GET {path}: {error}'.replace(api_key, '[redacted]'),)
+    error.args = (f'{method} {path}: {error}'.replace(api_key, '[redacted]'),)
     raise error
 
 
-def fetch_window(api_key, athlete_id, oldest, newest):
+def _get(api_key, path, params=None):
+    return _request('GET', api_key, path, params)
+
+
+def get_event(api_key, event_id):
+    event = _get(api_key, f'athlete/0/events/{event_id}')
+    if not isinstance(event, dict) or event.get('id') is None:
+        raise IntervalsError(f'GET athlete/0/events/{event_id}: expected an event')
+    return event
+
+
+def create_event(api_key, payload):
+    """POST one event, then return what Intervals actually stored (readback)."""
+    created = _request('POST', api_key, 'athlete/0/events', {'upsertOnUid': 'false'}, payload)
+    if not isinstance(created, dict) or created.get('id') is None:
+        raise IntervalsError('POST athlete/0/events: no event id in response')
+    return get_event(api_key, created['id'])
+
+
+def update_event(api_key, event_id, payload):
+    _request('PUT', api_key, f'athlete/0/events/{event_id}', body=payload)
+    return get_event(api_key, event_id)
+
+
+def delete_event(api_key, event_id):
+    _request('DELETE', api_key, f'athlete/0/events/{event_id}', parse=False)
+
+
+def fetch_window(api_key, athlete_id, oldest, newest, need_write=False):
     """Bind the key to `athlete_id`, then return (activities, events) for the
     inclusive local-date window. Refuses before reading data if the key belongs
-    to another athlete."""
+    to another athlete, or lacks WRITE permission when `need_write`."""
     if not api_key or not athlete_id:
         raise IntervalsError('INTERVALS_API_KEY and INTERVALS_ATHLETE_ID must be set')
     athlete = _get(api_key, 'athlete/0')
     if not isinstance(athlete, dict) or str(athlete.get('id')) != str(athlete_id):
         raise IntervalsError('API key belongs to a different athlete than INTERVALS_ATHLETE_ID')
+    if need_write and athlete.get('icu_permission') != 'WRITE':
+        raise IntervalsError('API key has no WRITE permission on this athlete')
 
     # Activities take a local date-time; end of day keeps `newest` inclusive.
     activities = _get(

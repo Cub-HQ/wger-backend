@@ -12,7 +12,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 
-"""intervals-sync command and GET-only client. requests is mocked; no network."""
+"""intervals-sync command and the client's read path. requests is mocked; no network."""
 
 # Standard Library
 import io
@@ -50,13 +50,18 @@ def response(body, status=200, headers=None):
 
 
 def intervals(athlete=None, activities=None, events=None):
-    """A fake requests.get serving one athlete window."""
+    """A fake requests.request serving one athlete window (GET only)."""
     served = {
         'athlete/0': response(athlete or {'id': ATHLETE}),
         'athlete/0/activities': response([ride()] if activities is None else activities),
         'athlete/0/events': response([event()] if events is None else events),
     }
-    return mock.Mock(side_effect=lambda url, **kw: served[url.split('/api/v1/')[1]])
+
+    def serve(method, url, **kw):
+        assert method == 'GET', method
+        return served[url.split('/api/v1/')[1]]
+
+    return mock.Mock(side_effect=serve)
 
 
 @CONFIGURED
@@ -71,7 +76,7 @@ class IntervalsSyncCommandTest(WgerTestCase):
 
     def run_command(self, get, *extra):
         out = io.StringIO()
-        with mock.patch('wger.intervals.client.requests.get', get):
+        with mock.patch('wger.intervals.client.requests.request', get):
             call_command(
                 'intervals-sync', '--oldest', OLDEST, '--newest', NEWEST, *extra, stdout=out
             )
@@ -85,7 +90,7 @@ class IntervalsSyncCommandTest(WgerTestCase):
         self.assertEqual(EnduranceEntry.objects.count(), 0)
         self.assertEqual(report['mode'], 'preview (no writes)')
         self.assertEqual([r['intervals_id'] for r in report['create']], ['i900001', '5001'])
-        calls = [(c.args[0], c.kwargs) for c in get.call_args_list]
+        calls = [(c.args[1], c.kwargs) for c in get.call_args_list]
         self.assertEqual(
             [url.rsplit('/v1/', 1)[1] for url, _ in calls],
             ['athlete/0', 'athlete/0/activities', 'athlete/0/events'],
@@ -123,7 +128,7 @@ class IntervalsSyncCommandTest(WgerTestCase):
         get = intervals()
         for oldest, newest in (('2040-06-26', '2040-06-20'), ('26/06/2040', '2040-06-26')):
             with self.subTest(oldest=oldest), self.assertRaises(CommandError):
-                with mock.patch('wger.intervals.client.requests.get', get):
+                with mock.patch('wger.intervals.client.requests.request', get):
                     call_command('intervals-sync', '--oldest', oldest, '--newest', newest)
         with (
             override_settings(INTERVALS_API_KEY=''),
