@@ -70,6 +70,7 @@ pip install wger-api-client
 Streaks, calendar days and trophies are now calculated in your own timezone. The apps report it automatically, until they have, or for accounts that only ever use scripts, the server's timezone is used like before.
 
 ### Others
+* New read-only `GET /api/v2/workoutsession/integrity/` returns counts and SHA-256 digests of your own workout sessions and logs from one database snapshot, so a tool can check that the history is unchanged without downloading every page. The encoding (`wger-history-integrity-v1`) is described in `wger/manager/history_integrity.py`; its digests are not comparable to hashes computed by other tools with different rules.
 * Reworked internal structure for workout sessions. This now allows sessions to span midnight, and to log more than one session per day, e.g. morning  cardio and evening gym.
 * New exercise names are checked against the existing ones during submission. A name too similar to an existing exercise is rejected with an error
 * Improved openAPI spec. The spec now properly describes the different parts of the API and can be used to generate clients.

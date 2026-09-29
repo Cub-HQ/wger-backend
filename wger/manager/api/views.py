@@ -40,7 +40,10 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
 # wger
-from wger.manager import spreadsheet
+from wger.manager import (
+    history_integrity,
+    spreadsheet,
+)
 from wger.manager.api.consts import BASE_CONFIG_FILTER_FIELDS
 from wger.manager.api.filtersets import (
     WorkoutLogFilterSet,
@@ -444,6 +447,15 @@ class WorkoutSessionViewSet(WgerOwnerObjectModelViewSet):
         except (RecoveryValidationError, ValueError):
             raise RecoveryNotFound()
         return Response(self.get_serializer(session).data)
+
+    @action(detail=False, methods=['get'], url_path='integrity')
+    def integrity(self, request):
+        """
+        Counts and digests of the caller's own sessions and logs; see history_integrity
+        """
+        response = Response(history_integrity.fingerprint(request.user.pk))
+        response['Cache-Control'] = 'no-store'
+        return response
 
 
     def get_queryset(self):
