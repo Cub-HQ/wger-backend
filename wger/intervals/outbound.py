@@ -36,8 +36,19 @@ def external_id(routine_id, date):
     return f'{ECHO_PREFIX}{routine_id}:{date.isoformat()}'
 
 
+def _norm(value):
+    """Compare text the way Intervals may store it: LF line ends, no trailing blanks."""
+    if not isinstance(value, str):
+        return value
+    return '\n'.join(line.rstrip() for line in value.replace('\r\n', '\n').split('\n')).strip()
+
+
+def differing_fields(a, b):
+    return [f for f in PAYLOAD_FIELDS if _norm(a.get(f)) != _norm(b.get(f))]
+
+
 def payload_hash(payload):
-    canonical = {f: payload.get(f) for f in PAYLOAD_FIELDS}
+    canonical = {f: _norm(payload.get(f)) for f in PAYLOAD_FIELDS}
     text = json.dumps(canonical, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -54,8 +65,10 @@ def _prescription(slots, exercise_names):
     return lines
 
 
-def desired_events(occurrences, oldest, newest, exercise_names, site_url):
+def desired_events(occurrences, oldest, newest, exercise_names, wger_url):
     """Intervals payloads for each training occurrence in the window.
+
+    wger_url: site root plus language prefix, e.g. https://gym.example/en-au.
 
     occurrences: (routine, WorkoutDayData) pairs, e.g. from routine.date_sequence.
     Rest days and fit-in-week placeholders are skipped, as in manager/views/ical.py.
@@ -71,8 +84,12 @@ def desired_events(occurrences, oldest, newest, exercise_names, site_url):
         if key in desired:
             raise PlanError(f'two training days for routine {routine.id} on {occurrence.date}')
         lines = _prescription(occurrence.slots_display_mode, exercise_names)
-        # Best existing exact target (OPEN-QUESTIONS U6); no per-date wger route yet.
-        lines += ['', f'Open in wger: {site_url.rstrip("/")}/en/routine/{routine.id}/view']
+        # Exact read-only view of this planned occurrence (OPEN-QUESTIONS U6).
+        lines += [
+            '',
+            f'Open in wger: {wger_url.rstrip("/")}/routine/{routine.id}/view'
+            f'?day={day.id}&date={occurrence.date.isoformat()}',
+        ]
         desired[key] = {
             'category': 'WORKOUT',
             'type': GYM_SPORT,
@@ -91,6 +108,8 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
     """Diff desired payloads against the ledger and fetched remote events.
 
     links: dicts with external_id, intervals_event_id, pushed_hash, date, state.
+    A link with no intervals_event_id is pending: saved just before its POST, so
+    a POST that landed without its ledger save is adopted, never re-posted.
     Returns {action: [items]} for create, update, adopt, conflict, recreate,
     delete, forget, unchanged, plus counts of remote events we never touch.
     """
@@ -144,31 +163,56 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
             result['conflict'].append({'external_id': key, 'reason': 'several remote events'})
             continue
         remote_hash = payload_hash(remote) if remote else None
+        pending = link and link['intervals_event_id'] is None
+        moved = (
+            remote and link and not pending and str(remote['id']) != str(link['intervals_event_id'])
+        )
 
-        if want and not link:
+        if want and (not link or pending):
             if remote is None:
                 result['create'].append({'external_id': key, 'payload': want})
-            elif remote_hash == payload_hash(want):
-                # Crash after POST, before the ledger row was saved.
+            elif pending or remote_hash == payload_hash(want):
+                # Our POST landed but its ledger save did not.
                 result['adopt'].append({'external_id': key, 'intervals_event_id': remote['id']})
             else:
                 result['conflict'].append({'external_id': key, 'reason': 'unlinked remote differs'})
         elif want and link:
             if remote is None:
                 result['recreate'].append({'external_id': key, 'payload': want})
+            elif moved:
+                result['conflict'].append({'external_id': key, 'reason': 'not the ledger event'})
+            elif remote_hash == payload_hash(want):
+                if remote_hash != link['pushed_hash']:
+                    # Our PUT landed but its ledger save did not: record only.
+                    result['adopt'].append({'external_id': key, 'intervals_event_id': remote['id']})
+                else:
+                    result['unchanged'].append({'external_id': key})
             elif remote_hash != link['pushed_hash'] and not overwrite:
                 result['conflict'].append({'external_id': key, 'reason': 'edited in Intervals'})
-            elif remote_hash == payload_hash(want):
-                result['unchanged'].append({'external_id': key})
             else:
                 result['update'].append(
-                    {'external_id': key, 'intervals_event_id': remote['id'], 'payload': want}
+                    {
+                        'external_id': key,
+                        'intervals_event_id': remote['id'],
+                        'remote_hash': remote_hash,
+                        'payload': want,
+                    }
                 )
         elif link:
             if remote is None:
                 result['forget'].append({'external_id': key})
+            elif pending or moved:
+                result['conflict'].append({'external_id': key, 'reason': 'not the ledger event'})
+            elif remote_hash != link['pushed_hash'] and not overwrite:
+                result['conflict'].append({'external_id': key, 'reason': 'edited in Intervals'})
             else:
-                result['delete'].append({'external_id': key, 'intervals_event_id': remote['id']})
+                result['delete'].append(
+                    {
+                        'external_id': key,
+                        'intervals_event_id': remote['id'],
+                        'remote_hash': remote_hash,
+                    }
+                )
         # else: our prefix but no ledger row and not desired: never touched.
 
     result['skipped'] = {

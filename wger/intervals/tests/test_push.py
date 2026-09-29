@@ -17,18 +17,24 @@
 # Standard Library
 import io
 import json
+import re
 from unittest import mock
 
 # Django
+from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import OperationalError
+from django.test import override_settings
 
 # wger
 from wger.core.tests.base_testcase import WgerTestCase
+from wger.intervals import push
 from wger.intervals.models import IntervalsEventLink
+from wger.intervals.planning import PlanError
 from wger.intervals.tests.test_command import CONFIGURED, KEY, response
 from wger.intervals.tests.test_planning import ATHLETE
-from wger.manager.models import Routine, WorkoutLog, WorkoutSession
+from wger.manager.models import Day, Routine, WorkoutLog, WorkoutSession
 
 
 # Routine 1 (admin, fixture) runs 2024-03-01..2024-06-01 with three training days.
@@ -119,8 +125,12 @@ class IntervalsPushGymTest(WgerTestCase):
         self.assertTrue(created)
         self.assertTrue(all(c['external_id'].startswith('wger-gym:1:') for c in created))
         first = created[0]
-        self.assertIn('Open in wger: http://localhost:8000/en/routine/1/view', first['description'])
         day = first['external_id'].rsplit(':', 1)[1]
+        link = re.search(r'Open in wger: (\S+)', first['description']).group(1)
+        prefix = 'http://localhost:8000/en/routine/1/view?day='
+        self.assertTrue(link.startswith(prefix) and link.endswith(f'&date={day}'), link)
+        day_id = int(link[len(prefix) :].split('&')[0])
+        self.assertTrue(Day.objects.filter(pk=day_id, routine_id=1, is_rest=False).exists())
         self.assertEqual(first['intervals_day_link'], f'https://intervals.icu/?s={day}&e={day}')
 
         applied = self.run_command(fake, '--apply', '--plan-hash', report['plan_hash'])
@@ -152,7 +162,8 @@ class IntervalsPushGymTest(WgerTestCase):
             self.apply(fake)
 
         self.assertEqual(len(fake.events), 1)
-        self.assertEqual(IntervalsEventLink.objects.count(), 1)
+        # The failed POST left only a pending row (no event id); a rerun creates it once.
+        self.assertEqual(IntervalsEventLink.objects.exclude(intervals_event_id=None).count(), 1)
         self.assertEqual(json.loads(self.output)['failed']['action'], 'create')
 
         self.apply(fake)
@@ -167,7 +178,8 @@ class IntervalsPushGymTest(WgerTestCase):
 
         with self.assertRaises(CommandError):
             self.run_command(fake, '--apply', '--plan-hash', preview['plan_hash'])
-        self.assertEqual((len(fake.events), IntervalsEventLink.objects.count()), (1, 0))
+        self.assertEqual(len(fake.events), 1)
+        self.assertEqual(IntervalsEventLink.objects.exclude(intervals_event_id=None).count(), 0)
 
         rerun = self.run_command(fake)
         self.assertEqual(len(rerun['adopt']), 1)
@@ -225,3 +237,177 @@ class IntervalsPushGymTest(WgerTestCase):
             'state', flat=True
         )
         self.assertEqual(set(states), {'deleted'})
+
+    def rename_first_day(self):
+        day = Day.objects.filter(routine_id=1, is_rest=False).order_by('pk').first()
+        day.name = 'Renamed'
+        day.save()
+
+    def failing_ledger_save(self, nth):
+        """Patch the ledger so its nth update_or_create raises a DB error."""
+        real, calls = IntervalsEventLink.objects.update_or_create, []
+
+        def flaky(*a, **kw):
+            calls.append(1)
+            if len(calls) == nth:
+                raise OperationalError('connection lost')
+            return real(*a, **kw)
+
+        return mock.patch.object(IntervalsEventLink.objects, 'update_or_create', flaky)
+
+    def test_db_error_after_remote_writes_keeps_earlier_ledger_rows_and_rerun_adopts(self):
+        fake = FakeIntervals()
+        plan_hash = self.run_command(fake)['plan_hash']
+
+        # Save 1-2: pending + record of the 1st POST; save 4 records the 2nd POST.
+        with self.failing_ledger_save(4), self.assertRaisesMessage(CommandError, 'connection lost'):
+            self.run_command(fake, '--apply', '--plan-hash', plan_hash)
+
+        self.assertEqual(len(fake.events), 2)
+        self.assertEqual(IntervalsEventLink.objects.exclude(intervals_event_id=None).count(), 1)
+        rerun = self.run_command(fake)
+        self.assertEqual(len(rerun['adopt']), 1)
+        self.run_command(fake, '--apply', '--plan-hash', rerun['plan_hash'])
+        ids = [e['external_id'] for e in fake.events.values()]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(self.apply(fake)['unchanged'], len(ids))
+
+    def test_lost_update_ledger_is_repaired_by_adopt_not_a_permanent_conflict(self):
+        fake = FakeIntervals()
+        self.apply(fake)
+        self.rename_first_day()
+        plan_hash = self.run_command(fake)['plan_hash']
+
+        with self.failing_ledger_save(1), self.assertRaises(CommandError):
+            self.run_command(fake, '--apply', '--plan-hash', plan_hash)
+
+        rerun = self.run_command(fake)
+        self.assertEqual((rerun['conflict'], len(rerun['adopt'])), ([], 1))
+        writes = len(fake.writes())
+        self.run_command(fake, '--apply', '--plan-hash', rerun['plan_hash'])
+        # Adopt only records; the one PUT per remaining update is all that is written.
+        self.assertEqual(len(fake.writes()) - writes, len(rerun['update']))
+        again = self.run_command(fake)
+        self.assertEqual(again['adopt'] + again['conflict'] + again['update'], [])
+
+    def test_readback_differing_on_any_field_stops_and_never_loops(self):
+        class Normalizing(FakeIntervals):
+            def __call__(self, method, url, params=None, json=None, **kw):
+                if method in ('POST', 'PUT') and json:
+                    json = {**json, 'description': json['description'][:10]}
+                return super().__call__(method, url, params=params, json=json, **kw)
+
+        fake = Normalizing()
+
+        with self.assertRaisesMessage(CommandError, 'stored with different description'):
+            self.apply(fake)
+
+        self.assertEqual(len(fake.events), 1)
+        again = self.run_command(fake)
+        self.assertEqual([c['reason'] for c in again['conflict']], ['edited in Intervals'])
+        self.assertEqual(again['update'] + again['adopt'], [])
+
+    def test_whitespace_only_normalisation_is_not_a_mismatch(self):
+        class Trimming(FakeIntervals):
+            def __call__(self, method, url, params=None, json=None, **kw):
+                if method in ('POST', 'PUT') and json:
+                    json = {**json, 'description': json['description'].replace('\n', '\r\n')}
+                return super().__call__(method, url, params=params, json=json, **kw)
+
+        fake = Trimming()
+        applied = self.apply(fake)
+
+        self.assertIsNone(applied['failed'])
+        self.assertEqual(self.apply(fake)['unchanged'], len(applied['done']))
+
+    def test_delete_refuses_a_different_event_carrying_our_external_id(self):
+        fake = FakeIntervals()
+        self.apply(fake)
+        link = IntervalsEventLink.objects.order_by('-date').first()
+        ours = fake.events.pop(link.intervals_event_id)
+        fake.events[7] = {**ours, 'id': 7, 'name': 'Josh own note', 'description': 'mine'}
+        self.shorten_routine('2024-03-05')
+
+        report = self.apply(fake)
+
+        self.assertIn(
+            {'external_id': link.external_id, 'reason': 'not the ledger event'},
+            [{k: c[k] for k in ('external_id', 'reason')} for c in report['conflict']],
+        )
+        self.assertIn(7, fake.events)
+
+    def test_delete_refuses_an_event_edited_in_intervals_unless_overwrite(self):
+        fake = FakeIntervals()
+        self.apply(fake)
+        link = IntervalsEventLink.objects.order_by('-date').first()
+        fake.events[link.intervals_event_id]['description'] = 'my notes from the session'
+        self.shorten_routine('2024-03-05')
+
+        report = self.apply(fake)
+
+        self.assertEqual([c['external_id'] for c in report['conflict']], [link.external_id])
+        self.assertIn(link.intervals_event_id, fake.events)
+        self.apply(fake, '--overwrite-mirror')
+        self.assertNotIn(link.intervals_event_id, fake.events)
+
+    def test_edit_made_after_the_fetch_is_not_overwritten_or_deleted(self):
+        class ConcurrentEdit(FakeIntervals):
+            armed = False
+
+            def __call__(self, method, url, params=None, json=None, **kw):
+                if (
+                    self.armed
+                    and method == 'GET'
+                    and url.split('/')[-1].isdigit()
+                    and 'events/' in url
+                ):
+                    self.events[int(url.rsplit('/', 1)[1])]['description'] = 'edited now'
+                return super().__call__(method, url, params=params, json=json, **kw)
+
+        fake = ConcurrentEdit()
+        self.apply(fake)
+        self.rename_first_day()
+        plan_hash = self.run_command(fake)['plan_hash']
+        writes = len(fake.writes())
+        fake.armed = True
+
+        with self.assertRaisesMessage(CommandError, 'changed in Intervals during this run'):
+            self.run_command(fake, '--apply', '--plan-hash', plan_hash)
+
+        self.assertEqual(len(fake.writes()), writes)
+        self.assertIn('edited now', [e['description'] for e in fake.events.values()])
+
+    def test_normalised_create_plus_db_error_stays_owned_not_orphaned(self):
+        class Normalizing(FakeIntervals):
+            def __call__(self, method, url, params=None, json=None, **kw):
+                if method in ('POST', 'PUT') and json:
+                    json = {**json, 'name': json['name'].upper()}
+                return super().__call__(method, url, params=params, json=json, **kw)
+
+        fake = Normalizing()
+        plan_hash = self.run_command(fake)['plan_hash']
+        with self.failing_ledger_save(2), self.assertRaises(CommandError):
+            self.run_command(fake, '--apply', '--plan-hash', plan_hash)
+        [event] = fake.events.values()
+
+        rerun = self.run_command(fake)
+
+        self.assertEqual([a['external_id'] for a in rerun['adopt']], [event['external_id']])
+        self.assertNotIn(event['external_id'], [c['external_id'] for c in rerun['create']])
+
+    def test_service_entrypoints_bind_the_user_to_the_configured_athlete(self):
+        fake, other = FakeIntervals(), User.objects.get(username='test')
+        with mock.patch('wger.intervals.client.requests.request', fake):
+            plan_hash = push.preview(User.objects.get(username='admin'), OLDEST, NEWEST)[
+                'plan_hash'
+            ]
+            for call in (
+                lambda: push.preview(other, OLDEST, NEWEST),
+                lambda: push.apply(other, OLDEST, NEWEST, plan_hash),
+            ):
+                with self.assertRaisesMessage(PlanError, 'not the one paired'):
+                    call()
+            with override_settings(INTERVALS_WGER_USERNAME=''), self.assertRaises(PlanError):
+                push.apply(User.objects.get(username='admin'), OLDEST, NEWEST, plan_hash)
+        self.assertEqual(fake.writes(), [])
+        self.assertEqual(IntervalsEventLink.objects.count(), 0)

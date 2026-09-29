@@ -81,9 +81,12 @@ class IntervalsEventLink(models.Model):
     """Push ledger: one wger planned gym occurrence written to Intervals.
 
     external_id is `wger-gym:{routine_id}:{date}` (outbound.external_id). Only
-    events with a ledger row here are ever updated or deleted remotely. Rows
-    outlive their routine/day (SET_NULL) so a removed routine's event can still
-    be deleted. `deleted` rows are kept as history, never reused silently.
+    events with an active row here are ever updated or deleted remotely, and
+    only while the remote id matches intervals_event_id. A row with no
+    intervals_event_id is pending: saved just before its POST. Rows outlive
+    their routine/day (SET_NULL) so a removed routine's event can still be
+    deleted. `deleted` rows are history; one is reactivated only by a previewed
+    `adopt` of an identical remote event.
     """
 
     id = models.UUIDField(default=uuid7, primary_key=True)

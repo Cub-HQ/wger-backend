@@ -71,10 +71,10 @@ def _get(api_key, path, params=None):
     return _request('GET', api_key, path, params)
 
 
-def _event(api_key, event_id):
+def get_event(api_key, event_id):
     event = _get(api_key, f'athlete/0/events/{event_id}')
-    if not isinstance(event, dict):
-        raise IntervalsError(f'GET athlete/0/events/{event_id}: expected an object')
+    if not isinstance(event, dict) or event.get('id') is None:
+        raise IntervalsError(f'GET athlete/0/events/{event_id}: expected an event')
     return event
 
 
@@ -83,18 +83,15 @@ def create_event(api_key, payload):
     created = _request('POST', api_key, 'athlete/0/events', {'upsertOnUid': 'false'}, payload)
     if not isinstance(created, dict) or created.get('id') is None:
         raise IntervalsError('POST athlete/0/events: no event id in response')
-    return _event(api_key, created['id'])
+    return get_event(api_key, created['id'])
 
 
 def update_event(api_key, event_id, payload):
     _request('PUT', api_key, f'athlete/0/events/{event_id}', body=payload)
-    return _event(api_key, event_id)
+    return get_event(api_key, event_id)
 
 
-def delete_event(api_key, event_id, external_id):
-    """Delete only if the event still carries our external_id right now."""
-    if _event(api_key, event_id).get('external_id') != external_id:
-        raise IntervalsError(f'event {event_id} no longer carries {external_id}; not deleted')
+def delete_event(api_key, event_id):
     _request('DELETE', api_key, f'athlete/0/events/{event_id}', parse=False)
 
 

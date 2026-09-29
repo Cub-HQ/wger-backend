@@ -51,8 +51,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if options['apply'] and not options['plan_hash']:
             raise CommandError('--apply needs the --plan-hash from a preview with the same flags')
-        api_key = getattr(settings, 'INTERVALS_API_KEY', '')
-        athlete_id = getattr(settings, 'INTERVALS_ATHLETE_ID', '')
         try:
             oldest, newest = window(options['oldest'], options['newest'])
             user = User.objects.get(username=getattr(settings, 'INTERVALS_WGER_USERNAME', ''))
@@ -63,14 +61,10 @@ class Command(BaseCommand):
 
         flags = {'overwrite': options['overwrite_mirror'], 'recreate': options['recreate_missing']}
         try:
-            _, events = client.fetch_window(
-                api_key, athlete_id, oldest, newest, need_write=options['apply']
-            )
-            common = (athlete_id, oldest, newest, events, settings.SITE_URL)
             if options['apply']:
-                result = push.apply(user, api_key, *common, options['plan_hash'], **flags)
+                result = push.apply(user, oldest, newest, options['plan_hash'], **flags)
             else:
-                result = push.preview(user, *common, **flags)
+                result = push.preview(user, oldest, newest, **flags)
         except (client.IntervalsError, PlanError) as e:
             raise CommandError(str(e)) from None
 

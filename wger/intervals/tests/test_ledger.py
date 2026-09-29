@@ -99,9 +99,10 @@ class IntervalsEventLinkTest(WgerTestCase):
         link.refresh_from_db()
         self.assertEqual((link.routine, link.day), (None, None))
         result = self.plan({}, [remote(self.payload)])
+        [delete] = result['delete']
         self.assertEqual(
-            result['delete'],
-            [{'external_id': self.payload['external_id'], 'intervals_event_id': 900}],
+            (delete['external_id'], delete['intervals_event_id']),
+            (self.payload['external_id'], 900),
         )
 
     def test_deleted_row_is_history_and_gives_no_remote_ownership(self):

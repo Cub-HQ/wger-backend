@@ -101,7 +101,9 @@ class DesiredEventsTest(SimpleTestCase):
         self.assertTrue(
             lines[1].startswith('Bench Press: 8 ') and lines[1].endswith('(pause at bottom)')
         )
-        self.assertEqual(lines[-1], 'Open in wger: https://gym.example/en/routine/3/view')
+        self.assertEqual(
+            lines[-1], 'Open in wger: https://gym.example/routine/3/view?day=7&date=2040-06-21'
+        )
         self.assertFalse({'moving_time', 'icu_training_load'} & event.keys())
 
     def test_two_training_days_on_one_date_refuse(self):
