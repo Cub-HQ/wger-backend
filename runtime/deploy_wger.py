@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Factory-only bridge from a merged source tree to the reviewed gym release."""
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 from deploy_failure import failure_reason
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deployment/wger/patches'))
@@ -118,7 +120,17 @@ def staging_root(home):
     return resolved
 
 
-def deploy(args):
+@contextlib.contextmanager
+def span(timings, key):
+    # Records the phase even when it raises; the original exception always propagates.
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        timings[key] = round(time.monotonic() - started, 1)
+
+
+def deploy(args, timings):
     source = Path(args.source).resolve()
     check_surfaces(args.changed_file, source)
     revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
@@ -156,24 +168,30 @@ def deploy(args):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original, destination)
         # The backend image first; the default mode then stages its corresponding-source record.
-        for step in (['--backend-image'], []):
-            subprocess.run(['bash', str(candidate / 'patches/prepare-react.sh'), *step], env=env, check=True)
-        expected = json.loads((candidate / 'overrides/backend-image.json.next').read_text())['frontend']['main_js_sha256']
-        # A replayed UI revision must not downgrade independently installed proxy/sync fixes.
-        for name in ('config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml'):
-            if PREFIX + name not in args.changed_file:
-                shutil.copyfile(live / name, candidate / name)
+        prepare = ['bash', str(candidate / 'patches/prepare-react.sh')]
+        with span(timings, 'prepare_image_s'):
+            subprocess.run([*prepare, '--backend-image'], env=env, check=True)
+        with span(timings, 'prepare_overrides_s'):
+            subprocess.run(prepare, env=env, check=True)
+            expected = json.loads((candidate / 'overrides/backend-image.json.next').read_text())['frontend']['main_js_sha256']
+            # A replayed UI revision must not downgrade independently installed proxy/sync fixes.
+            for name in ('config/nginx.conf', 'config/powersync.yaml', 'config/sync_rules.yaml'):
+                if PREFIX + name not in args.changed_file:
+                    shutil.copyfile(live / name, candidate / name)
         from wger_preflight import run
         # The candidate image restore is proven against the commit prep pinned, never a live/env value.
         pinned = re.search(r'^BACKEND_COMMIT=([0-9a-f]{40})$', (candidate / 'patches/prepare-react.sh').read_text(), re.M)
         if not pinned:
             raise ValueError('DEPLOY_MISSING: prepare-react.sh does not pin BACKEND_COMMIT')
-        preflight = run(machinery, live, env, candidate_receipt=candidate / 'overrides/backend-image.json.next',
-                        candidate_commit=pinned[1])
+        # Preflight writes its backup/restore/cleanup phases into the same caller-owned dict.
+        with span(timings, 'preflight_s'):
+            preflight = run(machinery, live, env, candidate_receipt=candidate / 'overrides/backend-image.json.next',
+                            candidate_commit=pinned[1], timings=timings)
         env.update(WGER_SOURCE_DEPLOY=str(candidate), WGER_EXPECTED_SHA256=expected,
                    WGER_RELEASE_COMMIT=args.commit)
-        result = subprocess.run(['bash', str(machinery / PREFIX / 'patches/release-web.sh')],
-                                env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with span(timings, 'release_web_s'):
+            result = subprocess.run(['bash', str(machinery / PREFIX / 'patches/release-web.sh')],
+                                    env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
             raise RuntimeError('release failed: ' + result.stderr[-6000:])
         proof = json.loads(result.stdout.splitlines()[-1])
@@ -190,13 +208,18 @@ def main():
     parser.add_argument('--changed-file', action='append', default=[])
     parser.add_argument('--deploy-root', default='~/fitness-wger')
     args = parser.parse_args()
+    started = time.monotonic()
+    timings = {}
     try:
-        proof = deploy(args)
+        proof = deploy(args, timings)
     except Exception as error:
         reason = failure_reason(error)
-        print(json.dumps({'status': 'DEPLOY_MISSING', 'adapter': 'wger', 'commit': args.commit, 'reason': reason}))
+        timings['total_s'] = round(time.monotonic() - started, 1)
+        print(json.dumps({'status': 'DEPLOY_MISSING', 'adapter': 'wger', 'commit': args.commit, 'reason': reason,
+                          'timings': timings}))
         return 1
-    print(json.dumps(proof))
+    timings['total_s'] = round(time.monotonic() - started, 1)
+    print(json.dumps({**proof, 'timings': timings}))
     return 0
 
 

@@ -171,9 +171,16 @@ class PreflightTest(unittest.TestCase):
                     patch.object(gate, '_media', return_value=(b'wrong', 1) if fault == 'media' else (b'', 0)), \
                     patch.object(gate, '_application', side_effect=RuntimeError('HTTP failure') if fault == 'http' else None,
                                  return_value={'version': '2.7'}):
+                timings = {}
                 if fault and fault not in ('reload', 'added-column'):
                     with self.assertRaises((RuntimeError, ValueError)) as caught:
-                        gate.run(source, deploy, env, candidate_receipt=receipt_file, candidate_commit=COMMIT)
+                        gate.run(source, deploy, env, candidate_receipt=receipt_file, candidate_commit=COMMIT,
+                                 timings=timings)
+                    # A refusal reports only the phases it reached (cleanup always) and never swaps the error.
+                    reached = {'daemon': [], 'moved-tag': [], 'checksum': ['backup_s', 'cleanup_s'],
+                               'restore': ['backup_s', 'restore_drill_s', 'cleanup_s']}.get(
+                        fault, ['backup_s', 'restore_drill_s', 'restore_checks_s', 'cleanup_s'])
+                    self.assertEqual(list(timings), reached)
                     if fault == 'daemon':
                         self.assertIn('Docker daemon', str(caught.exception))
                     if fault == 'recoveries':
@@ -191,7 +198,11 @@ class PreflightTest(unittest.TestCase):
                     if category:
                         self.assertEqual(str(caught.exception), 'live release identity changed during backup/restore preflight: ' + category)
                 else:
-                    result = gate.run(source, deploy, env, candidate_receipt=receipt_file, candidate_commit=COMMIT)
+                    result = gate.run(source, deploy, env, candidate_receipt=receipt_file, candidate_commit=COMMIT,
+                                      timings=timings)
+                    self.assertIs(result['timings'], timings)
+                    self.assertEqual(list(timings), ['backup_s', 'restore_drill_s', 'restore_checks_s', 'cleanup_s'])
+                    self.assertTrue(all(isinstance(value, float) and value >= 0 for value in timings.values()))
                     self.assertTrue(result['live_baseline_unchanged'])
                     self.assertTrue(result['disposable_resources_removed'])
                     self.assertTrue(result['protected_rows_unchanged'])

@@ -267,8 +267,10 @@ class WgerDeployTests(unittest.TestCase):
                             patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
                             patch.object(module, 'existing_locks', return_value={}), \
                             patch.object(module.subprocess, 'run', side_effect=prepare):
+                        timings = {}
                         with self.assertRaisesRegex(RuntimeError, 'stop before backup or live release'):
-                            module.deploy(args)
+                            module.deploy(args, timings)
+                        self.assertEqual(list(timings), ['prepare_image_s'])
 
     def test_malformed_public_origin_refuses_before_preparation(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
@@ -290,9 +292,11 @@ class WgerDeployTests(unittest.TestCase):
                             patch.object(module.subprocess, 'check_output', side_effect=['a' * 40, '']), \
                             patch.object(module, 'existing_locks', return_value={}), \
                             patch.object(module.subprocess, 'run') as prepare:
+                        timings = {}
                         with self.assertRaisesRegex(ValueError, 'DEPLOY_MISSING: .*SITE_URL|DEPLOY_MISSING: WGER_PUBLIC_URL'):
-                            module.deploy(args)
+                            module.deploy(args, timings)
                         prepare.assert_not_called()
+                        self.assertEqual(timings, {})
 
     def test_escaped_cache_refuses_before_preparation(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
@@ -319,7 +323,7 @@ class WgerDeployTests(unittest.TestCase):
                     patch.object(module, 'existing_locks', return_value={}), \
                     patch.object(module.subprocess, 'run') as prepare:
                 with self.assertRaises(ValueError):
-                    module.deploy(args)
+                    module.deploy(args, {})
                 prepare.assert_not_called()
 
     def test_unsafe_cache_permissions_refuse_before_preparation(self):
@@ -346,10 +350,65 @@ class WgerDeployTests(unittest.TestCase):
                                 patch.object(module, 'existing_locks', return_value={}), \
                                 patch.object(module.subprocess, 'run') as prepare:
                             with self.assertRaisesRegex(ValueError, 'DEPLOY_MISSING: staging cache'):
-                                module.deploy(args)
+                                module.deploy(args, {})
                             prepare.assert_not_called()
             finally:
                 cache.chmod(0o700)
+
+    def test_receipts_report_reached_phase_timings_without_changing_outcome(self):
+        spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = Path(__file__).resolve().parents[2]
+        commit = 'a' * 40
+        preflight_keys = ('backup_s', 'restore_drill_s', 'restore_checks_s', 'cleanup_s')
+        for release_code in (0, 1):
+            with self.subTest(release_code=release_code), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / 'home'
+                home.mkdir(mode=0o700)
+                live = Path(directory) / 'live'
+                (live / 'config').mkdir(parents=True)
+                (live / 'config/private.env').write_text('SITE_URL=https://gym.example:8098\n')
+                for name in ('nginx.conf', 'powersync.yaml', 'sync_rules.yaml'):
+                    (live / 'config' / name).write_text(name)
+                proof = {'status': 'deployed', 'commit': commit, 'live_proof': {'normalized_sha256': 'f' * 64}}
+
+                def run(args, **kwargs):
+                    if Path(args[1]).name == 'prepare-react.sh':
+                        if args[2:] == ['--backend-image']:
+                            receipt = Path(args[1]).parents[1] / 'overrides/backend-image.json.next'
+                            receipt.write_text(json.dumps({'frontend': {'main_js_sha256': 'f' * 64}}))
+                        return subprocess.CompletedProcess(args, 0)
+                    self.assertEqual(Path(args[1]).name, 'release-web.sh')
+                    return subprocess.CompletedProcess(args, release_code, json.dumps(proof) + '\n',
+                                                       'rollback completed; release refused')
+
+                def preflight(*args, timings, **kwargs):
+                    timings.update(dict.fromkeys(preflight_keys, 0.0))
+                    return {'live_baseline_unchanged': True, 'disposable_resources_removed': True,
+                            'media_sha256': 'm' * 64, 'timings': timings}
+
+                with patch.object(module.Path, 'home', return_value=home), \
+                        patch.object(module.subprocess, 'check_output', side_effect=[commit, '']), \
+                        patch.object(module, 'existing_locks', return_value={}), \
+                        patch.object(module.subprocess, 'run', side_effect=run), \
+                        patch.dict(sys.modules, {'wger_preflight': SimpleNamespace(run=preflight)}), \
+                        patch.object(sys, 'argv', ['deploy_wger', '--source', str(source), '--commit', commit,
+                                                   '--deploy-root', str(live)]), \
+                        patch('sys.stdout', new_callable=io.StringIO) as output:
+                    self.assertEqual(module.main(), release_code)
+                receipt = json.loads(output.getvalue())
+                timings = receipt.pop('timings')
+                self.assertEqual(list(timings), ['prepare_image_s', 'prepare_overrides_s', *preflight_keys,
+                                                 'preflight_s', 'release_web_s', 'total_s'])
+                self.assertTrue(all(isinstance(value, float) and value >= 0 for value in timings.values()))
+                if release_code:
+                    self.assertEqual(receipt['status'], 'DEPLOY_MISSING')
+                    self.assertIn('release failed: rollback completed; release refused', receipt['reason'])
+                else:
+                    self.assertEqual(receipt, {**proof, 'preflight': {'live_baseline_unchanged': True,
+                                                                      'disposable_resources_removed': True,
+                                                                      'media_sha256': 'm' * 64}})
 
     def test_every_repository_gym_file_has_an_explicit_surface_class(self):
         spec = importlib.util.spec_from_file_location('deploy_wger', ADAPTER)

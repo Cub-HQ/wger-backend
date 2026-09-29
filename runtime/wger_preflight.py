@@ -216,10 +216,12 @@ def _receipt(path, snapshot):
     return receipt
 
 
-def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candidate_commit: str) -> dict:
+def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candidate_commit: str,
+        timings: dict | None = None) -> dict:
     """Return evidence only after the candidate image restored proof, owned cleanup and live parity.
 
     The snapshot's own images stay the rollback identity; the drill runs the prepared candidate.
+    ``timings`` (caller-owned, so a refusal still reports it) receives monotonic phase seconds.
     """
     source, deploy = Path(source), Path(deploy)
     env = {**os.environ, **env}
@@ -256,6 +258,16 @@ def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candi
     snapshot = None
     receipt_path = None
     evidence = {}
+    timings = {} if timings is None else timings
+    phase, started = 'backup_s', time.monotonic()
+
+    def lap(following):
+        # Close the running phase, even when it failed, and start the next. Never raises.
+        nonlocal phase, started
+        now = time.monotonic()
+        timings[phase] = round(now - started, 1)
+        phase, started = following, now
+
     try:
         output = _command([sys.executable, operations / 'backup.py', '--destination', destination], env)
         snapshot = Path(json.loads(output.splitlines()[-1])['snapshot'])
@@ -273,10 +285,12 @@ def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candi
                           'health': before['containers'][service]['state'][1]}
                 for service in ('powersync', 'web', 'celery_worker', 'celery_beat')}:
             raise RuntimeError('snapshot writer identities differ from baseline')
+        lap('restore_drill_s')
         output = _command([sys.executable, operations / 'restore-drill.py', snapshot,
                            '--candidate-image', candidate['image_id'], '--candidate-deploy', candidate['deploy']], env)
         receipt_path = Path(json.loads(output.splitlines()[-1])['receipt'])
         receipt = _receipt(receipt_path, snapshot)
+        lap('restore_checks_s')
         if receipt.get('state') != 'restored-awaiting-independent-application-check':
             raise RuntimeError('restore is incomplete')
         if receipt.get('image_source') != 'candidate' or receipt.get('web_image') != candidate['image_id']:
@@ -303,6 +317,7 @@ def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candi
                     'candidate': candidate, 'rollback_images': json.loads((snapshot / 'images.json').read_text()),
                     'candidate_web_mounts': mounts, 'protected_rows_unchanged': True}
     finally:
+        lap('cleanup_s')
         failures = []
         # A failed restore may have written its ownership receipt before exiting.
         for work in sorted(set(destination.glob('wger-restore-*')) - previous):
@@ -327,9 +342,10 @@ def run(source: Path, deploy: Path, env: dict, *, candidate_receipt: Path, candi
                 failures.append('live release identity changed during backup/restore preflight: ' + ', '.join(changed))
         except Exception:
             failures.append('live baseline comparison unavailable')
+        lap(None)
         if failures:
             raise RuntimeError('; '.join(failures))
     if receipt_path is None or json.loads(receipt_path.read_text()).get('state') != 'drill resources cleaned; original snapshots retained':
         raise RuntimeError('receipt-owned cleanup was not completed')
     return {**evidence, 'live_baseline_unchanged': True, 'disposable_resources_removed': True,
-            'retained_private_artifacts': [str(snapshot), str(receipt_path.parent)]}
+            'retained_private_artifacts': [str(snapshot), str(receipt_path.parent)], 'timings': timings}
