@@ -20,13 +20,19 @@ from django.contrib.auth.models import User
 # wger
 from wger.core.tests.base_testcase import WgerTestCase
 from wger.intervals.models import EnduranceEntry
-from wger.intervals.persistence import sync_window
+from wger.intervals.persistence import apply, preview
 from wger.intervals.planning import PlanError
 from wger.intervals.tests.test_planning import ATHLETE, NEWEST, OLDEST, event, ride
 from wger.manager.models import WorkoutLog, WorkoutSession
 
 
 URL = '/api/v2/endurance-entry/'
+
+
+def sync_window(user, athlete_id, oldest, newest, activities, events):
+    """Preview then apply that exact preview, as the command does."""
+    args = (user, athlete_id, oldest, newest, activities, events)
+    return apply(*args, preview(*args)['plan_hash'])
 
 
 class SyncWindowTest(WgerTestCase):
@@ -108,6 +114,23 @@ class SyncWindowTest(WgerTestCase):
             self.sync([ride(icu_training_load=999), ride(id='i1', icu_athlete_id='i9')])
 
         self.assertEqual(EnduranceEntry.objects.get().training_load, 187)
+
+    def test_preview_writes_nothing_and_apply_needs_its_exact_hash(self):
+        self.sync([ride()])
+        args = (self.user, ATHLETE, OLDEST, NEWEST, [ride(icu_training_load=190)], [])
+
+        stale = preview(*args)['plan_hash']
+        self.assertEqual(EnduranceEntry.objects.get().training_load, 187)
+
+        with self.assertRaises(PlanError):
+            apply(*args, 'f' * 64)
+        changed = (self.user, ATHLETE, OLDEST, NEWEST, [ride(icu_training_load=191)], [])
+        with self.assertRaises(PlanError):
+            apply(*changed, stale)
+        self.assertEqual(EnduranceEntry.objects.get().training_load, 187)
+
+        apply(*args, stale)
+        self.assertEqual(EnduranceEntry.objects.get().training_load, 190)
 
 
 class EnduranceEntryApiTest(WgerTestCase):

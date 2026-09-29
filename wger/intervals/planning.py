@@ -104,6 +104,14 @@ def _day(value, label):
         raise PlanError(f'{label} is not an ISO date: {value!r}') from None
 
 
+def window(oldest, newest):
+    """Validated inclusive (oldest, newest) local dates."""
+    oldest, newest = _day(oldest, 'oldest'), _day(newest, 'newest')
+    if oldest > newest:
+        raise PlanError(f'oldest {oldest} is after newest {newest}')
+    return oldest, newest
+
+
 def _entry(raw, kind, owner_field, fields, athlete_id, oldest, newest):
     intervals_id = raw.get('id')
     if intervals_id in (None, ''):
@@ -157,9 +165,7 @@ def plan(athlete_id, oldest, newest, activities, events, existing):
     out-of-window dates, or duplicate existing identities.
     """
     athlete_id = str(athlete_id)
-    oldest, newest = _day(oldest, 'oldest'), _day(newest, 'newest')
-    if oldest > newest:
-        raise PlanError(f'oldest {oldest} is after newest {newest}')
+    oldest, newest = window(oldest, newest)
 
     skipped = {'echo': 0, 'weight_training': 0, 'non_workout': 0}
     fetched, seen = {}, set()
