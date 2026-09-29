@@ -209,6 +209,11 @@ if WGER_SETTINGS['USE_CELERY']:
 WGER_SHOW_APP_STORE_LINKS = env.bool('WGER_SHOW_APP_STORE_LINKS', True)
 WGER_MAX_SESSION_LENGTH_HOURS = env.int('WGER_MAX_SESSION_LENGTH_HOURS', 5)
 
+# Intervals.icu inbound mirror (wger/intervals). Empty = disabled.
+INTERVALS_API_KEY = env.str('INTERVALS_API_KEY', '')
+INTERVALS_ATHLETE_ID = env.str('INTERVALS_ATHLETE_ID', '')
+INTERVALS_WGER_USERNAME = env.str('INTERVALS_WGER_USERNAME', '')
+
 #
 # Auth Proxy Authentication
 # https://wger.readthedocs.io/en/latest/administration/auth_proxy.html

@@ -12,31 +12,48 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 
-"""Write one planned Intervals window into a user's EnduranceEntry rows.
+"""Preview or apply one planned Intervals window for a user's EnduranceEntry
+rows. Only EnduranceEntry is touched; gym sessions and sets never are."""
 
-Only EnduranceEntry is touched; gym sessions and sets never are.
-"""
+# Standard Library
+import hashlib
+import json
 
 # Django
+from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
 # wger
 from wger.intervals.models import EnduranceEntry
-from wger.intervals.planning import STORED_FIELDS, plan
+from wger.intervals.planning import STORED_FIELDS, PlanError, plan
 
 
-def sync_window(user, athlete_id, oldest, newest, activities, events):
-    """Plan already-fetched rows against the user's mirror and apply it in
-    one transaction. Returns the plan. PlanError leaves the DB untouched."""
+def _plan(rows, athlete_id, oldest, newest, activities, events):
+    existing = [{f: getattr(row, f) for f in STORED_FIELDS} for row in rows]
+    result = plan(athlete_id, oldest, newest, activities, events, existing)
+    actions = {k: result[k] for k in ('create', 'update', 'mark_missing')}
+    canonical = json.dumps(actions, sort_keys=True, default=str, separators=(',', ':'))
+    result['plan_hash'] = hashlib.sha256(canonical.encode()).hexdigest()
+    return result
+
+
+def preview(user, athlete_id, oldest, newest, activities, events):
+    """The plan plus its `plan_hash`. Makes no writes."""
+    rows = EnduranceEntry.objects.filter(user=user)
+    return _plan(rows, athlete_id, oldest, newest, activities, events)
+
+
+def apply(user, athlete_id, oldest, newest, activities, events, plan_hash):
+    """Recompute the plan under the owner's lock and write it only if it still
+    hashes to `plan_hash`, in one transaction. Any PlanError writes nothing."""
     with transaction.atomic():
-        # Row locks keep a concurrent run from planning on the same snapshot.
-        rows = {
-            (row.kind, row.intervals_id): row
-            for row in EnduranceEntry.objects.select_for_update().filter(user=user)
-        }
-        existing = [{f: getattr(row, f) for f in STORED_FIELDS} for row in rows.values()]
-        result = plan(athlete_id, oldest, newest, activities, events, existing)
+        # Locking the owner also serialises a first sync that has no rows yet.
+        User.objects.select_for_update().get(pk=user.pk)
+        rows = {(r.kind, r.intervals_id): r for r in EnduranceEntry.objects.filter(user=user)}
+        result = _plan(rows.values(), athlete_id, oldest, newest, activities, events)
+        if result['plan_hash'] != plan_hash:
+            raise PlanError('Intervals or wger data changed since the preview; preview again')
 
         now = timezone.now()
         EnduranceEntry.objects.bulk_create(
