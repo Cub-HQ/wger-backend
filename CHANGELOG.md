@@ -72,6 +72,7 @@ Streaks, calendar days and trophies are now calculated in your own timezone. The
 * Improved openAPI spec. The spec now properly describes the different parts of the API and can be used to generate clients.
 * Emails are now send asynchronously via the celery queue, this should make registration, password resets, etc. feel a bit snappier. If celery is not configured, the emails are send as before
 * Faster and stronger password hashing: passwords are now hashed with argon2 instead of PBKDF2. Argon2 is what Django itself recommends, but PBKDF2 is only the default because it needs no additional library. Existing passwords keep working and are migrated automatically on the next login.
+* Workout logs can store a whole cardio station set on one row: `duration` (seconds), `distance` + `distance_unit` (distance units only), `max_speed` + `max_speed_unit` (km/h or mph) and a unitless machine `level`, next to the existing weight, average speed, pace, incline and calories. Invalid combinations are rejected with a 400. Recovery of workouts deleted before the update keeps working.
 
 ### Bug fixes
 

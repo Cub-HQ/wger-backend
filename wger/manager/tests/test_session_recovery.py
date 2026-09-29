@@ -16,6 +16,7 @@
 deploy-time patch tests onto the real wger models."""
 
 # Standard Library
+import copy
 import datetime
 import uuid
 from decimal import Decimal
@@ -24,6 +25,7 @@ from unittest.mock import patch
 # Django
 from django.contrib.auth.models import User
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.db import (
     IntegrityError,
     transaction,
@@ -170,6 +172,95 @@ class SessionRecoveryTestCase(BaseTestCase, TransactionTestCase):
         self.assertEqual(restored.pk, self.session.pk)
         self.assertEqual(self.state(), before)
         self.assertFalse(WorkoutSessionRecovery.objects.filter(pk=row.pk).exists())
+
+    def test_station_metrics_survive_archive_and_restore(self):
+        WorkoutLog.objects.filter(pk=self.cardio.pk).update(
+            repetitions=Decimal('600.00'),
+            repetitions_unit_id=3,
+            distance=Decimal('2.100'),
+            distance_unit_id=6,
+            level=Decimal('0.0'),
+            weight=Decimal('20.00'),
+            max_speed=Decimal('14.20'),
+            max_speed_unit_id=5,
+        )
+        before = self.state()
+        row = self.archive()
+        recovery.restore_session(self.user, row.pk)
+        self.assertEqual(self.state(), before)
+        restored = WorkoutLog.objects.get(pk=self.cardio.pk)
+        self.assertEqual(
+            (restored.distance, restored.distance_unit_id, restored.level, restored.duration),
+            (Decimal('2.100'), 6, Decimal('0.0'), None),
+        )
+        self.assertEqual(
+            (restored.weight, restored.weight_unit_id),
+            (Decimal('20.00'), 1),
+        )
+        self.assertEqual((restored.max_speed, restored.max_speed_unit_id), (Decimal('14.20'), 5))
+
+    # WorkoutLog keys written by archive_session between manager 0031 and 0032.
+    PRE_0032_LOG_KEYS = {
+        'id', 'date', 'user_id', 'next_log_id', 'session_id', 'exercise_id', 'routine_id',
+        'slot_entry_id', 'iteration', 'repetitions_unit_id', 'repetitions',
+        'repetitions_target', 'weight_unit_id', 'weight', 'weight_target', 'average_speed',
+        'pace', 'incline', 'calories', 'rir', 'rir_target', 'rest', 'rest_target',
+    }
+
+    def pre_0032_snapshot(self, row):
+        snapshot = row.snapshot
+        snapshot['logs'] = [
+            {key: log[key] for key in self.PRE_0032_LOG_KEYS} for log in snapshot['logs']
+        ]
+        WorkoutSessionRecovery.objects.filter(pk=row.pk).update(snapshot=snapshot)
+
+    def test_snapshot_archived_before_new_columns_restores_them_as_null(self):
+        # Legacy max speed as weight + km/h must come back exactly, not reinterpreted.
+        WorkoutLog.objects.filter(pk=self.cardio.pk).update(
+            weight=Decimal('14.20'), weight_unit_id=5
+        )
+        before = self.state()
+        row = self.archive()
+        self.pre_0032_snapshot(row)
+        restored = recovery.restore_session(self.user, row.pk)
+        self.assertEqual(restored.pk, self.session.pk)
+        self.assertEqual(self.state(), before)
+        cardio = WorkoutLog.objects.get(pk=self.cardio.pk)
+        self.assertEqual(
+            (cardio.weight, cardio.weight_unit_id, cardio.max_speed), (Decimal('14.20'), 5, None)
+        )
+
+    def test_snapshot_with_unknown_or_missing_fields_still_conflicts(self):
+        row = self.archive()
+        self.pre_0032_snapshot(row)
+        clean = WorkoutSessionRecovery.objects.get(pk=row.pk).snapshot
+        broken = {
+            'unknown log key': lambda s: s['logs'][0].update(unexpected='1'),
+            'pre-existing log key missing': lambda s: s['logs'][0].pop('calories'),
+            'only some new keys present': lambda s: s['logs'][0].update(level='1.0'),
+            'new key on the session': lambda s: s['session'].update(duration=None),
+            'session key missing': lambda s: s['session'].pop('notes'),
+            'log is not an object': lambda s: s['logs'].__setitem__(0, ['id']),
+        }
+        for name, mutate in broken.items():
+            with self.subTest(name):
+                snapshot = copy.deepcopy(clean)
+                mutate(snapshot)
+                WorkoutSessionRecovery.objects.filter(pk=row.pk).update(snapshot=snapshot)
+                self.assert_conflict_preserves_archive(row)
+
+        # Values of the new keys are decoded as strictly as every other field.
+        snapshot = copy.deepcopy(clean)
+        snapshot['logs'][0].update(
+            duration='abc', distance=None, distance_unit_id=None, level=None,
+            max_speed=None, max_speed_unit_id=None,
+        )
+        WorkoutSessionRecovery.objects.filter(pk=row.pk).update(snapshot=snapshot)
+        before = self.state()
+        with self.assertRaises(ValidationError):
+            recovery.restore_session(self.user, row.pk)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(WorkoutSessionRecovery.objects.get(pk=row.pk).snapshot, snapshot)
 
     def test_owner_is_hidden_for_archive_and_restore(self):
         before = self.state()

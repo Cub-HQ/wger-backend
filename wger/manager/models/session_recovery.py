@@ -40,12 +40,25 @@ def _snapshot(obj):
     }
 
 
+# Nullable columns added after snapshot version 1 was first written (manager
+# 0032). Snapshots archived before that migration lack them and restore as NULL;
+# any other missing or unknown key still refuses the restore.
+ADDED_AFTER_V1 = {
+    WorkoutLog: {
+        'duration', 'distance', 'distance_unit_id', 'level', 'max_speed', 'max_speed_unit_id'
+    },
+}
+
+
 def _decode(model, data):
     fields = model._meta.concrete_fields
-    if not isinstance(data, dict) or set(data) != {field.attname for field in fields}:
+    if not isinstance(data, dict):
+        raise RecoveryConflict()
+    expected = {field.attname for field in fields}
+    if set(data) not in (expected, expected - ADDED_AFTER_V1.get(model, set())):
         raise RecoveryConflict()
     return {
-        field.attname: None if data[field.attname] is None else
+        field.attname: None if data.get(field.attname) is None else
         (field.target_field if field.is_relation else field).to_python(data[field.attname])
         for field in fields
     }
