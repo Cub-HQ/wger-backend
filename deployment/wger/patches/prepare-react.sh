@@ -9,7 +9,7 @@ PATCH_DIR=$(cd "$(dirname "$0")" && pwd)
 DEPLOY_DIR=$(cd "$PATCH_DIR/.." && pwd)
 DOCKER_HOST=${WGER_DOCKER_HOST-unix://$HOME/.colima/default/docker.sock}
 BACKEND_REPO=https://github.com/Cub-HQ/wger-backend
-BACKEND_COMMIT=9f8ec7d5d6dce58b9f5ff4e69424de51b82b542a
+BACKEND_COMMIT=3084f836a57d87e52dc39a8b0ff8d6c6f6f98b21
 BACKEND_UPSTREAM='https://github.com/wger-project/wger 83005f7d487c814833f3943784370bb0149fbaa8'
 BACKEND_TAG=fitness-wger-backend:$BACKEND_COMMIT
 # The backend commit carries the reviewed frontend package; its source, archive and main.js are pinned here.

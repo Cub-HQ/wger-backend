@@ -5,7 +5,7 @@ x-logging: &logging
 x-wger: &wger
   # Built locally by prepare-react.sh --backend-image; release_web.py refuses unless the tag
   # resolves to the image ID, revision and APP_BUILD_COMMIT in overrides/backend-image.json.next.
-  image: fitness-wger-backend:9f8ec7d5d6dce58b9f5ff4e69424de51b82b542a
+  image: fitness-wger-backend:3084f836a57d87e52dc39a8b0ff8d6c6f6f98b21
   env_file: [./config/private.env]
   restart: unless-stopped
   logging: *logging
