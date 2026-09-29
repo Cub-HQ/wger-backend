@@ -1,7 +1,7 @@
 # react-components package
 
 `wger-project-react-components-26.8.28.tgz` is the gym frontend fork, built from
-[Cub-HQ/wger-frontend@35269fab](https://github.com/Cub-HQ/wger-frontend/tree/35269fabbf988b9d681c9fd304771690a39a8b34)
+[Cub-HQ/wger-frontend@1495a17c](https://github.com/Cub-HQ/wger-frontend/tree/1495a17c6954be80152aaaf507c3cf9cc39c5a65)
 (itself based on upstream [wger-project/react](https://github.com/wger-project/react)).
 The package keeps upstream's name and version, so `package.json` and
 `package-lock.json` resolve it to this file instead of the npm registry. The
