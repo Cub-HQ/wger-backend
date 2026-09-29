@@ -43,6 +43,7 @@ from wger.core.api import views as core_api_views
 from wger.exercises.api import views as exercises_api_views
 from wger.exercises.sitemap import ExercisesSitemap
 from wger.gallery.api import views as gallery_api_views
+from wger.intervals.api import views as intervals_api_views
 from wger.manager.api import views as manager_api_views
 from wger.measurements.api import views as measurements_api_views
 from wger.nutrition.api import views as nutrition_api_views
@@ -248,6 +249,13 @@ router.register(
     r'measurement-category',
     measurements_api_views.CategoryViewSet,
     basename='measurement-category',
+)
+
+# Intervals app
+router.register(
+    r'endurance-entry',
+    intervals_api_views.EnduranceEntryViewSet,
+    basename='endurance-entry',
 )
 
 # Trophies app

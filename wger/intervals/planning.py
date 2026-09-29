@@ -136,13 +136,13 @@ def _entry(raw, kind, owner_field, fields, athlete_id, oldest, newest):
     return entry
 
 
-def _link(entry):
+def link(kind, intervals_id, local_date):
     """(url, exact). Completed activities have an exact route. Planned events
     have no per-event route (OPEN-QUESTIONS U1), so they get the calendar day
     range, flagged not exact."""
-    if entry['kind'] == 'completed':
-        return f'{INTERVALS_URL}/activities/{entry["intervals_id"]}', True
-    day = entry['local_date'].isoformat()
+    if kind == 'completed':
+        return f'{INTERVALS_URL}/activities/{intervals_id}', True
+    day = local_date.isoformat()
     return f'{INTERVALS_URL}/?s={day}&e={day}', False
 
 
@@ -187,17 +187,22 @@ def plan(athlete_id, oldest, newest, activities, events, existing):
             else:
                 fetched[key] = entry
 
-    current = {}
+    current, stored = {}, set()
     for row in existing:
         key = (row['kind'], str(row['intervals_id']))
-        if key in current:
+        if key in stored:
             raise PlanError(f'duplicate existing mirror row {key}')
-        if oldest <= _day(row['local_date'], f'existing {key} local_date') <= newest:
+        stored.add(key)
+        # A fetched row whose date moved into the window is still the same row.
+        if (
+            key in fetched
+            or oldest <= _day(row['local_date'], f'existing {key} local_date') <= newest
+        ):
             current[key] = row
 
     result = {'create': [], 'update': [], 'unchanged': [], 'mark_missing': [], 'skipped': skipped}
     for key, entry in fetched.items():
-        entry['link'], entry['link_exact'] = _link(entry)
+        entry['link'], entry['link_exact'] = link(*key, entry['local_date'])
         row = current.get(key)
         if row is None:
             result['create'].append(entry)
