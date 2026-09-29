@@ -86,6 +86,50 @@ class PlanTestCase(SimpleTestCase):
         result = plan(workout(exercise(12, stats(reps=0, weight=0.0))), MAPPING)
         self.assertEqual(result['status'], 'held')
 
+    def test_omit_incomplete_imports_valid_sets_and_lists_the_rest(self):
+        source = workout(
+            exercise(12, stats(reps=10, weight=20.0), stats(setID=2, reps=0, weight=0.0)),
+            exercise(13, stats(setID=3, weight=11.0), stats(setID=4, reps=6)),
+        )
+        result = plan(source, MAPPING, omit_incomplete=True)
+        self.assertEqual(result['status'], 'ready')
+        self.assertEqual(
+            [(log['exercise'], log['iteration'], log['repetitions']) for log in result['logs']],
+            [(2, 1, '10.00'), (3, 1, '6.00')],
+        )
+        self.assertEqual(
+            [(o['exercise'], o['raw']['setID']) for o in result['omitted']], [(12, 2), (13, 3)]
+        )
+        self.assertIn(
+            'Source 12 [Trainerize 12] set 2: zero-only set is ambiguous (performed or skipped); '
+            'source values: reps 0, weight 0.0',
+            result['notes'],
+        )
+        self.assertIn(
+            'Source 13 [Trainerize 13] set 3: set without reps, time or distance; '
+            'source values: weight 11.0',
+            result['notes'],
+        )
+        # Without the policy the same workout is held
+        self.assertEqual(plan(source, MAPPING)['status'], 'held')
+
+    def test_omit_incomplete_keeps_workout_without_usable_sets_held(self):
+        result = plan(
+            workout(exercise(12, stats(reps=0, weight=0.0))),
+            MAPPING,
+            omit_incomplete=True,
+            clarification='x',
+        )
+        self.assertEqual((result['status'], result['logs']), ('held', []))
+        self.assertIn('no usable sets', result['holds'][0])
+
+    def test_omit_incomplete_does_not_bypass_other_holds(self):
+        for source in (
+            workout(exercise(12, stats(reps=1)), exercise(99, stats(reps=0))),
+            workout(exercise(12, stats(reps=1), stats(reps=0)), endTime='2026-01-08 03:00:00'),
+        ):
+            self.assertEqual(plan(source, MAPPING, omit_incomplete=True)['status'], 'held')
+
     def test_value_finer_than_column_is_held_not_rounded(self):
         result = plan(workout(exercise(11, stats(time=20.0, distance=0.1234))), MAPPING)
         self.assertEqual(result['status'], 'held')

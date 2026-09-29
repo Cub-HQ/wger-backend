@@ -47,8 +47,12 @@ def _utc(value):
     return datetime.datetime.fromisoformat(value).replace(tzinfo=datetime.timezone.utc)
 
 
-def _log(stats, holds, name):
-    """One performed set. Primary measure in repetitions, the rest in their own fields."""
+def _log(stats, holds, name, omitted=None, source_id=None):
+    """
+    One performed set. Primary measure in repetitions, the rest in their own fields.
+    omitted: when a list, an ambiguous set (zero-only, or no reps/time/distance) is recorded
+    there with its source identity and raw values instead of holding the workout.
+    """
     values = {k: stats.get(k) for k in METRICS}
     if any(v is not None and (type(v) not in (int, float) or v < 0) for v in values.values()):
         holds.append(f'{name}: non-numeric or negative value {values}')
@@ -57,11 +61,18 @@ def _log(stats, holds, name):
     if reps is not None and (time is not None or distance is not None):
         holds.append(f'{name}: reps together with time/distance cannot be stored losslessly')
         return None
+    ambiguous = None
     if reps is None and time is None and distance is None:
-        holds.append(f'{name}: set without reps, time or distance {values}')
-        return None
-    if all(v in (None, 0) for v in values.values()):
-        holds.append(f'{name}: zero-only set is ambiguous (performed or skipped)')
+        ambiguous = 'set without reps, time or distance'
+    elif all(v in (None, 0) for v in values.values()):
+        ambiguous = 'zero-only set is ambiguous (performed or skipped)'
+    if ambiguous:
+        if omitted is None:
+            holds.append(f'{name}: {ambiguous} {values}')
+        else:
+            omitted.append(
+                {'exercise': source_id, 'name': name, 'raw': stats, 'reason': ambiguous}
+            )
         return None
     if time is not None:
         log = {'repetitions': time, 'repetitions_unit': SECONDS, 'distance': distance}
@@ -88,14 +99,18 @@ def _log(stats, holds, name):
     return log
 
 
-def plan(workout, mapping, *, clarification=None, differences=None):
+def plan(workout, mapping, *, clarification=None, differences=None, omit_incomplete=False):
     """
     mapping: {source exercise id (str): wger exercise id}, validated provenance only.
     clarification: user-confirmed note for a completed workout with no logged sets.
     differences: {source exercise id (str): source-vs-catalog technique difference to keep}.
+    omit_incomplete: user-approved policy: import the valid sets and list each zero-only or
+    measure-less set in the notes and plan['omitted'] instead of holding the workout.
+    A workout left with no usable set stays held.
     """
     differences = differences or {}
     holds, logs, provenance = [], [], []
+    omitted = [] if omit_incomplete else None
     iterations = {}
     if workout.get('status') != 'tracked':
         holds.append(f'status {workout.get("status")!r} is not a completed workout')
@@ -116,7 +131,7 @@ def plan(workout, mapping, *, clarification=None, differences=None):
             holds.append(f'{line}]: no validated wger exercise mapping')
             continue
         for stats in performed:
-            log = _log(stats, holds, name)
+            log = _log(stats, holds, name, omitted, source_id)
             if log:
                 # Counted per exercise, so a repeated exercise continues its set numbers
                 iterations[wger_id] = iterations.get(wger_id, 0) + 1
@@ -142,7 +157,9 @@ def plan(workout, mapping, *, clarification=None, differences=None):
         notes_tail = [TIME_UNKNOWN]
 
     if not logs and not holds:
-        if clarification:
+        if omitted:
+            holds.append('no usable sets: every recorded set is zero-only or has no measure')
+        elif clarification:
             notes_tail.append(clarification)
         else:
             holds.append('completed workout without logged sets needs user clarification')
@@ -153,6 +170,7 @@ def plan(workout, mapping, *, clarification=None, differences=None):
             '',
             'Original source exercises:',
             *provenance,
+            *_omission_lines(omitted),
             *notes_tail,
         ]
     )
@@ -166,7 +184,21 @@ def plan(workout, mapping, *, clarification=None, differences=None):
         'datetime_end': end.isoformat() if end else None,
         'notes': notes,
         'logs': logs,
+        'omitted': omitted or [],
     }
+
+
+def _omission_lines(omitted):
+    if not omitted:
+        return []
+    lines = ['', 'Omitted source sets (recorded without a usable value; not imported):']
+    for o in omitted:
+        raw = ', '.join(f'{k} {o["raw"][k]}' for k in METRICS if o['raw'].get(k) is not None)
+        lines.append(
+            f'{o["name"]} [Trainerize {o["exercise"]}] set {o["raw"].get("setID")}: '
+            f'{o["reason"]}; source values: {raw}'
+        )
+    return lines
 
 
 LOG_FIELDS = (
