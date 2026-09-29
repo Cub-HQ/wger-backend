@@ -78,7 +78,7 @@ ARG DOCKER_DIR=./extras/docker/production
 ARG BUILD_COMMIT
 ARG BUILD_DATE
 # Cub-HQ/wger-frontend commit the committed react-components tarball was built from.
-ARG UI_BUILD_COMMIT=430363286ddd576a3c7cbde2aca1695729d8a75c
+ARG UI_BUILD_COMMIT=c67abc4aed730578f764275593fcf2151f0e6b92
 
 ENV PATH="/home/wger/.local/bin:$PATH"
 ENV APP_BUILD_COMMIT=$BUILD_COMMIT
