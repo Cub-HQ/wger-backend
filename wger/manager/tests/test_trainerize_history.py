@@ -119,6 +119,14 @@ class PlanTestCase(SimpleTestCase):
         )
         self.assertIn('Source 12 [Trainerize 12 → wger 2]\nSource 13', result['notes'])
 
+    def test_technique_difference_is_kept_in_provenance(self):
+        result = plan(
+            workout(exercise(12, stats(reps=5))), MAPPING, differences={'12': 'jumps down'}
+        )
+        self.assertIn(
+            'Source 12 [Trainerize 12 → wger 2] (source differs: jumps down)', result['notes']
+        )
+
     def test_source_times_are_utc_and_long_sessions_hold(self):
         self.assertEqual(
             plan(workout(), MAPPING, clarification='x')['datetime_start'],

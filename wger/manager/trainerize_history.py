@@ -88,11 +88,13 @@ def _log(stats, holds, name):
     return log
 
 
-def plan(workout, mapping, *, clarification=None):
+def plan(workout, mapping, *, clarification=None, differences=None):
     """
     mapping: {source exercise id (str): wger exercise id}, validated provenance only.
     clarification: user-confirmed note for a completed workout with no logged sets.
+    differences: {source exercise id (str): source-vs-catalog technique difference to keep}.
     """
+    differences = differences or {}
     holds, logs, provenance = [], [], []
     iterations = {}
     if workout.get('status') != 'tracked':
@@ -106,6 +108,8 @@ def plan(workout, mapping, *, clarification=None):
         wger_id = mapping.get(str(source_id))
         line = f'{name} [Trainerize {source_id}'
         provenance.append(f'{line} → wger {wger_id}]' if wger_id else f'{line}]')
+        if wger_id and differences.get(str(source_id)):
+            provenance[-1] += f' (source differs: {differences[str(source_id)]})'
         if not performed:
             continue
         if not wger_id:
