@@ -17,16 +17,30 @@
 
 # Django
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models import Q
 
 # Third Party
-from drf_spectacular.utils import extend_schema
-from rest_framework import viewsets
+from drf_spectacular.utils import (
+    OpenApiTypes,
+    extend_schema,
+)
+from rest_framework import (
+    status,
+    viewsets,
+)
 from rest_framework.decorators import action
+from rest_framework.exceptions import (
+    NotFound,
+    ValidationError,
+)
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
 # wger
+from wger.manager import spreadsheet
 from wger.manager.api.consts import BASE_CONFIG_FILTER_FIELDS
 from wger.manager.api.filtersets import (
     WorkoutLogFilterSet,
@@ -205,9 +219,122 @@ class RoutineViewSet(viewsets.ModelViewSet):
 
         return Response(out)
 
+    @extend_schema(responses={200: OpenApiTypes.BINARY})
+    @action(detail=True, pagination_class=None)
+    def export(self, request, pk):
+        """
+        Download the planned structure as ?file=csv or ?file=xlsx
+
+        Same access as `structure`. Logged workouts are never part of the file.
+        """
+        routine = self.get_object()
+        kind = _file_kind(request)
+        return spreadsheet.download(
+            spreadsheet.export_rows(routine), kind, f'routine-{routine.pk}', with_help=True
+        )
+
+    @extend_schema(responses={200: OpenApiTypes.BINARY})
+    @action(detail=False, url_path='import-template', pagination_class=None)
+    def import_template(self, request):
+        """Download an empty import template as ?file=csv or ?file=xlsx"""
+        kind = _file_kind(request)
+        return spreadsheet.download([], kind, 'routine-template', with_help=True)
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={200: OpenApiTypes.OBJECT})
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='import-preview',
+        parser_classes=[MultiPartParser],
+        pagination_class=None,
+    )
+    def import_preview(self, request):
+        """
+        Check an uploaded plan and show what confirming it would change
+
+        Nothing is written. Send the returned plan_hash to import-confirm.
+        """
+        mode, target, drop = _import_arguments(request)
+        plan = spreadsheet.build_plan(request.FILES.get('file'), request.user, mode, target, drop)
+        return Response(plan.preview())
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={200: OpenApiTypes.OBJECT})
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='import-confirm',
+        parser_classes=[MultiPartParser],
+        pagination_class=None,
+    )
+    def import_confirm(self, request):
+        """
+        Apply a previewed plan in one transaction
+
+        The plan is rebuilt under the owner lock. If it doesn't match the
+        previewed plan_hash (file, exercise matches, options or the routine
+        changed, or it was already applied) nothing is written and 409 is
+        returned.
+        """
+        mode, target, drop = _import_arguments(request)
+        plan_hash = request.data.get('plan_hash', '')
+        with transaction.atomic():
+            get_user_model()._default_manager.select_for_update().get(pk=request.user.pk)
+            if target is not None:
+                target = Routine.objects.select_for_update().get(pk=target.pk)
+
+            upload = request.FILES.get('file')
+            plan = spreadsheet.build_plan(upload, request.user, mode, target, drop)
+            if not plan.ok:
+                return Response(plan.preview(), status=status.HTTP_400_BAD_REQUEST)
+            if plan.hash != plan_hash:
+                return Response(
+                    {
+                        **plan.preview(),
+                        'detail': 'The file or routine changed since the preview, preview again.',
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            routine = spreadsheet.apply_plan(plan, request.user)
+
+        return Response(
+            {'id': routine.pk, 'plan_hash': plan.hash},
+            status=status.HTTP_201_CREATED if mode == 'create' else status.HTTP_200_OK,
+        )
+
     @staticmethod
     def get_owner_objects():
         return []
+
+
+def _file_kind(request) -> str:
+    kind = request.query_params.get('file', 'csv')
+    if kind not in ('csv', 'xlsx'):
+        raise ValidationError({'file': 'Must be csv or xlsx.'})
+    return kind
+
+
+def _import_arguments(request):
+    """
+    mode, owned target routine and drop_unsupported of an import request
+
+    Only the owner's own, non-template routines can be updated; no trainer
+    identity and no public templates.
+    """
+    mode = request.data.get('mode')
+    if mode not in ('create', 'update'):
+        raise ValidationError({'mode': 'Must be create or update.'})
+    drop = request.data.get('drop_unsupported', '').lower() in ('true', '1', 'yes', 'on')
+
+    target = None
+    if mode == 'update':
+        try:
+            pk = int(request.data.get('routine', ''))
+        except ValueError:
+            raise ValidationError({'routine': 'Required for update.'})
+        target = Routine.objects.filter(pk=pk, user=request.user, is_template=False).first()
+        if target is None:
+            raise NotFound()
+    return mode, target, drop
 
 
 class UserRoutineTemplateViewSet(viewsets.ReadOnlyModelViewSet):
@@ -251,6 +378,14 @@ class PublicRoutineTemplateViewSet(viewsets.ReadOnlyModelViewSet):
         return Routine.public.all()
 
 
+# Django
+from django.core.exceptions import ValidationError as RecoveryValidationError
+from django.utils import timezone as recovery_timezone
+
+# Third Party
+from rest_framework.exceptions import NotFound as RecoveryNotFound
+
+# wger
 from wger.manager.models.session_recovery import (
     WorkoutSessionRecovery,
     archive_session,
@@ -258,9 +393,6 @@ from wger.manager.models.session_recovery import (
     recovery_summary,
     restore_session,
 )
-from django.core.exceptions import ValidationError as RecoveryValidationError
-from django.utils import timezone as recovery_timezone
-from rest_framework.exceptions import NotFound as RecoveryNotFound
 
 
 class WorkoutSessionViewSet(WgerOwnerObjectModelViewSet):

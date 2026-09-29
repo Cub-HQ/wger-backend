@@ -67,6 +67,8 @@ dependencies = [
     "requests~=2.34.0",
     "tqdm~=4.70.0",
     "tzdata~=2026.2",
+    "openpyxl~=3.1.5",
+    "defusedxml~=0.7.1",
 ]
 
 [dependency-groups]
