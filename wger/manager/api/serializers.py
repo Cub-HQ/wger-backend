@@ -602,11 +602,36 @@ class WorkoutLogSerializer(serializers.ModelSerializer):
             'pace',
             'incline',
             'calories',
+            'duration',
+            'distance',
+            'distance_unit',
+            'level',
+            'max_speed',
+            'max_speed_unit',
             'rir',
             'rir_target',
             'rest',
             'rest_target',
         )
+
+    def validate(self, attrs):
+        """
+        Run the model's cross-field checks on the log this request would produce
+
+        WorkoutLog.save() calls clean(), but a Django ValidationError raised there
+        is not handled by DRF and would surface as a 500 instead of a 400.
+        """
+        log = WorkoutLog()
+        if self.instance:
+            for field in WorkoutLog._meta.concrete_fields:
+                setattr(log, field.attname, getattr(self.instance, field.attname))
+        for key, value in attrs.items():
+            setattr(log, key, value)
+        try:
+            log.clean()
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(serializers.as_serializer_error(e))
+        return attrs
 
 
 class LogDisplaySerializer(serializers.Serializer):

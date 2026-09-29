@@ -193,6 +193,56 @@ class WorkoutLog(models.Model):
     incline = models.DecimalField(max_digits=6, decimal_places=2, validators=[NullMinValueValidator(0)], null=True, blank=True)
     calories = models.DecimalField(max_digits=8, decimal_places=2, validators=[NullMinValueValidator(0)], null=True, blank=True)
 
+    # Secondary cardio measures. The primary one (the unit the plan prescribes)
+    # stays in repetitions/repetitions_unit. Legacy logs may hold max speed as
+    # weight with a speed weight unit; they are left as they are.
+    duration = models.DecimalField(
+        max_digits=7,
+        decimal_places=2,
+        validators=[NullMinValueValidator(0)],
+        null=True,
+        blank=True,
+        help_text='Seconds',
+    )
+    distance = models.DecimalField(
+        max_digits=8,
+        decimal_places=3,
+        validators=[NullMinValueValidator(0)],
+        null=True,
+        blank=True,
+    )
+    distance_unit = models.ForeignKey(
+        RepetitionUnit,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    level = models.DecimalField(
+        max_digits=4,
+        decimal_places=1,
+        validators=[NullMinValueValidator(0)],
+        null=True,
+        blank=True,
+        help_text='Unitless machine level, not incline or RiR',
+    )
+    max_speed = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        validators=[NullMinValueValidator(0)],
+        null=True,
+        blank=True,
+        help_text='Maximum speed, independent of weight',
+    )
+    max_speed_unit = models.ForeignKey(
+        WeightUnit,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='+',
+        help_text='Speed unit only: 5 = km/h (default in the UI), 6 = mph',
+    )
+
     rir = models.DecimalField(
         max_digits=2,
         decimal_places=1,
@@ -250,9 +300,19 @@ class WorkoutLog(models.Model):
 
     def clean(self):
         super().clean()
-        if self.repetitions is None and self.weight is None and all(
-            value is None for value in (self.average_speed, self.pace, self.incline, self.calories)
-        ):
+        metrics = (
+            self.repetitions,
+            self.weight,
+            self.average_speed,
+            self.pace,
+            self.incline,
+            self.calories,
+            self.duration,
+            self.distance,
+            self.level,
+            self.max_speed,
+        )
+        if all(value is None for value in metrics):
             raise ValidationError('A workout log must contain at least one metric.')
 
         if self.repetitions is not None and self.repetitions_unit is None:
@@ -260,6 +320,36 @@ class WorkoutLog(models.Model):
 
         if self.weight is not None and self.weight_unit is None:
             raise ValidationError('Weight unit must be present if weight has a value.')
+
+        if self.distance is not None and self.distance_unit is None:
+            raise ValidationError(
+                {'distance_unit': 'Distance unit must be present if distance has a value.'}
+            )
+
+        if self.distance_unit is not None and not self.distance_unit.is_distance:
+            raise ValidationError({'distance_unit': 'Distance unit must be a distance unit.'})
+
+        if self.max_speed is not None and self.max_speed_unit is None:
+            raise ValidationError(
+                {'max_speed_unit': 'Speed unit must be present if max speed has a value.'}
+            )
+
+        if self.max_speed_unit is not None and not self.max_speed_unit.is_speed:
+            raise ValidationError({'max_speed_unit': 'Max speed unit must be a speed unit.'})
+
+        # Each quantity lives in one place. Only a present (non-null, zero counts)
+        # primary value in repetitions conflicts; the unit alone does not.
+        primary = self.repetitions_unit if self.repetitions is not None else None
+        if self.duration is not None and primary is not None and primary.is_time:
+            raise ValidationError({'duration': 'Time is already logged in repetitions.'})
+
+        if self.distance is not None and primary is not None and primary.is_distance:
+            raise ValidationError({'distance': 'Distance is already logged in repetitions.'})
+
+        # Legacy representation: max speed as weight in km/h or mph
+        weight_is_speed = self.weight_unit is not None and self.weight_unit.is_speed
+        if self.max_speed is not None and self.weight is not None and weight_is_speed:
+            raise ValidationError({'max_speed': 'Max speed is already logged in weight.'})
 
     def assign_session(self):
         """
