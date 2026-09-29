@@ -46,8 +46,9 @@ if [ "${1-}" = --backend-image ]; then
   curl --fail --location --silent --show-error "$BACKEND_REPO/archive/$BACKEND_COMMIT.tar.gz" --output "$BUILD_DIR/source.tgz"
   archive_commit=$(gzip -dc "$BUILD_DIR/source.tgz" 2>/dev/null | git get-tar-commit-id || true)
   [ "$archive_commit" = "$BACKEND_COMMIT" ] || failed "archive commit '$archive_commit' is not $BACKEND_COMMIT"
-  mkdir "$BUILD_DIR/src"
-  tar -xzf "$BUILD_DIR/source.tgz" --strip-components=1 -C "$BUILD_DIR/src"
+  # The caller's umask (077 for private evidence) must not reach the build context: extract the
+  # archive's git modes under 022 so the image gets 644/755 source, as a clean checkout would.
+  (umask 022 && mkdir "$BUILD_DIR/src" && tar -xzf "$BUILD_DIR/source.tgz" --strip-components=1 -C "$BUILD_DIR/src")
   frontend_sha256=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
     "$BUILD_DIR/src/$FRONTEND_PACKAGE" 2>/dev/null || true)
   [ "$frontend_sha256" = "$FRONTEND_SHA256" ] ||
@@ -83,7 +84,7 @@ PY
   # installed package must hold nothing else, and no private deploy files may be baked in.
   VERIFY_IMAGE=$(cat <<'PY'
 import hashlib, json, os, sys
-root, commit, ui_commit = sys.argv[1], sys.argv[2], sys.argv[3]
+root, commit, ui_commit, runtime_scripts = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 manifest = json.load(sys.stdin)
 def digest(path):
     with open(path, 'rb') as source:
@@ -109,12 +110,17 @@ private = [os.path.join(directory, name) for directory, _, names in os.walk(root
            for name in names if name == 'private.env' or name.endswith('.dump')]
 if private:
     sys.exit('private files in image: ' + ', '.join(private))
+# Runs as the runtime uid (docker run --user): content hashes cannot see a 711 root-owned entrypoint.
+unusable = [path for path in runtime_scripts if not os.path.isfile(path) or not os.access(path, os.R_OK | os.X_OK)]
+if unusable:
+    sys.exit(f'runtime scripts not readable and executable by uid {os.getuid()}: ' + ', '.join(unusable))
 print(f'image matches {len(manifest)} source and frontend package files at {commit}')
 PY
 )
   verify_image() {
-    docker -H "$DOCKER_HOST" run --rm -i --network none --entrypoint python3 "$1" \
-      -c "$VERIFY_IMAGE" /home/wger/src "$BACKEND_COMMIT" "$FRONTEND_COMMIT" <"$BUILD_DIR/manifest.json"
+    docker -H "$DOCKER_HOST" run --rm -i --network none --user 1000:1000 --entrypoint python3 "$1" \
+      -c "$VERIFY_IMAGE" /home/wger/src "$BACKEND_COMMIT" "$FRONTEND_COMMIT" \
+      /home/wger/entrypoint.sh /start-beat /start-worker /start-flower <"$BUILD_DIR/manifest.json"
   }
   label() {
     docker -H "$DOCKER_HOST" image inspect --format "{{index .Config.Labels \"$1\"}}" "$2"

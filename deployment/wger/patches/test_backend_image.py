@@ -58,6 +58,14 @@ elif args[0] == 'build':
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.extractfile(member).read())
     if os.environ.get('CORRUPT_BUILD'): (root / os.environ['CORRUPT_BUILD']).write_text('drift')
+    # The final stage's COPY --chmod=755 of the runtime scripts; BAD_SCRIPT_MODE models a regression.
+    for source, target in (('entrypoint.sh', 'home/wger/entrypoint.sh'), ('celery/start-beat', 'start-beat'),
+                           ('celery/start-worker', 'start-worker'), ('celery/start-flower', 'start-flower')):
+        script = root / '.rootfs' / target
+        script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(context / 'extras/docker/production' / source, script)
+        script.chmod(0o755)
+    if os.environ.get('BAD_SCRIPT_MODE'): (root / '.rootfs/home/wger/entrypoint.sh').chmod(int(os.environ['BAD_SCRIPT_MODE'], 8))
     labels = dict(value.split('=', 1) for flag, value in zip(args, args[1:]) if flag == '--label')
     commit = next(value.split('=', 1)[1] for flag, value in zip(args, args[1:])
                   if flag == '--build-arg' and value.startswith('BUILD_COMMIT='))
@@ -69,7 +77,8 @@ elif args[0] == 'build':
 elif args[0] == 'run':
     found = image(args[args.index('--entrypoint') + 2])
     payload = args[args.index('--entrypoint') + 3:]
-    payload = [found['root'] if arg == '/home/wger/src' else arg for arg in payload]
+    payload = [found['root'] if arg == '/home/wger/src' else found['root'] + '/.rootfs' + arg if arg.startswith(('/home/wger/', '/start-')) else arg
+               for arg in payload]
     env = {**os.environ, 'APP_BUILD_COMMIT': found['commit'], 'APP_UI_BUILD_COMMIT': found['ui_commit'],
            'PYTHONPATH': found['root']}
     sys.exit(subprocess.run([sys.executable, *payload], env=env, cwd=found['root']).returncode)
@@ -95,9 +104,11 @@ class BackendImageTest(unittest.TestCase):
                      'wger/manager/__init__.py', 'wger/manager/models/__init__.py', 'settings/main.py']:
             (repo / path).parent.mkdir(parents=True, exist_ok=True)
             (repo / path).write_text(f'# {path}\n')
-        (repo / 'extras/docker/production').mkdir(parents=True)
+        (repo / 'extras/docker/production/celery').mkdir(parents=True)
         (repo / 'extras/docker/production/Dockerfile').write_text(
             f'FROM wger/base:latest\nARG UI_BUILD_COMMIT={UI_COMMIT}\n')
+        for script in ('entrypoint.sh', 'celery/start-beat', 'celery/start-worker', 'celery/start-flower'):
+            (repo / 'extras/docker/production' / script).write_text('#!/bin/sh\n')
         (repo / PACKAGE).parent.mkdir(parents=True)
         (repo / PACKAGE).write_bytes((ROOT.parents[2] / PACKAGE).read_bytes())
         git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t']
@@ -145,10 +156,10 @@ class BackendImageTest(unittest.TestCase):
         self.sock.close()
         self.tmp.cleanup()
 
-    def prepare(self, **env):
+    def prepare(self, umask=0o022, **env):
         (self.root / 'commands.jsonl').write_text('')
         return subprocess.run(['bash', str(self.script), '--backend-image'], env={**self.env, **env},
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, umask=umask)
 
     def calls(self):
         return [json.loads(line)[2:] for line in (self.root / 'commands.jsonl').read_text().splitlines()]
@@ -165,6 +176,7 @@ class BackendImageTest(unittest.TestCase):
         for call in calls:
             if call[0] == 'run':
                 self.assertEqual(call[call.index('--network') + 1], 'none')
+                self.assertEqual(call[call.index('--user') + 1], '1000:1000', 'verified as root, not the runtime uid')
                 self.assertFalse({'--mount', '-v', '--volume', '--env-file'} & set(call), call)
         self.assertEqual((self.overrides / 'react-main.js').read_text(), 'live')
         self.assertEqual((self.overrides / 'react-main.js.next').read_text(), 'previous candidate')
@@ -200,6 +212,24 @@ class BackendImageTest(unittest.TestCase):
         self.assertFalse({'build', 'pull', 'tag'} & {call[0] for call in self.calls()}, 'verified image rebuilt')
         self.assert_image_only(self.calls())
         self.assertEqual(self.record()['image_id'], image_id)
+
+    def test_private_umask_caller_still_builds_world_readable_source(self):
+        # 077 is the umask release evidence is written under; it produced a 711/700 image (9f8ec7d5).
+        result = self.prepare(umask=0o077)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        image_root = pathlib.Path(self.state()['images'][self.state()['tags']['fitness-wger-backend:' + self.commit]]['root'])
+        for path in ('wger/__init__.py', 'settings/main.py', PACKAGE):
+            self.assertEqual((image_root / path).stat().st_mode & 0o777, 0o644, path)
+        for path in ('wger', 'settings', 'extras/docker/production'):
+            self.assertEqual((image_root / path).stat().st_mode & 0o777, 0o755, path)
+        # Private artefacts the caller writes keep the caller's umask.
+        self.assertEqual((self.overrides / 'backend-image.json.next').stat().st_mode & 0o777, 0o600)
+
+    def test_runtime_script_the_runtime_uid_cannot_read_is_not_tagged(self):
+        result = self.prepare(BAD_SCRIPT_MODE='100')
+        self.assert_refused(result, 'runtime scripts not readable and executable by uid')
+        self.assertIn('/home/wger/entrypoint.sh', result.stderr)
+        self.assertEqual(self.state()['tags'], {})
 
     def assert_refused(self, result, message):
         self.assertNotEqual(result.returncode, 0)

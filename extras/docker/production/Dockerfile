@@ -95,15 +95,12 @@ COPY --chown=wger:wger . /home/wger/src
 COPY --chown=wger:wger --from=builder /root/src/node_modules /home/wger/src/node_modules
 COPY --chown=wger:wger --from=builder /root/src/wger/core/static/bootstrap-compiled.css /home/wger/src/wger/core/static/bootstrap-compiled.css
 COPY --chown=wger:wger --from=builder /root/src/wger/core/static/bootstrap-compiled.css.map /home/wger/src/wger/core/static/bootstrap-compiled.css.map
-COPY ${DOCKER_DIR}/entrypoint.sh /home/wger/entrypoint.sh
-COPY ${DOCKER_DIR}/celery/start-beat /start-beat
-COPY ${DOCKER_DIR}/celery/start-worker /start-worker
-COPY ${DOCKER_DIR}/celery/start-flower /start-flower
-RUN chmod +x /home/wger/entrypoint.sh \
-    && chmod +x /start-beat \
-    && chmod +x /start-worker \
-    && chmod +x /start-flower \
-    && chown wger:wger /home/wger/src
+# Explicit modes: the build context's modes depend on the umask it was extracted under.
+COPY --chmod=755 ${DOCKER_DIR}/entrypoint.sh /home/wger/entrypoint.sh
+COPY --chmod=755 ${DOCKER_DIR}/celery/start-beat /start-beat
+COPY --chmod=755 ${DOCKER_DIR}/celery/start-worker /start-worker
+COPY --chmod=755 ${DOCKER_DIR}/celery/start-flower /start-flower
+RUN chown wger:wger /home/wger/src
 
 USER wger
 
