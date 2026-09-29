@@ -395,6 +395,43 @@ class IntervalsPushGymTest(WgerTestCase):
         self.assertEqual([a['external_id'] for a in rerun['adopt']], [event['external_id']])
         self.assertNotIn(event['external_id'], [c['external_id'] for c in rerun['create']])
 
+    def test_dropped_external_id_is_never_recreated_or_orphaned(self):
+        """U2 unverified: if Intervals drops external_id, repeated
+        --recreate-missing runs must neither duplicate nor lose the event."""
+
+        class DropsExternalId(FakeIntervals):
+            def __call__(self, method, url, params=None, json=None, **kw):
+                if method in ('POST', 'PUT') and json:
+                    json = {k: v for k, v in json.items() if k != 'external_id'}
+                return super().__call__(method, url, params=params, json=json, **kw)
+
+        fake = DropsExternalId()
+        with self.assertRaisesMessage(CommandError, 'different external_id'):
+            self.apply(fake)
+        [first] = fake.events
+        key = IntervalsEventLink.objects.get(intervals_event_id=first).external_id
+
+        for flags in (('--recreate-missing',), ('--recreate-missing',), ('--overwrite-mirror',)):
+            report = self.run_command(fake, *flags)
+            self.assertIn(
+                (key, 'ledger event lost external_id'),
+                [(c['external_id'], c['reason']) for c in report['conflict']],
+            )
+            self.assertNotIn(key, [r['external_id'] for r in report['recreate']])
+            with self.assertRaises(CommandError):  # other days still stop on the dropped id
+                self.run_command(fake, *flags, '--apply', '--plan-hash', report['plan_hash'])
+
+        day = fake.events[first]['start_date_local']
+        self.assertEqual(
+            [e['id'] for e in fake.events.values() if e['start_date_local'] == day], [first]
+        )
+        self.assertEqual(IntervalsEventLink.objects.get(external_id=key).intervals_event_id, first)
+
+        self.shorten_routine('2024-03-03')  # every day leaves the plan
+        gone = self.run_command(fake)
+        self.assertIn(key, [c['external_id'] for c in gone['conflict']])
+        self.assertEqual(gone['forget'] + gone['delete'], [])
+
     def test_service_entrypoints_bind_the_user_to_the_configured_athlete(self):
         fake, other = FakeIntervals(), User.objects.get(username='test')
         with mock.patch('wger.intervals.client.requests.request', fake):

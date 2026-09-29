@@ -185,6 +185,21 @@ class PlanOutboundTest(SimpleTestCase):
         self.assertEqual(actions(plan({}, [link(pushed)])), {'forget': [pushed['external_id']]})
         self.assertEqual(actions(plan({}, [link(pushed, state='deleted')])), {})
 
+    def test_ledger_event_without_our_external_id_is_conflict_not_recreate_or_forget(self):
+        want = desired(day(21))
+        pushed = want['wger-gym:3:2040-06-21']
+        for label, lost in (
+            ('missing', remote(pushed, external_id=None)),
+            ('changed', remote(pushed, external_id='user-set-id')),
+        ):
+            for plans in (want, {}):
+                with self.subTest(label, desired=bool(plans)):
+                    result = plan(plans, [link(pushed)], [lost], overwrite=True)
+                    self.assertEqual(actions(result), {'conflict': [pushed['external_id']]})
+                    self.assertEqual(
+                        result['conflict'][0]['reason'], 'ledger event lost external_id'
+                    )
+
     def test_our_prefix_without_ledger_row_is_left_alone_and_duplicates_conflict(self):
         stray = desired(day(25))['wger-gym:3:2040-06-25']
         result = plan({}, events=[remote(stray)])

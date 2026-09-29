@@ -117,12 +117,14 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
     athlete_id = str(athlete_id)
 
     ours = {}
+    by_id = {}
     foreign = 0
     for event in remote_events:
         if str(event.get('athlete_id')) != athlete_id:
             raise PlanError(
                 f'event {event.get("id")} belongs to athlete {event.get("athlete_id")!r}'
             )
+        by_id[str(event.get('id'))] = event
         ext = str(event.get('external_id') or '')
         if ext.startswith(ECHO_PREFIX):
             ours.setdefault(ext, []).append(event)
@@ -167,6 +169,13 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
         moved = (
             remote and link and not pending and str(remote['id']) != str(link['intervals_event_id'])
         )
+        # Our ledger event is still there but no longer carries our key (U2):
+        # it is not gone, so never recreate (a duplicate) or forget it (an orphan).
+        if remote is None and link and not pending and str(link['intervals_event_id']) in by_id:
+            result['conflict'].append(
+                {'external_id': key, 'reason': 'ledger event lost external_id'}
+            )
+            continue
 
         if want and (not link or pending):
             if remote is None:
