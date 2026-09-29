@@ -551,7 +551,24 @@ class SpreadsheetApiTestCase(BaseTestCase, ApiBaseTestCase):
         )
         self.assertEqual(response.content.decode('utf-8-sig').strip(), ','.join(COLUMNS))
 
-        response = self.client.get('/api/v2/routine/import-template/?file=xlsx')
-        workbook = openpyxl.load_workbook(io.BytesIO(response.content))
-        self.assertEqual(workbook.sheetnames, ['routine', 'help'])
-        self.assertEqual([c.value for c in workbook['routine'][1]], COLUMNS)
+        routine = self.import_plan(csv_file(synthetic_rows()))
+        for response in (
+            self.client.get('/api/v2/routine/import-template/?file=xlsx'),
+            self.export(routine, 'xlsx'),
+        ):
+            workbook = openpyxl.load_workbook(io.BytesIO(response.content))
+            self.assertEqual(workbook.sheetnames, ['routine', 'help'])
+            self.assertEqual([c.value for c in workbook['routine'][1]], COLUMNS)
+
+            # Every column is explained once, in header order, with what to do with it
+            rows = [[c.value for c in row] for row in workbook['help'].iter_rows()]
+            start = rows.index(['column', 'what it means', 'do you edit it?']) + 1
+            self.assertEqual([row[0] for row in rows[start:]], COLUMNS)
+            self.assertTrue(all(row[1] and row[2] for row in rows[start:]))
+            self.assertFalse(
+                [c for row in workbook['help'].iter_rows() for c in row if c.data_type == 'f']
+            )
+
+            # The importer still reads only the routine sheet
+            upload = SimpleUploadedFile('x.xlsx', response.content)
+            self.assertEqual(spreadsheet.read_file(upload)[1], [])
