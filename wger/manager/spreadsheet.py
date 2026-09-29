@@ -1108,6 +1108,200 @@ def write_csv(rows: list[list]) -> bytes:
     return out.getvalue().encode('utf-8-sig')
 
 
+def _help_rows() -> list[list[str]]:
+    """The XLSX help sheet: how to use the file, then one row per column"""
+    rep_units = ', '.join(RepetitionUnit.objects.order_by('pk').values_list('name', flat=True))
+    weight_units = ', '.join(WeightUnit.objects.order_by('pk').values_list('name', flat=True))
+    rir = ', '.join(str(o) for o in RIR_OPTIONS[1:])
+    days = Routine.MAX_DURATION_DAYS
+    ids = 'routine_id, day_id, slot_id and entry_id'
+    keep_id = 'Leave as exported. Blank on a new row. Clear it when copying into a new routine.'
+    edit = 'Edit.'
+    clears = 'Edit. Blank removes it on update.'
+
+    guide = [
+        'HOW TO USE THIS FILE',
+        'Only the first sheet (routine) is imported. This help sheet is ignored. '
+        'Keep the header row of the routine sheet exactly as it is.',
+        '',
+        'GETTING STARTED',
+        '1. Export the routine as XLSX, or download the blank template for a new routine.',
+        '2. Edit the routine sheet. Example: to turn 3 sets of 8 into 4 sets of 6-8 reps, '
+        'set sets 4, reps 6 and max_reps 8 on that row.',
+        '3. Save as .xlsx (or .csv) and import it: update for the routine you exported, '
+        'create for a brand-new routine.',
+        '4. Check the preview: every row, which exercise each name matched, and what would be '
+        'created, changed or deleted. Nothing is saved until you confirm.',
+        '',
+        'HOW ROWS WORK',
+        'One row is one exercise in the plan, not one set you performed. '
+        '4 sets of squats is one row with sets 4.',
+        'Rows with the same day_order are one day. Days run in day_order order (1, 2, 3). '
+        'Gaps are fine; the next export numbers them 1, 2, 3 again.',
+        'Inside a day, rows with the same slot_order are one slot, and slots run in '
+        'slot_order order. Two or more exercises in the same slot are a superset, done back '
+        'to back in entry_order order.',
+        'A rest day is one row with day_is_rest yes and no slot or exercise. '
+        'An empty day or empty slot is one row with no exercise.',
+        '',
+        'UPDATING AND COPYING',
+        f'Leave {ids} exactly as exported. They say which existing day, slot or exercise '
+        'row to change. A new row has them blank.',
+        'A row you delete is removed from the routine. Anything with logged workouts cannot '
+        'be removed; the preview says so. Logged workouts are never changed.',
+        'A blank cell does not mean "keep the old value". On update a blank reps, max_reps, '
+        'weight, max_weight, rir, max_rir, rest, max_rest, notes or slot_comment removes it '
+        '(a value with a progression cannot be cleared). Blank rep_unit means Repetitions, '
+        'blank weight_unit kg, blank set_type normal.',
+        f'To copy into a new routine, clear {ids} on every row, clear unsupported (or choose '
+        'to leave those settings out) and give it a new routine_name. Keep exercise_id and '
+        'exercise_uuid: they say which exercise it is, not where it sits in the routine.',
+        'Changing an exercise: exercise_id is used first, then exercise_uuid, then '
+        'exercise_name. Either clear exercise_id and exercise_uuid and type the new '
+        "exercise_name, or put the new exercise's id and name and clear exercise_uuid. "
+        'A new name next to the old id or uuid is refused as a mismatch.',
+        '',
+        'LIMITS',
+        'There is no AMRAP or timer column. Write AMRAP in notes, e.g. "Last set AMRAP". '
+        'rest and timed reps are planned numbers only; the file does not start timers.',
+        'Values that start with = + - @ must be prefixed with an apostrophe. Formulas are refused.',
+        '',
+        'COLUMNS',
+    ]
+    columns = {
+        'routine_id': (
+            'Number of the routine this file came from, filled by export, e.g. 24.',
+            'Leave as exported to update. Clear it to create a new routine.',
+        ),
+        'routine_name': (
+            'Routine name, at most 25 characters, e.g. Upper Lower. Required on the first '
+            'row; later rows blank or the same.',
+            edit,
+        ),
+        'routine_description': (
+            'Text about the routine, at most 1000 characters. First row; later rows blank or '
+            'the same.',
+            edit,
+        ),
+        'start': ('First date of the routine, YYYY-MM-DD, e.g. 2026-10-05. First row.', edit),
+        'end': (
+            f'Last date, YYYY-MM-DD, not before start and at most {days} days after it. First row.',
+            edit,
+        ),
+        'day_id': ('Number of an existing day, filled by export.', keep_id),
+        'day_order': (
+            'Which day the row belongs to and where that day goes: whole number, 1 = first. '
+            'Every row needs one.',
+            'Edit to add, reorder or move days.',
+        ),
+        'day_name': (
+            'Day name, at most 20 characters, e.g. Upper A. Same on every row of the day.',
+            edit,
+        ),
+        'day_description': (
+            'Text about the day, at most 1000 characters. Same on every row of the day.',
+            edit,
+        ),
+        'day_is_rest': ('yes for a rest day; no or blank for a training day.', edit),
+        'slot_id': ('Number of an existing slot, filled by export.', keep_id),
+        'slot_order': (
+            'Position of the slot in the day: whole number, 1 = first. Required on exercise '
+            'rows. Same day_order and slot_order = same slot = superset.',
+            'Edit to reorder or make supersets.',
+        ),
+        'slot_comment': (
+            'Note for the whole slot, at most 200 characters, e.g. No rest inside the '
+            'superset. Same on every row of the slot.',
+            clears,
+        ),
+        'entry_id': ('Number of an existing exercise row of the plan, filled by export.', keep_id),
+        'entry_order': (
+            'Order of the exercises inside a slot: whole number, 1 = first, used once per '
+            'slot. Required.',
+            edit,
+        ),
+        'exercise_id': (
+            "The exercise's wger number, e.g. 73. Says which exercise it is and is checked "
+            'first. Not a place in the routine, so it stays when copying.',
+            'Leave as exported. To change the exercise, see UPDATING AND COPYING.',
+        ),
+        'exercise_uuid': (
+            "The exercise's permanent code, used when exercise_id is blank. Stays when copying.",
+            'Leave as exported. To change the exercise, see UPDATING AND COPYING.',
+        ),
+        'exercise_name': (
+            'Exact exercise name or alias (any capitals), in your language or English, e.g. '
+            'Bench Press. Next to an id or uuid it must belong to that exercise.',
+            'Type it on new rows. The preview shows the match.',
+        ),
+        'set_type': (f'Kind of set: {", ".join(ExerciseType.values)}. Blank = normal.', edit),
+        'sets': ('How many sets of this exercise: whole number 1-50, e.g. 4. Required.', edit),
+        'reps': (
+            'Target per set, counted in rep_unit: 0-3000, up to 2 decimals. e.g. 8 '
+            'repetitions, or 45 with rep_unit Seconds for a 45 second hold.',
+            clears,
+        ),
+        'max_reps': (
+            'Top of a reps range: reps 8 and max_reps 12 means 8-12. A plan target, not a '
+            'personal record. Not below reps.',
+            clears,
+        ),
+        'rep_unit': (
+            f'Unit of reps and max_reps: {rep_units}. Blank = Repetitions. For planned time '
+            'use Seconds and type plain seconds in reps, e.g. 45, not 0:45 or 45s.',
+            edit,
+        ),
+        'weight': (
+            'Target per set, counted in weight_unit: 0-3000, up to 2 decimals, e.g. 60 (kg). '
+            'With Kilometers Per Hour it is a speed, e.g. 10 = 10 km/h.',
+            clears,
+        ),
+        'max_weight': (
+            'Top of a weight range: weight 60 and max_weight 70 means 60-70. A plan target, '
+            'not a personal record. Not below weight.',
+            clears,
+        ),
+        'weight_unit': (
+            f'Unit of weight and max_weight: {weight_units}. Blank = kg. kg is a load; use '
+            'Kilometers Per Hour, not kg, when weight is a speed.',
+            edit,
+        ),
+        'rir': (
+            f'Reps in reserve, the reps left in the tank after each set: one of {rir}, e.g. 2.',
+            clears,
+        ),
+        'max_rir': (
+            'Top of a reps in reserve range, e.g. rir 1 and max_rir 2. Not below rir.',
+            clears,
+        ),
+        'rest': (
+            'Rest between sets in seconds: whole number 0-1800, e.g. 120 = 2 minutes.',
+            clears,
+        ),
+        'max_rest': (
+            'Top of a rest range in seconds: whole number 0-600, e.g. rest 90 and max_rest 120. '
+            'Not below rest.',
+            clears,
+        ),
+        'notes': (
+            'Note for this exercise, at most 100 characters, e.g. Pause at the bottom, or '
+            'Last set AMRAP.',
+            clears,
+        ),
+        'unsupported': (
+            'Filled by export: settings this file cannot show, separated by ;, e.g. '
+            'progression. Update keeps them as they are. Create stops unless you choose to '
+            'leave them out.',
+            'Leave as exported.',
+        ),
+    }
+    return [
+        *([line] for line in guide),
+        ['column', 'what it means', 'do you edit it?'],
+        *([column, *columns[column]] for column in COLUMNS),
+    ]
+
+
 def write_xlsx(rows: list[list], with_help: bool = False) -> bytes:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -1124,30 +1318,12 @@ def write_xlsx(rows: list[list], with_help: bool = False) -> bytes:
 
     if with_help:
         help_sheet = workbook.create_sheet('help')
-        rep_units = ', '.join(RepetitionUnit.objects.order_by('pk').values_list('name', flat=True))
-        weight_units = ', '.join(WeightUnit.objects.order_by('pk').values_list('name', flat=True))
-        for line in (
-            (
-                'Only the first sheet is imported. One row per exercise; '
-                'a rest day is one row with day_is_rest yes and no slot or exercise.'
-            ),
-            'Rows with the same day_order form a day, the same day_order and slot_order a slot. '
-            'Several exercises in one slot are a superset.',
-            'Leave the *_id columns blank to create; export an existing routine to update it.',
-            'Exercises: exercise_id, else exercise_uuid, else the exact exercise_name or alias.',
-            f'set_type: {", ".join(ExerciseType.values)}. sets is required (1-50).',
-            f'rep_unit (reps, max_reps): {rep_units}. Default Repetitions.',
-            f'weight_unit (weight, max_weight): {weight_units}. Default kg.',
-            'Cardio: plan targets with these units, e.g. reps 5 in Kilometers or 20 in Minutes, '
-            'weight 10 in Kilometers Per Hour. Actual cardio results are logged in the gym, '
-            'not imported.',
-            f'rir, max_rir: {", ".join(str(o) for o in RIR_OPTIONS[1:])}. rest: seconds (0-1800), '
-            'max_rest: seconds (0-600).',
-            'Values that start with = + - @ must be prefixed with an apostrophe. Formulas are '
-            'refused.',
-        ):
-            help_sheet.append([line])
-            help_sheet.cell(help_sheet.max_row, 1).data_type = 's'
+        for letter, width in zip('ABC', (20, 100, 60)):
+            help_sheet.column_dimensions[letter].width = width
+        for line in _help_rows():
+            help_sheet.append(line)
+            for cell in help_sheet[help_sheet.max_row]:
+                cell.data_type = 's'
 
     out = io.BytesIO()
     workbook.save(out)
