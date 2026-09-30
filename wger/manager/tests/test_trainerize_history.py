@@ -179,6 +179,33 @@ class PlanTestCase(SimpleTestCase):
         long = plan(workout(exercise(12, stats(reps=1)), endTime='2026-01-07 03:00:00'), MAPPING)
         self.assertEqual(long['status'], 'held')
 
+    def test_unreliable_time_anchors_the_date_and_keeps_source_times(self):
+        for end in ('2026-01-09 03:00:00', '2026-01-06 21:00:00', None):
+            source = workout(exercise(12, stats(reps=1)), endTime=end)
+            result = plan(source, MAPPING, unreliable_time=True)
+            self.assertEqual(result['status'], 'ready')
+            # Never the source span, never an open session: start == end at the anchor
+            self.assertEqual(result['datetime_start'], '2026-01-07T06:00:00+11:00')
+            self.assertEqual(result['datetime_end'], result['datetime_start'])
+            self.assertTrue(result['time_unknown'])
+            self.assertTrue(
+                result['notes'].endswith(
+                    'Original source times (UTC, unreliable, not the workout duration): '
+                    f'start 2026-01-06 21:35:19, end {end}\n'
+                    'source start/end times are unreliable; 06:00 Australia/Sydney is a display '
+                    'anchor, not a measured start; duration unknown.'
+                )
+            )
+
+    def test_unreliable_time_keeps_reliable_times(self):
+        result = plan(workout(exercise(12, stats(reps=1))), MAPPING, unreliable_time=True)
+        self.assertEqual(
+            (result['datetime_start'], result['datetime_end']),
+            ('2026-01-06T21:35:19+00:00', '2026-01-06T22:34:28+00:00'),
+        )
+        self.assertNotIn('unreliable', result['notes'])
+        self.assertFalse(result['time_unknown'])
+
     def test_setless_workout_needs_clarification(self):
         self.assertEqual(plan(workout(exercise(12, stats())), MAPPING)['status'], 'held')
         result = plan(
@@ -240,6 +267,22 @@ class ApplyTestCase(WgerTestCase):
         self.assertEqual(
             (WorkoutSession.objects.count(), WorkoutLog.objects.count()), (sessions, logs)
         )
+
+    def test_unknown_time_is_stored_explicitly_or_refused(self):
+        ready = plan(
+            workout(exercise(12, stats(reps=1)), endTime='2026-01-09 03:00:00'),
+            MAPPING,
+            unreliable_time=True,
+        )
+        before = (WorkoutSession.objects.count(), WorkoutLog.objects.count())
+        if not hasattr(WorkoutSession, 'time_unknown'):
+            # Never stored as a measured 06:00 session without the explicit flag
+            with self.assertRaises(TypeError):
+                apply(ready, user_id=1, routine_id=1, day_id=1)
+            self.assertEqual((WorkoutSession.objects.count(), WorkoutLog.objects.count()), before)
+            return
+        session = WorkoutSession.objects.get(pk=apply(ready, user_id=1, routine_id=1, day_id=1))
+        self.assertTrue(session.time_unknown)
 
     def test_held_plan_and_foreign_routine_are_refused(self):
         with self.assertRaises(ValueError):

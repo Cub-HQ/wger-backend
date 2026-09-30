@@ -23,6 +23,10 @@ TIME_UNKNOWN = (
     'time not recorded; 06:00 Australia/Sydney is a display anchor, not a measured start; '
     'duration unknown.'
 )
+TIME_UNRELIABLE = (
+    'source start/end times are unreliable; 06:00 Australia/Sydney is a display anchor, '
+    'not a measured start; duration unknown.'
+)
 REPS, SECONDS, KILOMETERS = 1, 3, 6
 KG, KMH = 1, 5
 METRICS = ('reps', 'weight', 'time', 'distance', 'calories', 'level', 'speed')
@@ -99,7 +103,15 @@ def _log(stats, holds, name, omitted=None, source_id=None):
     return log
 
 
-def plan(workout, mapping, *, clarification=None, differences=None, omit_incomplete=False):
+def plan(
+    workout,
+    mapping,
+    *,
+    clarification=None,
+    differences=None,
+    omit_incomplete=False,
+    unreliable_time=False,
+):
     """
     mapping: {source exercise id (str): wger exercise id}, validated provenance only.
     clarification: user-confirmed note for a completed workout with no logged sets.
@@ -107,6 +119,9 @@ def plan(workout, mapping, *, clarification=None, differences=None, omit_incompl
     omit_incomplete: user-approved policy: import the valid sets and list each zero-only or
     measure-less set in the notes and plan['omitted'] instead of holding the workout.
     A workout left with no usable set stays held.
+    unreliable_time: user-approved policy: a source session that is open, negative or longer
+    than the maximum is anchored like a date-only workout (duration unknown) instead of held;
+    the original source times stay in the notes as provenance, never as the duration.
     """
     differences = differences or {}
     holds, logs, provenance = [], [], []
@@ -144,17 +159,28 @@ def plan(workout, mapping, *, clarification=None, differences=None, omit_incompl
                     }
                 )
 
+    start = end = None
+    notes_tail = []
     if workout.get('startTime'):
         start = _utc(workout['startTime'])
         end = _utc(workout['endTime']) if workout.get('endTime') else None
         if end is None or not start <= end <= start + MAX_SESSION:
-            holds.append(f'source session {start}..{end} is open, negative or longer than 5 hours')
-        notes_tail = []
-    else:
+            if unreliable_time:
+                notes_tail.append(
+                    'Original source times (UTC, unreliable, not the workout duration): '
+                    f'start {workout["startTime"]}, end {workout.get("endTime")}'
+                )
+                start = end = None
+            else:
+                holds.append(
+                    f'source session {start}..{end} is open, negative or longer than 5 hours'
+                )
+    time_unknown = start is None
+    if time_unknown:
         start = end = datetime.datetime.combine(
             datetime.date.fromisoformat(workout['date']), datetime.time(6), SYDNEY
         )
-        notes_tail = [TIME_UNKNOWN]
+        notes_tail.append(TIME_UNRELIABLE if notes_tail else TIME_UNKNOWN)
 
     if not logs and not holds:
         if omitted:
@@ -182,6 +208,8 @@ def plan(workout, mapping, *, clarification=None, differences=None, omit_incompl
         'holds': holds,
         'datetime_start': start.isoformat(),
         'datetime_end': end.isoformat() if end else None,
+        # Anchored at the display time: the session's time and duration are unknown
+        'time_unknown': time_unknown,
         'notes': notes,
         'logs': logs,
         'omitted': omitted or [],
@@ -260,6 +288,9 @@ def apply(ready, *, user_id, routine_id, day_id):
         if clash.exists():
             found = [str(s.pk) for s in clash]
             raise AlreadyPresent(f'{ready["source_id"]}: session(s) {found} already present')
+        # Unknown time needs WorkoutSession.time_unknown; a model without the column
+        # refuses the plan here (TypeError) instead of storing a measured-looking time.
+        unknown = {'time_unknown': True} if ready['time_unknown'] else {}
         session = WorkoutSession(
             user=user,
             routine=day.routine,
@@ -267,6 +298,7 @@ def apply(ready, *, user_id, routine_id, day_id):
             notes=ready['notes'],
             datetime_start=start,
             datetime_end=end,
+            **unknown,
         )
         session.clean()
         session.save()
@@ -280,12 +312,13 @@ def apply(ready, *, user_id, routine_id, day_id):
             ).save()
 
         stored = WorkoutSession.objects.get(pk=session.pk)
-        if (stored.notes, stored.datetime_start, stored.datetime_end, stored.day_id) != (
-            ready['notes'],
-            start,
-            end,
-            day.pk,
-        ):
+        if (
+            stored.notes,
+            stored.datetime_start,
+            stored.datetime_end,
+            stored.day_id,
+            getattr(stored, 'time_unknown', False),
+        ) != (ready['notes'], start, end, day.pk, ready['time_unknown']):
             raise RuntimeError('session readback differs')
         order = ('exercise_id', 'iteration')
         rows = list(WorkoutLog.objects.filter(session=session).order_by(*order).values(*LOG_FIELDS))
