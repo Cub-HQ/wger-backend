@@ -20,6 +20,7 @@ from django.urls import reverse
 
 # wger
 from wger.core.tests.base_testcase import WgerTestCase
+from wger.manager import routine_recovery
 from wger.manager.models import (
     Routine,
     SetsConfig,
@@ -122,6 +123,27 @@ class CopyRoutineTestCase(WgerTestCase):
 
         self.user_login('test')
         self.copy_routine_and_assert(pk=3)
+
+    def test_copy_trashed_routine(self):
+        """
+        The owner's copy of a trashed routine is an active routine; others get 403
+        """
+        routine = Routine.objects.get(pk=3)
+        routine.is_template = True
+        routine.is_public = True
+        routine.save()
+        routine_recovery.trash(routine.user, 3, routine_recovery.revision(routine), 'copy-test')
+
+        self.user_login('admin')
+        response = self.client.get(reverse('manager:routine:copy', kwargs={'pk': '3'}))
+        self.assertEqual(response.status_code, 403)
+
+        self.user_login('test')
+        self.copy_routine_and_assert(pk=3)
+        routine_copy = Routine.objects.latest('pk')
+        self.assertIsNotNone(Routine.objects.get(pk=3).deleted_at)
+        self.assertIsNone(routine_copy.deleted_at)
+        self.assertIsNone(routine_copy.replaced_by)
 
     def test_copy_workout_other(self):
         """

@@ -651,7 +651,7 @@ class UserDetailView(LoginRequiredMixin, WgerMultiplePermissionRequiredMixin, De
         """
         context = super(UserDetailView, self).get_context_data(**kwargs)
         out = []
-        routines = Routine.objects.filter(user=self.object).all()
+        routines = Routine.objects.filter(user=self.object, deleted_at__isnull=True)
         for routine in routines:
             logs = WorkoutLog.objects.filter(routine=routine)
             out.append(

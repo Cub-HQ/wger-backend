@@ -14,6 +14,8 @@
 # along with Workout Manager.  If not, see <http://www.gnu.org/licenses/>.
 
 # Standard Library
+from contextlib import ExitStack
+from functools import partial
 
 # Django
 from django.conf import settings
@@ -28,6 +30,7 @@ from drf_spectacular.utils import (
     extend_schema,
 )
 from rest_framework import (
+    permissions,
     status,
     viewsets,
 )
@@ -42,6 +45,7 @@ from rest_framework.response import Response
 # wger
 from wger.manager import (
     history_integrity,
+    routine_recovery,
     spreadsheet,
 )
 from wger.manager.api.consts import BASE_CONFIG_FILTER_FIELDS
@@ -75,6 +79,7 @@ from wger.manager.api.serializers import (
 )
 from wger.manager.models import (
     Day,
+    Label,
     MaxRepetitionsConfig,
     MaxRestConfig,
     MaxRiRConfig,
@@ -105,7 +110,91 @@ def request_user_or_trainer_q(request):
     return Q(user=request.user)
 
 
-class RoutineViewSet(viewsets.ModelViewSet):
+def refuse_trainer(request):
+    """
+    A trainer logged in as a member gets no owner planning or recovery rights
+    (wger-gym#24); 404 like the other owner-only routes
+    """
+    if request.session.get('trainer.identity'):
+        raise NotFound()
+
+
+def _recorded(request, routine_ids, write):
+    """
+    Run `write()` as a recorded planning edit of every routine it touches and
+    add the recovery headers to its response
+    """
+    with ExitStack() as stack:
+        records = [
+            stack.enter_context(routine_recovery.recorded_edit(request.user, routine_id))
+            for routine_id in sorted(routine_ids)
+        ]
+        response = write()
+    record = next((r for r in records if r.recovery), records[0])
+    response['X-Routine-Revision'] = record.revision
+    if record.recovery:
+        response['X-Routine-Recovery-Id'] = str(record.recovery.pk)
+        response['X-Routine-Recovery-Expires-At'] = routine_recovery.iso(record.recovery.expires_at)
+    return response
+
+
+class RecoveryErrorMixin:
+    """Answer refused recovery operations with their `{detail, code}` body"""
+
+    def handle_exception(self, exc):
+        if isinstance(exc, routine_recovery.RecoveryError):
+            return Response(exc.body(), status=exc.status)
+        return super().handle_exception(exc)
+
+
+class RecordedPlanEditMixin(RecoveryErrorMixin):
+    """Writes to a routine's plan children record an undoable `edit` recovery"""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.method not in permissions.SAFE_METHODS:
+            refuse_trainer(request)
+
+    def _routine_ids(self, request, instance=None):
+        ids = set()
+        if instance is not None:
+            ids.add(routine_recovery.routine_id_of(instance))
+        model, field = self.get_owner_objects()[0]
+        pk = request.data.get(field) if isinstance(request.data, dict) else None
+        try:
+            parent = model.objects.filter(pk=pk).first() if pk is not None else None
+        except (ValueError, TypeError, RecoveryValidationError):
+            parent = None
+        if parent is not None:
+            ids.add(routine_recovery.routine_id_of(parent))
+        return ids
+
+    def create(self, request, *args, **kwargs):
+        self._check_owner_permission(request)
+        ids = self._routine_ids(request)
+        write = partial(super().create, request, *args, **kwargs)
+        # No valid parent: the serializer rejects it and nothing is written
+        return _recorded(request, ids, write) if ids else write()
+
+    def update(self, request, *args, **kwargs):
+        self._check_owner_permission(request)
+        instance = self.get_object()
+        ids = self._routine_ids(request, instance)
+        # History and undo snapshots point at these rows by primary key. Moved to
+        # another routine, history and plan disagree and no undo can move them
+        # back, so only labels (never referenced by history) may change routine.
+        if len(ids) > 1 and not isinstance(instance, Label):
+            raise routine_recovery.RecoveryError(
+                409, 'cross_routine_move', 'Plan rows cannot be moved to another routine.'
+            )
+        return _recorded(request, ids, partial(super().update, request, *args, **kwargs))
+
+    def destroy(self, request, *args, **kwargs):
+        ids = {routine_recovery.routine_id_of(self.get_object())}
+        return _recorded(request, ids, partial(super().destroy, request, *args, **kwargs))
+
+
+class RoutineViewSet(RecoveryErrorMixin, viewsets.ModelViewSet):
     """
     API endpoint for routine objects
     """
@@ -126,20 +215,140 @@ class RoutineViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """
         Only allow access to appropriate objects
+
+        Trashed routines are hidden from lists (the owner's are listed with
+        ?trashed=true) and from everybody but the owner.
         """
         # REST API generation
         if getattr(self, 'swagger_fake_view', False):
             return Routine.objects.none()
 
-        return Routine.objects.filter(
-            request_user_or_trainer_q(request=self.request) | Q(is_public=True)
+        qs = Routine.objects.filter(
+            request_user_or_trainer_q(request=self.request)
+            | Q(is_public=True, deleted_at__isnull=True)
         )
+        if self.action != 'list':
+            # Only the owner sees a trashed routine, also through the trainer branch
+            return qs.filter(Q(deleted_at__isnull=True) | Q(user=self.request.user))
+        if self.request.query_params.get('trashed') == 'true':
+            return qs.filter(user=self.request.user, deleted_at__isnull=False)
+        return qs.filter(deleted_at__isnull=True)
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.method not in permissions.SAFE_METHODS or self.action in (
+            'revision',
+            'recoveries',
+        ):
+            refuse_trainer(request)
 
     def perform_create(self, serializer):
         """
         Set the owner
         """
         serializer.save(user=self.request.user)
+
+    def update(self, request, *args, **kwargs):
+        routine = self.get_object()
+        return _recorded(request, [routine.pk], partial(super().update, request, *args, **kwargs))
+
+    def destroy(self, request, *args, **kwargs):
+        """Move the routine to the trash (undoable for 14 days)"""
+        routine = self.get_object()
+        if routine.user_id != request.user.pk:
+            raise NotFound()
+        return Response(routine_recovery.legacy_delete(request.user, routine.pk))
+
+    def _owned(self, pk) -> Routine:
+        routine = Routine.objects.filter(pk=pk, user=self.request.user).first()
+        if routine is None:
+            raise NotFound()
+        return routine
+
+    @extend_schema(responses={200: OpenApiTypes.OBJECT})
+    @action(detail=True, url_path='revision', pagination_class=None)
+    def revision(self, request, pk):
+        """Current plan revision, for the stale checks of trash/restore/rebuild"""
+        routine = self._owned(pk)
+        return Response(
+            {
+                'routine_id': routine.pk,
+                'revision': routine_recovery.revision(routine),
+                'deleted_at': routine_recovery.iso(routine.deleted_at),
+                'replaced_by': routine.replaced_by_id,
+            }
+        )
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={200: OpenApiTypes.OBJECT})
+    @action(detail=True, methods=['post'], url_path='trash', pagination_class=None)
+    def trash(self, request, pk):
+        """Move the routine to the trash; restorable for 14 days"""
+        routine = self._owned(pk)
+        return Response(
+            routine_recovery.trash(
+                request.user,
+                routine.pk,
+                request.data.get('expected_revision'),
+                request.data.get('idempotency_key'),
+            )
+        )
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={200: OpenApiTypes.OBJECT})
+    @action(detail=True, methods=['post'], url_path='rebuild-preview', pagination_class=None)
+    def rebuild_preview(self, request, pk):
+        """Validate a replacement plan and show the change; nothing is written"""
+        return Response(
+            routine_recovery.preview(
+                request.user,
+                self._owned(pk).pk,
+                request.data.get('expected_revision'),
+                request.data.get('replacement'),
+            )
+        )
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={200: OpenApiTypes.OBJECT})
+    @action(detail=True, methods=['post'], url_path='rebuild', pagination_class=None)
+    def rebuild(self, request, pk):
+        """Replace the plan with a new linked routine; the old one stays intact and restorable"""
+        return Response(
+            routine_recovery.rebuild(
+                request.user,
+                self._owned(pk).pk,
+                request.data.get('expected_revision'),
+                request.data.get('replacement'),
+                request.data.get('plan_hash'),
+                request.data.get('idempotency_key'),
+            )
+        )
+
+    @extend_schema(responses={200: OpenApiTypes.OBJECT})
+    @action(detail=False, url_path='recoveries')
+    def recoveries(self, request):
+        """The owner's unexpired trash, edit, rebuild and restore records"""
+        routine_id = request.query_params.get('routine')
+        if routine_id is not None and not routine_id.isdigit():
+            raise ValidationError({'routine': 'Must be a routine id.'})
+        qs = routine_recovery.recoveries(request.user, routine_id and int(routine_id))
+        page = self.paginate_queryset(qs)
+        return self.get_paginated_response([routine_recovery.recovery_payload(r) for r in page])
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={200: OpenApiTypes.OBJECT})
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path=r'recoveries/(?P<recovery_id>[^/.]+)/restore',
+        pagination_class=None,
+    )
+    def restore(self, request, recovery_id):
+        """Undo a recorded operation (last-in-first-out)"""
+        return Response(
+            routine_recovery.restore(
+                request.user,
+                recovery_id,
+                request.data.get('expected_revision'),
+                request.data.get('idempotency_key'),
+            )
+        )
 
     @extend_schema(responses={200: WorkoutDayDataDisplayModeSerializer(many=True)})
     @action(detail=True, url_path='date-sequence-display', pagination_class=None)
@@ -297,12 +506,23 @@ class RoutineViewSet(viewsets.ModelViewSet):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            routine = spreadsheet.apply_plan(plan, request.user)
+            if target is None:
+                routine = spreadsheet.apply_plan(plan, request.user)
+                return Response(
+                    {'id': routine.pk, 'plan_hash': plan.hash}, status=status.HTTP_201_CREATED
+                )
+            with routine_recovery.recorded_edit(request.user, target.pk) as record:
+                routine = spreadsheet.apply_plan(plan, request.user)
 
-        return Response(
-            {'id': routine.pk, 'plan_hash': plan.hash},
-            status=status.HTTP_201_CREATED if mode == 'create' else status.HTTP_200_OK,
-        )
+        body = {'id': routine.pk, 'plan_hash': plan.hash, 'revision': record.revision}
+        response = Response(body)
+        response['X-Routine-Revision'] = record.revision
+        if record.recovery:
+            body['recovery_id'] = str(record.recovery.pk)
+            body['expires_at'] = routine_recovery.iso(record.recovery.expires_at)
+            response['X-Routine-Recovery-Id'] = body['recovery_id']
+            response['X-Routine-Recovery-Expires-At'] = body['expires_at']
+        return response
 
     @staticmethod
     def get_owner_objects():
@@ -334,7 +554,9 @@ def _import_arguments(request):
             pk = int(request.data.get('routine', ''))
         except ValueError:
             raise ValidationError({'routine': 'Required for update.'})
-        target = Routine.objects.filter(pk=pk, user=request.user, is_template=False).first()
+        target = Routine.objects.filter(
+            pk=pk, user=request.user, is_template=False, deleted_at__isnull=True
+        ).first()
         if target is None:
             raise NotFound()
     return mode, target, drop
@@ -360,7 +582,9 @@ class UserRoutineTemplateViewSet(viewsets.ReadOnlyModelViewSet):
             return Routine.objects.none()
 
         # If the current user is a trainer, also return their templates.
-        return Routine.templates.filter(request_user_or_trainer_q(request=self.request))
+        return Routine.templates.filter(
+            request_user_or_trainer_q(request=self.request), deleted_at__isnull=True
+        )
 
 
 class PublicRoutineTemplateViewSet(viewsets.ReadOnlyModelViewSet):
@@ -378,7 +602,7 @@ class PublicRoutineTemplateViewSet(viewsets.ReadOnlyModelViewSet):
         """
         Only allow access to appropriate objects
         """
-        return Routine.public.all()
+        return Routine.public.filter(deleted_at__isnull=True)
 
 
 # Django
@@ -525,7 +749,7 @@ class WorkoutLogViewSet(WgerOwnerObjectModelViewSet):
         ]
 
 
-class RoutineDayViewSet(WgerOwnerObjectModelViewSet):
+class RoutineDayViewSet(RecordedPlanEditMixin, WgerOwnerObjectModelViewSet):
     """
     API endpoint for routine day objects
     """
@@ -561,7 +785,7 @@ class RoutineDayViewSet(WgerOwnerObjectModelViewSet):
         return [(Routine, 'routine')]
 
 
-class SlotViewSet(WgerOwnerObjectModelViewSet):
+class SlotViewSet(RecordedPlanEditMixin, WgerOwnerObjectModelViewSet):
     """
     API endpoint for routine slot objects
     """
@@ -593,7 +817,7 @@ class SlotViewSet(WgerOwnerObjectModelViewSet):
         return [(Day, 'day')]
 
 
-class SlotEntryViewSet(WgerOwnerObjectModelViewSet):
+class SlotEntryViewSet(RecordedPlanEditMixin, WgerOwnerObjectModelViewSet):
     """
     API endpoint for routine slot entry objects
     """
@@ -631,7 +855,7 @@ class SlotEntryViewSet(WgerOwnerObjectModelViewSet):
         return [(Slot, 'slot')]
 
 
-class AbstractConfigViewSet(WgerOwnerObjectModelViewSet):
+class AbstractConfigViewSet(RecordedPlanEditMixin, WgerOwnerObjectModelViewSet):
     """
     API endpoint for weight config objects
     """

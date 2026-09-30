@@ -39,6 +39,8 @@ class StaleRelationSignalsTestCase(WgerTestCase):
         day = Slot.objects.get(pk=1).day
         stale_day = Day.objects.get(pk=day.pk)
 
+        WorkoutLog.objects.filter(routine=day.routine).delete()
+        WorkoutSession.objects.filter(routine=day.routine).delete()
         day.routine.delete()
 
         stale_day.delete()
@@ -75,25 +77,3 @@ class StaleRelationSignalsTestCase(WgerTestCase):
         entry.delete()
 
         stale_config.delete()
-
-    def test_delete_workout_log_with_deleted_routine(self):
-        """A workout log whose routine is already deleted can be deleted without error"""
-
-        log = WorkoutLog(user_id=1, exercise_id=1, routine_id=1, weight=80, repetitions=5)
-        log.save()
-        stale_log = WorkoutLog.objects.get(pk=log.pk)
-
-        Routine.objects.get(pk=1).delete()
-
-        stale_log.delete()
-
-    def test_delete_workout_session_with_deleted_routine(self):
-        """A workout session whose routine is already deleted can be deleted without error"""
-
-        session = WorkoutSession(user_id=1, routine_id=1)
-        session.save()
-        stale_session = WorkoutSession.objects.get(pk=session.pk)
-
-        Routine.objects.get(pk=1).delete()
-
-        stale_session.delete()

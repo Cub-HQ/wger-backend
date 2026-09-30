@@ -446,6 +446,9 @@ def upload_powersync_data(request):
     if handler is None:
         logger.warning(f'Received unknown PowerSync table: {table}')
         return JsonResponse({'error': f'Unknown table: {table}'}, status=200)
+    if handler.owner_only and request.session.get('trainer.identity'):
+        # A trainer logged in as the member has no owner planning rights (wger-gym#24)
+        return JsonResponse({'error': 'Forbidden', 'details': 'Owner only'}, status=200)
 
     # Handlers return either `None` (processed) or an error dict for a
     # deterministic refusal (validation, FK ownership, etc). We propagate these
