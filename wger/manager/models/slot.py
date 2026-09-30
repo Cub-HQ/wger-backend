@@ -69,12 +69,16 @@ class Slot(models.Model):
         """
         Checks whether this slot is a superset or not
         """
-        entries = getattr(self, 'prefetched_entries', self.entries.all())
+        entries = (
+            self.prefetched_entries if hasattr(self, 'prefetched_entries') else self.entries.all()
+        )
         return len(entries) > 1
 
     def set_data(self, iteration: int) -> List[SetExerciseData]:
         """Calculates the set data for a specific iteration"""
-        entries = getattr(self, 'prefetched_entries', self.entries.all())
+        entries = (
+            self.prefetched_entries if hasattr(self, 'prefetched_entries') else self.entries.all()
+        )
 
         result = [SetExerciseData(data=e.get_config_data(iteration), config=e) for e in entries]
 

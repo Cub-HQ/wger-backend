@@ -56,6 +56,68 @@ from wger.utils.cache import CacheKeyMapper
 logger = logging.getLogger(__name__)
 
 
+def resolve_date_sequence(start, end, days, fit_in_week, labels, can_proceed):
+    """
+    Walk the calendar start..end over the ordered days, the native scheduling rule
+
+    Pure: ``days`` need not be saved (the private preview resolves unsaved days),
+    iterations are therefore counted per day position, not per primary key.
+    ``can_proceed(day, date)`` decides whether the cycle may advance on a date.
+    """
+    nr_of_days = len(days)
+    if not nr_of_days:
+        return []
+
+    iteration_counter = Counter({i: 1 for i in range(nr_of_days)})
+    sequence = []
+    is_first = True
+    day_index = 0
+    current_date = start
+
+    while current_date <= end:
+        wrapped = False
+        if can_proceed(days[day_index], current_date) and not is_first:
+            iteration_counter[day_index] += 1
+            day_index = (day_index + 1) % nr_of_days
+            wrapped = day_index == 0
+
+        # If fit_in_week is set we need to fill the rest of the week with placeholders.
+        # This must only happen when the cycle actually wrapped around, not when the
+        # first day is stuck at index 0 waiting for logs (need_logs_to_advance).
+        if fit_in_week and nr_of_days % 7 != 0 and wrapped:
+            days_to_monday = 7 - current_date.weekday()
+            for i in range(days_to_monday):
+                placeholder_date = current_date + datetime.timedelta(days=i)
+                if placeholder_date > end:
+                    break
+                sequence.append(
+                    WorkoutDayData(
+                        date=placeholder_date,
+                        day=None,
+                        label=labels.get(placeholder_date),
+                        # This is ugly, but we don't want to advance the iteration
+                        iteration=iteration_counter[day_index] - 1,
+                    )
+                )
+            current_date += datetime.timedelta(days=days_to_monday)
+            if current_date > end:
+                continue
+
+        # Add day data and advance the date
+        sequence.append(
+            WorkoutDayData(
+                iteration=iteration_counter[day_index],
+                date=current_date,
+                day=days[day_index],
+                label=labels.get(current_date),
+            )
+        )
+        current_date += datetime.timedelta(days=1)
+        is_first = False
+
+    return sequence
+
+
 class Routine(models.Model):
     """
     Model for a routine
@@ -254,78 +316,28 @@ class Routine(models.Model):
             for session in day.workoutsession_set.all():
                 workout_session_map[day.id].add(session.local_day_in(tz))
 
-        # Main sequence generation logic
-        labels = self.label_dict
-        current_date = self.start
         days_list = list(days)
-        nr_of_days = len(days_list)
-        iteration_counter = Counter()
-        sequence = []
-        is_first = True
-        day_index = 0
-
-        for day in days:
-            iteration_counter[day.id] = 1
-
-        while current_date <= self.end:
-            current_day = days_list[day_index]
-            previous_date = current_date - datetime.timedelta(days=1)
-
+        sequence = resolve_date_sequence(
+            self.start,
+            self.end,
+            days_list,
+            self.fit_in_week,
+            self.label_dict,
             # Checks whether the user can proceed to the next day in the sequence
             #
             # This is possible if
             # - the day doesn't require logs
-            # - the day requires logs, and they exist. Note that we check for logs on the previous
-            #   day, since when a user logs a session for a day, the advancement should happen on
-            #   the next day, not immediately.
-            # - the date is in the future (used e.g. for calendars where we assume we will proceed)
-            has_session = previous_date in workout_session_map[current_day.id]
-            can_proceed = (
-                not current_day.need_logs_to_advance
-                or (current_day.need_logs_to_advance and has_session)
-                or current_date > timezone.localdate(timezone=tz)
-            )
-
-            wrapped = False
-            if can_proceed and not is_first:
-                iteration_counter[current_day.id] += 1
-                day_index = (day_index + 1) % nr_of_days
-                wrapped = day_index == 0
-                current_day = days_list[day_index]
-
-            # If fit_in_week is set we need to fill the rest of the week with placeholders.
-            # This must only happen when the cycle actually wrapped around, not when the
-            # first day is stuck at index 0 waiting for logs (need_logs_to_advance).
-            if self.fit_in_week and nr_of_days % 7 != 0 and wrapped:
-                days_to_monday = 7 - current_date.weekday()
-                for i in range(days_to_monday):
-                    placeholder_date = current_date + datetime.timedelta(days=i)
-                    if placeholder_date > self.end:
-                        break
-                    sequence.append(
-                        WorkoutDayData(
-                            date=placeholder_date,
-                            day=None,
-                            label=labels.get(placeholder_date),
-                            # This is ugly, but we don't want to advance the iteration
-                            iteration=iteration_counter[current_day.id] - 1,
-                        )
-                    )
-                current_date += datetime.timedelta(days=days_to_monday)
-                if current_date > self.end:
-                    continue
-
-            # Add day data and advance the date
-            sequence.append(
-                WorkoutDayData(
-                    iteration=iteration_counter[current_day.id],
-                    date=current_date,
-                    day=current_day,
-                    label=labels.get(current_date),
-                )
-            )
-            current_date += datetime.timedelta(days=1)
-            is_first = False
+            # - the day requires logs, and they exist. Note that we check for logs on the
+            #   previous day, since when a user logs a session for a day, the advancement
+            #   should happen on the next day, not immediately.
+            # - the date is in the future (used e.g. for calendars where we assume we will
+            #   proceed)
+            lambda day, date: (
+                not day.need_logs_to_advance
+                or date - datetime.timedelta(days=1) in workout_session_map[day.id]
+                or date > timezone.localdate(timezone=tz)
+            ),
+        )
 
         # For need_logs_to_advance days the sequence bakes in today's date (future
         # dates are optimistically advanced), so that projection is only valid for the
