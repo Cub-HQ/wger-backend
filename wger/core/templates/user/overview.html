@@ -102,7 +102,9 @@
         {{log.notes|default:'-/-'|truncatewords:6}}
     </td>
     <td>
-        {% if log.datetime_end %}
+        {% if log.time_unknown %}
+            {% translate "Time unknown" %}
+        {% elif log.datetime_end %}
             {{log.datetime_start|time:"H:i"}} - {{log.datetime_end|time:"H:i"}}
         {% else %}
             -/-

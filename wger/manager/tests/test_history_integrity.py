@@ -28,6 +28,7 @@ from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
+from django.db.models import F
 from django.test import TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -74,6 +75,7 @@ class CanonicalEncodingTestCase(TestCase):
             encode_row([pk, None, 0, Decimal('0'), '0'], [None, 2, None, 2, None]),
             b'["aaaaaaaa-0000-0000-0000-00000000000a",null,0,"0.00","0"]\n',
         )
+        self.assertEqual(encode_row([False, 0, True], [None, None, None]), b'[false,0,true]\n')
         with self.assertRaises(TypeError):
             encode_value(0.5)
 
@@ -182,6 +184,10 @@ class HistoryIntegrityTestCase(BaseTestCase, TransactionTestCase):
             datetime_start=START + datetime.timedelta(microseconds=1)
         )
         changed('timestamp edit')
+        WorkoutSession.objects.filter(pk=session.pk).update(
+            datetime_end=F('datetime_start'), time_unknown=True
+        )
+        changed('time unknown flag')
         self.log(session, weight=None, repetitions=None, duration=Decimal('600'))
         changed('log added')
         WorkoutLog.objects.filter(pk=log.pk).delete()

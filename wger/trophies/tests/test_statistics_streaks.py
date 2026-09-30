@@ -124,6 +124,25 @@ class CalculateWorkoutTimesTestCase(SimpleTestCase):
         self.assertEqual(earliest, datetime.time(18, 0))
         self.assertEqual(latest, datetime.time(18, 0))
 
+    def test_sessions_with_an_unknown_time_are_ignored(self):
+        """Their start is a date anchor, not a time the user worked out at"""
+
+        anchor = datetime.datetime(2024, 6, 19, 6, 0)
+        unknown = self.session(anchor, anchor)
+        unknown.time_unknown = True
+        sessions = [
+            unknown,
+            self.session(
+                datetime.datetime(2024, 6, 20, 18, 0), datetime.datetime(2024, 6, 20, 19, 0)
+            ),
+        ]
+
+        earliest, latest = UserStatisticsService._calculate_workout_times(
+            sessions, timezone.get_default_timezone()
+        )
+
+        self.assertEqual((earliest, latest), (datetime.time(18, 0), datetime.time(18, 0)))
+
     def test_no_session_with_an_end_yields_nothing(self):
         sessions = [self.session(datetime.datetime(2024, 6, 19, 0, 0))]
 

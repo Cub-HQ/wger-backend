@@ -15,7 +15,8 @@
 """
 Owner-scoped, read-only fingerprint of the stored workout history.
 
-Canonicalization ``wger-history-integrity-v1``:
+Canonicalization ``wger-history-integrity-v2`` (v2 added ``time_unknown`` to the
+session fields; v1 snapshot ids are not comparable with v2):
 
 * Scope: the ``WorkoutSession`` and ``WorkoutLog`` rows whose ``user_id`` is the
   requesting user. Routines, days, slots, configs, exercises, session recoveries
@@ -28,7 +29,8 @@ Canonicalization ``wger-history-integrity-v1``:
 * Values: null -> ``null``; UUID -> lowercase hyphenated string; datetime -> UTC
   string ``YYYY-MM-DDTHH:MM:SS.ffffffZ``; decimal -> fixed-point string with
   exactly the column's decimal places, zero never negative; integer and foreign
-  key ids -> JSON number; text -> JSON string, bytes as stored.
+  key ids -> JSON number; boolean -> ``true``/``false``; text -> JSON string,
+  bytes as stored.
 * A table's ``sha256`` is the SHA-256 of its concatenated row lines (the empty
   string for no rows). ``snapshot_id`` is the SHA-256 of the compact, key-sorted
   JSON of ``canonicalization``, ``schema_version`` and every table's ``fields``,
@@ -67,8 +69,8 @@ from wger.manager.models import (
 )
 
 
-SCHEMA_VERSION = 1
-CANONICALIZATION = 'wger-history-integrity-v1'
+SCHEMA_VERSION = 2
+CANONICALIZATION = 'wger-history-integrity-v2'
 HASH_ALGORITHM = 'sha256'
 CHUNK_SIZE = 2000
 
@@ -85,6 +87,7 @@ TABLES = (
             'datetime_end',
             'notes',
             'impression',
+            'time_unknown',
         ),
     ),
     (
@@ -143,7 +146,7 @@ def _utc(value):
 
 
 def encode_value(value, decimal_places=None):
-    if value is None or type(value) in (int, str):
+    if value is None or type(value) in (int, str, bool):
         return value
     if isinstance(value, uuid.UUID):
         return str(value)

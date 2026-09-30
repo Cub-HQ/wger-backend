@@ -23,6 +23,10 @@ TIME_UNKNOWN = (
     'time not recorded; 06:00 Australia/Sydney is a display anchor, not a measured start; '
     'duration unknown.'
 )
+TIME_UNRELIABLE = (
+    'source start/end times are unreliable; 06:00 Australia/Sydney is a display anchor, '
+    'not a measured start; duration unknown.'
+)
 REPS, SECONDS, KILOMETERS = 1, 3, 6
 KG, KMH = 1, 5
 METRICS = ('reps', 'weight', 'time', 'distance', 'calories', 'level', 'speed')
@@ -99,7 +103,16 @@ def _log(stats, holds, name, omitted=None, source_id=None):
     return log
 
 
-def plan(workout, mapping, *, clarification=None, differences=None, omit_incomplete=False):
+def plan(
+    workout,
+    mapping,
+    *,
+    clarification=None,
+    differences=None,
+    omit_incomplete=False,
+    unreliable_time=False,
+    non_exercise=None,
+):
     """
     mapping: {source exercise id (str): wger exercise id}, validated provenance only.
     clarification: user-confirmed note for a completed workout with no logged sets.
@@ -107,8 +120,14 @@ def plan(workout, mapping, *, clarification=None, differences=None, omit_incompl
     omit_incomplete: user-approved policy: import the valid sets and list each zero-only or
     measure-less set in the notes and plan['omitted'] instead of holding the workout.
     A workout left with no usable set stays held.
+    unreliable_time: user-approved policy: a source session that is open, negative or longer
+    than the maximum is anchored like a date-only workout (duration unknown) instead of held;
+    the original source times stay in the notes as provenance, never as the duration.
+    non_exercise: {source exercise id (str): reason}, user-approved entries that are not an
+    exercise (e.g. a programme video). With omit_incomplete their recorded values are listed as
+    omitted, never imported as a performed set.
     """
-    differences = differences or {}
+    differences, non_exercise = differences or {}, non_exercise or {}
     holds, logs, provenance = [], [], []
     omitted = [] if omit_incomplete else None
     iterations = {}
@@ -127,6 +146,17 @@ def plan(workout, mapping, *, clarification=None, differences=None, omit_incompl
             provenance[-1] += f' (source differs: {differences[str(source_id)]})'
         if not performed:
             continue
+        if str(source_id) in non_exercise and omitted is not None:
+            omitted += [
+                {
+                    'exercise': source_id,
+                    'name': name,
+                    'raw': s,
+                    'reason': non_exercise[str(source_id)],
+                }
+                for s in performed
+            ]
+            continue
         if not wger_id:
             holds.append(f'{line}]: no validated wger exercise mapping')
             continue
@@ -144,17 +174,28 @@ def plan(workout, mapping, *, clarification=None, differences=None, omit_incompl
                     }
                 )
 
+    start = end = None
+    notes_tail = []
     if workout.get('startTime'):
         start = _utc(workout['startTime'])
         end = _utc(workout['endTime']) if workout.get('endTime') else None
         if end is None or not start <= end <= start + MAX_SESSION:
-            holds.append(f'source session {start}..{end} is open, negative or longer than 5 hours')
-        notes_tail = []
-    else:
+            if unreliable_time:
+                notes_tail.append(
+                    'Original source times (UTC, unreliable, not the workout duration): '
+                    f'start {workout["startTime"]}, end {workout.get("endTime")}'
+                )
+                start = end = None
+            else:
+                holds.append(
+                    f'source session {start}..{end} is open, negative or longer than 5 hours'
+                )
+    time_unknown = start is None
+    if time_unknown:
         start = end = datetime.datetime.combine(
             datetime.date.fromisoformat(workout['date']), datetime.time(6), SYDNEY
         )
-        notes_tail = [TIME_UNKNOWN]
+        notes_tail.append(TIME_UNRELIABLE if notes_tail else TIME_UNKNOWN)
 
     if not logs and not holds:
         if omitted:
@@ -182,6 +223,8 @@ def plan(workout, mapping, *, clarification=None, differences=None, omit_incompl
         'holds': holds,
         'datetime_start': start.isoformat(),
         'datetime_end': end.isoformat() if end else None,
+        # Anchored at the display time: the session's time and duration are unknown
+        'time_unknown': time_unknown,
         'notes': notes,
         'logs': logs,
         'omitted': omitted or [],
@@ -267,6 +310,7 @@ def apply(ready, *, user_id, routine_id, day_id):
             notes=ready['notes'],
             datetime_start=start,
             datetime_end=end,
+            time_unknown=ready['time_unknown'],
         )
         session.clean()
         session.save()
@@ -280,12 +324,13 @@ def apply(ready, *, user_id, routine_id, day_id):
             ).save()
 
         stored = WorkoutSession.objects.get(pk=session.pk)
-        if (stored.notes, stored.datetime_start, stored.datetime_end, stored.day_id) != (
-            ready['notes'],
-            start,
-            end,
-            day.pk,
-        ):
+        if (
+            stored.notes,
+            stored.datetime_start,
+            stored.datetime_end,
+            stored.day_id,
+            stored.time_unknown,
+        ) != (ready['notes'], start, end, day.pk, ready['time_unknown']):
             raise RuntimeError('session readback differs')
         order = ('exercise_id', 'iteration')
         rows = list(WorkoutLog.objects.filter(session=session).order_by(*order).values(*LOG_FIELDS))

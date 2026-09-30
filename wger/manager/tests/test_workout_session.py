@@ -152,6 +152,108 @@ class WorkoutSessionDurationTestCase(WgerTestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class WorkoutSessionTimeUnknownTestCase(WgerTestCase):
+    """
+    A completed session whose time is unknown keeps its date anchor and has no duration
+    """
+
+    SESSION = 'bbbbbbbb-bbbb-bbbb-bbbb-000000000005'
+    ANCHOR = datetime.datetime(2023, 11, 20, 19, 0, tzinfo=datetime.UTC)
+
+    def setUp(self):
+        super().setUp()
+        self.user_login('test')
+        self.url = reverse('workoutsession-detail', kwargs={'pk': self.SESSION})
+
+    def mark_unknown(self):
+        WorkoutSession.objects.filter(pk=self.SESSION).update(
+            datetime_start=self.ANCHOR, datetime_end=self.ANCHOR, time_unknown=True
+        )
+
+    def test_measured_session_reports_its_duration(self):
+        session = WorkoutSession.objects.get(pk=self.SESSION)
+        response = self.client.get(self.url).json()
+
+        self.assertFalse(response['time_unknown'])
+        self.assertEqual(
+            response['duration_seconds'],
+            int((session.datetime_end - session.datetime_start).total_seconds()),
+        )
+
+    def test_unknown_time_has_no_duration_not_zero(self):
+        self.mark_unknown()
+        response = self.client.get(self.url).json()
+
+        self.assertTrue(response['time_unknown'])
+        self.assertIsNone(response['duration_seconds'])
+        self.assertIsNotNone(response['datetime_end'])
+
+    def test_ongoing_session_has_no_duration(self):
+        WorkoutSession.objects.filter(pk=self.SESSION).update(datetime_end=None)
+        self.assertIsNone(self.client.get(self.url).json()['duration_seconds'])
+
+    def test_times_of_an_unknown_session_cannot_change(self):
+        self.mark_unknown()
+        attempts = {
+            'end': {'datetime_end': '2023-11-20T20:00:00Z'},
+            'start': {'datetime_start': '2023-11-20T18:00:00Z'},
+            'ongoing': {'datetime_end': None},
+            'legacy': {'time_end': '22:30'},
+        }
+        for name, data in attempts.items():
+            with self.subTest(name):
+                response = self.client.patch(self.url, data=data, content_type='application/json')
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn('time_unknown', response.json())
+                session = WorkoutSession.objects.get(pk=self.SESSION)
+                self.assertEqual(
+                    (session.datetime_start, session.datetime_end, session.time_unknown),
+                    (self.ANCHOR, self.ANCHOR, True),
+                )
+
+    def test_notes_stay_editable_and_the_flag_is_kept(self):
+        self.mark_unknown()
+        stored = self.client.get(self.url).json()
+        response = self.client.patch(
+            self.url,
+            data={
+                'notes': 'Edited',
+                'impression': '3',
+                'datetime_start': stored['datetime_start'],
+                'datetime_end': stored['datetime_end'],
+                'time_unknown': False,
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        session = WorkoutSession.objects.get(pk=self.SESSION)
+        self.assertEqual((session.notes, session.impression), ('Edited', '3'))
+        self.assertTrue(session.time_unknown)
+
+    def test_clients_cannot_create_an_unknown_time_session(self):
+        response = self.client.post(
+            reverse('workoutsession-list'),
+            data={
+                'routine': 3,
+                'impression': '2',
+                'datetime_start': '2025-03-12T10:00:00Z',
+                'datetime_end': '2025-03-12T10:00:00Z',
+                'time_unknown': True,
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(WorkoutSession.objects.get(pk=response.json()['id']).time_unknown)
+
+    def test_an_unknown_time_session_is_never_ongoing(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            WorkoutSession.objects.filter(pk=self.SESSION).update(
+                datetime_end=None, time_unknown=True
+            )
+
+
 class WorkoutSessionLocalDayTestCase(WgerTestCase):
     """
     Test in whose timezone the day of a session is derived

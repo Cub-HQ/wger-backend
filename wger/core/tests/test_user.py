@@ -395,6 +395,21 @@ class UserDetailPageSessionTableTestCase(WgerTestCase):
 
         self.assertContains(response, '-/-')
 
+    def test_session_with_unknown_time_shows_no_anchor_time(self):
+        """The date anchor of an unknown-time session is never shown as a time"""
+
+        session = WorkoutSession.objects.get(pk='bbbbbbbb-bbbb-bbbb-bbbb-000000000005')
+        WorkoutSession.objects.filter(pk=session.pk).update(
+            datetime_end=session.datetime_start, time_unknown=True
+        )
+        anchor = timezone.localtime(session.datetime_start)
+
+        self.user_login('trainer1')
+        response = self.client.get(reverse('core:user:overview', kwargs={'pk': 2}))
+
+        self.assertContains(response, 'Time unknown')
+        self.assertNotContains(response, f'{anchor:%H:%M} - {anchor:%H:%M}')
+
 
 class UserDetailPageMacroUnitTestCase(WgerTestCase):
     """
