@@ -119,7 +119,7 @@ def _run_lock(user):
     with connection.cursor() as cursor:
         cursor.execute('SELECT pg_try_advisory_lock(%s, %s)', [RUN_LOCK, user.pk])
         if not cursor.fetchone()[0]:
-            raise PlanError('another intervals-push-gym apply is running for this user')
+            raise PlanError('another Intervals apply is running for this user')
     try:
         yield
     finally:

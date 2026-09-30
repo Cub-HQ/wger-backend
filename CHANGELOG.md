@@ -77,6 +77,12 @@ pip install wger-api-client
 ### Your own timezone
 Streaks, calendar days and trophies are now calculated in your own timezone. The apps report it automatically, until they have, or for accounts that only ever use scripts, the server's timezone is used like before.
 
+### Intervals.icu: completed training only
+Only training that was actually done is shared with Intervals.icu, one explicit item at a time, always as a preview first and written only with `--apply --plan-hash H` from that preview.
+
+* `intervals-sync` mirrors completed activities only; planned calendar events are no longer fetched or stored (older planned rows are left untouched). `--activity ID` selects one activity; the whole fetched window is still validated first, and the mode and selection are part of the plan hash. A selected activity that is missing, a gym/echo activity or a stub without recorded duration is refused.
+* New `intervals-export-session --session UUID` sends one completed gym session as an Intervals manual activity (`WeightTraining`) with its measured start and elapsed time, the recorded sets in the description in their stored units, the source provenance line and a link back to the session. Sessions with unknown time, an open end or no recorded sets are refused. Moving time, load, heart rate and effort are never sent. Before writing it re-reads that day and stops on an existing copy (`external_id wger-gym-session:<uuid>`), an overlapping activity, another strength activity or a planned workout that day. A new ledger (`IntervalsActivityLink`) is saved before the write, so an uncertain write is never repeated without `--retry-pending`. It shares the one-writer-per-user lock with `intervals-push-gym`.
+
 ### Others
 * New read-only `GET /api/v2/workoutsession/integrity/` returns counts and SHA-256 digests of your own workout sessions and logs from one database snapshot, so a tool can check that the history is unchanged without downloading every page. The encoding (`wger-history-integrity-v1`) is described in `wger/manager/history_integrity.py`; its digests are not comparable to hashes computed by other tools with different rules.
 * Reworked internal structure for workout sessions. This now allows sessions to span midnight, and to log more than one session per day, e.g. morning  cardio and evening gym.

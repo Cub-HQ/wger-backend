@@ -12,8 +12,8 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 
-"""Preview or apply one planned Intervals window for a user's EnduranceEntry
-rows. Only EnduranceEntry is touched; gym sessions and sets never are."""
+"""Preview or apply completed-only Intervals activities for one user.
+Only EnduranceEntry is touched; gym sessions and sets never are."""
 
 # Standard Library
 import hashlib
@@ -29,29 +29,37 @@ from wger.intervals.models import EnduranceEntry
 from wger.intervals.planning import STORED_FIELDS, PlanError, plan
 
 
-def _plan(rows, athlete_id, oldest, newest, activities, events):
+def _plan(rows, athlete_id, oldest, newest, activities, selected):
     existing = [{f: getattr(row, f) for f in STORED_FIELDS} for row in rows]
-    result = plan(athlete_id, oldest, newest, activities, events, existing)
+    result = plan(athlete_id, oldest, newest, activities, existing, selected)
     actions = {k: result[k] for k in ('create', 'update', 'mark_missing')}
-    canonical = json.dumps(actions, sort_keys=True, default=str, separators=(',', ':'))
+    canonical = json.dumps(
+        {'mode': result['mode'], 'selected': result['selected'], 'actions': actions},
+        sort_keys=True,
+        default=str,
+        separators=(',', ':'),
+    )
     result['plan_hash'] = hashlib.sha256(canonical.encode()).hexdigest()
     return result
 
 
-def preview(user, athlete_id, oldest, newest, activities, events):
+def preview(user, athlete_id, oldest, newest, activities, selected=None):
     """The plan plus its `plan_hash`. Makes no writes."""
-    rows = EnduranceEntry.objects.filter(user=user)
-    return _plan(rows, athlete_id, oldest, newest, activities, events)
+    rows = EnduranceEntry.objects.filter(user=user, kind='completed')
+    return _plan(rows, athlete_id, oldest, newest, activities, selected)
 
 
-def apply(user, athlete_id, oldest, newest, activities, events, plan_hash):
+def apply(user, athlete_id, oldest, newest, activities, plan_hash, selected=None):
     """Recompute the plan under the owner's lock and write it only if it still
     hashes to `plan_hash`, in one transaction. Any PlanError writes nothing."""
     with transaction.atomic():
         # Locking the owner also serialises a first sync that has no rows yet.
         User.objects.select_for_update().get(pk=user.pk)
-        rows = {(r.kind, r.intervals_id): r for r in EnduranceEntry.objects.filter(user=user)}
-        result = _plan(rows.values(), athlete_id, oldest, newest, activities, events)
+        rows = {
+            (r.kind, r.intervals_id): r
+            for r in EnduranceEntry.objects.filter(user=user, kind='completed')
+        }
+        result = _plan(rows.values(), athlete_id, oldest, newest, activities, selected)
         if result['plan_hash'] != plan_hash:
             raise PlanError('Intervals or wger data changed since the preview; preview again')
 

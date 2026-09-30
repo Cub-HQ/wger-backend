@@ -12,9 +12,9 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 
-"""Pure Intervals.icu -> wger endurance mirror planner (Cub-HQ/wger-gym#6).
+"""Pure completed-only Intervals.icu -> wger endurance mirror planner.
 
-No I/O. Input: already-fetched Intervals activities/events for one athlete
+No I/O. Input: already-fetched Intervals activities for one athlete
 and window, plus existing mirror rows as dicts of STORED_FIELDS. Output:
 create/update/unchanged/mark_missing proposals. Values are copied verbatim
 in source units; nothing is converted, derived or zero-filled, and nothing
@@ -27,6 +27,7 @@ import datetime
 
 INTERVALS_URL = 'https://intervals.icu'
 ECHO_PREFIX = 'wger-gym:'
+SESSION_ECHO_PREFIX = 'wger-gym-session:'
 GYM_SPORT = 'WeightTraining'
 
 # Mirror columns (PLAN.md section 3). Links are computed, never stored or diffed.
@@ -80,16 +81,6 @@ ACTIVITY_FIELDS = {
     'paired_event_id': 'paired_event_id',
     'feel': 'feel',
     'activity_source': 'source',
-}
-EVENT_FIELDS = {
-    'sport': 'type',
-    'name': 'name',
-    'moving_time_s': 'moving_time',
-    'distance_m': 'distance',
-    'training_load': 'icu_training_load',
-    'intensity': 'icu_intensity',
-    'load_target': 'load_target',
-    'time_target': 'time_target',
 }
 
 
@@ -158,44 +149,54 @@ def _order(entry):
     return entry['local_date'], entry['kind'], entry['intervals_id']
 
 
-def plan(athlete_id, oldest, newest, activities, events, existing):
-    """Diff one fetched window against the existing mirror rows of that user.
+def plan(athlete_id, oldest, newest, activities, existing, selected=None):
+    """Diff completed activities, validating the whole window before selection.
 
     Raises PlanError on a bad window, duplicate or foreign rows, invalid or
-    out-of-window dates, or duplicate existing identities.
+    out-of-window dates, or an unavailable exact selection.
     """
     athlete_id = str(athlete_id)
     oldest, newest = window(oldest, newest)
 
-    skipped = {'echo': 0, 'weight_training': 0, 'non_workout': 0}
+    selected = str(selected) if selected is not None else None
+    skipped = {'echo': 0, 'weight_training': 0}
     fetched, seen = {}, set()
-    sources = (
-        ('completed', activities, 'icu_athlete_id', ACTIVITY_FIELDS),
-        ('planned', events, 'athlete_id', EVENT_FIELDS),
-    )
-    for kind, rows, owner_field, fields in sources:
-        for raw in rows:
-            # Validate every row, even ones we then skip: a foreign or broken
-            # row means the whole fetch is suspect.
-            entry = _entry(raw, kind, owner_field, fields, athlete_id, oldest, newest)
-            key = (kind, entry['intervals_id'])
-            if key in seen:
-                raise PlanError(f'duplicate {kind} id {entry["intervals_id"]}')
-            seen.add(key)
+    for raw in activities:
+        # Validate even skipped and unselected rows: never trim a suspect batch.
+        entry = _entry(
+            raw, 'completed', 'icu_athlete_id', ACTIVITY_FIELDS, athlete_id, oldest, newest
+        )
+        key = ('completed', entry['intervals_id'])
+        if key in seen:
+            raise PlanError(f'duplicate completed id {entry["intervals_id"]}')
+        seen.add(key)
 
-            if kind == 'planned' and str(raw.get('external_id') or '').startswith(ECHO_PREFIX):
-                skipped['echo'] += 1
-            elif kind == 'planned' and raw.get('category') != 'WORKOUT':
-                skipped['non_workout'] += 1
-            elif entry['sport'] == GYM_SPORT:
-                # wger owns gym; device-recorded strength stays in Intervals (U8).
-                skipped['weight_training'] += 1
-            else:
-                fetched[key] = entry
+        if str(raw.get('external_id') or '').startswith(SESSION_ECHO_PREFIX):
+            skipped['echo'] += 1
+        elif entry['sport'] == GYM_SPORT:
+            # wger owns gym; device-recorded strength stays in Intervals.
+            skipped['weight_training'] += 1
+        else:
+            fetched[key] = entry
+
+    if selected is not None:
+        key = ('completed', selected)
+        if key not in seen:
+            raise PlanError(f'selected activity {selected} is absent from the fetched window')
+        if key not in fetched:
+            raise PlanError(f'selected activity {selected} is skipped (gym or echo)')
+        entry = fetched[key]
+        if entry['elapsed_time_s'] is None and entry['moving_time_s'] is None:
+            raise PlanError(f'selected activity {selected} has no recorded duration')
+        fetched = {key: entry}
 
     current, stored = {}, set()
     for row in existing:
+        if row['kind'] != 'completed':
+            continue
         key = (row['kind'], str(row['intervals_id']))
+        if selected is not None and key[1] != selected:
+            continue
         if key in stored:
             raise PlanError(f'duplicate existing mirror row {key}')
         stored.add(key)
@@ -207,6 +208,7 @@ def plan(athlete_id, oldest, newest, activities, events, existing):
             current[key] = row
 
     result = {'create': [], 'update': [], 'unchanged': [], 'mark_missing': [], 'skipped': skipped}
+    result.update(mode='exact' if selected is not None else 'window', selected=selected)
     for key, entry in fetched.items():
         entry['link'], entry['link_exact'] = link(*key, entry['local_date'])
         row = current.get(key)
