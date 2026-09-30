@@ -14,6 +14,7 @@
 # along with Workout Manager.  If not, see <http://www.gnu.org/licenses/>.
 
 # wger
+from wger.manager import routine_recovery
 from wger.manager.api.serializers import (
     RoutineSerializer,
     WorkoutLogSerializer,
@@ -68,3 +69,25 @@ class RoutineHandler(PowerSyncHandler):
     serializer_class = RoutineSerializer
     viewset_class = RoutineViewSet
     supports_create = False
+
+    def handle_update(self, payload, user_id):
+        """A recorded, undoable edit; trashed routines refuse writes"""
+        routine = self._get_or_none(payload, user_id)
+        if routine is None:
+            return super().handle_update(payload, user_id)
+        try:
+            with routine_recovery.recorded_edit(routine.user, routine.pk):
+                error = super().handle_update(payload, user_id)
+                if error is not None:
+                    return error
+        except routine_recovery.RecoveryError as e:
+            return {'error': e.code, 'details': e.detail}
+        return None
+
+    def handle_delete(self, payload, user_id):
+        """Move the routine to the trash (undoable for 14 days)"""
+        routine = self._get_or_none(payload, user_id)
+        if routine is None:
+            return self._ack_missing('delete', payload['id'])
+        routine_recovery.legacy_delete(routine.user, routine.pk)
+        return None

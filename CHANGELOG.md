@@ -8,6 +8,9 @@
 ### Routines as spreadsheets
 Routines can be downloaded as CSV or Excel (XLSX) files, edited in any spreadsheet program and imported again, either as a new routine or as an update of an existing one. A blank template is available as well. Before anything is saved you see a preview of every row, which exercise each name matched and what would be created, changed or deleted; the import itself is all or nothing. Logged workouts are never part of the file and an import that would delete a logged day or exercise is refused. Progressions and other settings a spreadsheet can't show are listed and kept on update.
 
+### Routine trash and undo
+Deleting a routine now moves it to the trash for 14 days instead of erasing it, and it can be restored from there. Every change to a routine's plan (days, exercises, sets, progressions, spreadsheet updates) can likewise be undone for 14 days, newest change first. A routine can also be rebuilt from a new plan: the old one is kept intact, linked to its replacement and restorable. Logged workouts are never changed by any of this, and a day or exercise with logged workouts can no longer be deleted.
+
 ### Sync with Apple Health and Health Connect
 The mobile app can now import your body metrics from Apple Health (iOS) and Health Connect (Android). Once enabled in the settings, the data your smart scale, blood pressure monitor, smartwatch or what other health apps record is imported automatically and shows up alongside your manually entered entries. At the moment we support these:
 

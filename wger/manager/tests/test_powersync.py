@@ -182,3 +182,10 @@ class RoutinePowerSyncTestCase(
 
     # Anything sent via PUT must be rejected; the body content doesn't matter.
     create_payload = {'id': 9999, 'name': 'should not be created'}
+
+    def test_delete_owner_succeeds(self):
+        """DELETE moves the routine to the trash instead of erasing it"""
+        self.authenticate()
+        response = self.push('DELETE', self._delete_payload())
+        self.assertEqual(response.json(), {'status': 'ok!'})
+        self.assertIsNotNone(Routine.objects.get(pk=self.pk_owned).deleted_at)

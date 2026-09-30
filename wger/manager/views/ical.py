@@ -92,7 +92,7 @@ def export(request, pk):
     if request.user.is_anonymous:
         return HttpResponseForbidden()
 
-    routine = get_object_or_404(Routine, pk=pk, user=request.user)
+    routine = get_object_or_404(Routine, pk=pk, user=request.user, deleted_at__isnull=True)
 
     # Create the calendar
     calendar = get_calendar()
