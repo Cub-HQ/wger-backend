@@ -44,7 +44,11 @@ from wger.exercises.api import views as exercises_api_views
 from wger.exercises.sitemap import ExercisesSitemap
 from wger.gallery.api import views as gallery_api_views
 from wger.intervals.api import views as intervals_api_views
-from wger.manager.api import views as manager_api_views
+from wger.manager.api import (
+    routine_label as manager_routine_label_api,
+    routine_preview as manager_routine_preview_api,
+    views as manager_api_views,
+)
 from wger.measurements.api import views as measurements_api_views
 from wger.nutrition.api import views as nutrition_api_views
 from wger.trophies.api import views as trophies_api_views
@@ -90,6 +94,11 @@ router.register(
     r'slot-entry',
     manager_api_views.SlotEntryViewSet,
     basename='slot-entry',
+)
+router.register(
+    r'routine-label',
+    manager_routine_label_api.RoutineLabelViewSet,
+    basename='routine-label',
 )
 router.register(
     r'weight-config',
@@ -325,6 +334,16 @@ urlpatterns += [
         name='exercise-submission',
     ),
     path('api/v2/check-language/', core_api_views.check_language, name='check-language'),
+    path(
+        'api/v2/routine-preview/',
+        manager_routine_preview_api.RoutinePreviewCreateView.as_view(),
+        name='routine-preview',
+    ),
+    path(
+        'api/v2/routine-preview/<uuid:preview_id>/',
+        manager_routine_preview_api.RoutinePreviewDetailView.as_view(),
+        name='routine-preview-detail',
+    ),
     path(
         'api/v2/userprofile/',
         core_api_views.UserProfileView.as_view(),

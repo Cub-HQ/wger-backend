@@ -124,7 +124,7 @@ class Day(models.Model):
         """
         Return the sets for this day
         """
-        slots = getattr(self, 'prefetched_slots', self.slots.all())
+        slots = self.prefetched_slots if hasattr(self, 'prefetched_slots') else self.slots.all()
 
         return [SlotData(comment=s.comment, sets=s.set_data_gym(iteration)) for s in slots]
 
@@ -151,7 +151,7 @@ class Day(models.Model):
         last_exercise_id = None
         current_slot = None
 
-        slots = getattr(self, 'prefetched_slots', self.slots.all())
+        slots = self.prefetched_slots if hasattr(self, 'prefetched_slots') else self.slots.all()
 
         for slot in slots:
             slot_data = SlotData(
