@@ -1124,6 +1124,14 @@ def _help_rows() -> list[list[str]]:
         'Only the first sheet (routine) is imported. This help sheet is ignored. '
         'Keep the header row of the routine sheet exactly as it is.',
         '',
+        'COLOURS',
+        f'Red columns ({", ".join(PROTECTED_COLUMNS)}) mean do not edit: export fills them to '
+        'tie each row to what already exists in the routine. Leave them as exported. '
+        'Exceptions: a new row leaves them blank, and copying into a new routine clears them '
+        'on every row (unsupported may stay if you choose to leave those settings out). See '
+        'UPDATING AND COPYING.',
+        'Blue columns are yours to edit. The COLUMNS list below says how for each one.',
+        '',
         'GETTING STARTED',
         '1. Export the routine as XLSX, or download the blank template for a new routine.',
         '2. Edit the routine sheet. Example: to turn 3 sets of 8 into 4 sets of 6-8 reps, '
@@ -1302,11 +1310,25 @@ def _help_rows() -> list[list[str]]:
     ]
 
 
+PROTECTED_COLUMNS = ('routine_id', 'day_id', 'slot_id', 'entry_id', 'unsupported')
+"""Filled by export and matched by the importer, shown red in XLSX"""
+
+_RED = openpyxl.styles.PatternFill('solid', fgColor='C00000')
+_RED_VALUE = openpyxl.styles.PatternFill('solid', fgColor='F8CBAD')
+_BLUE = openpyxl.styles.PatternFill('solid', fgColor='DDEBF7')
+_WHITE_BOLD = openpyxl.styles.Font(bold=True, color='FFFFFF')
+_BOLD = openpyxl.styles.Font(bold=True)
+
+
 def write_xlsx(rows: list[list], with_help: bool = False) -> bytes:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = 'routine'
     sheet.append(COLUMNS)
+    for cell in sheet[1]:
+        protected = cell.value in PROTECTED_COLUMNS
+        cell.fill = _RED if protected else _BLUE
+        cell.font = _WHITE_BOLD if protected else _BOLD
     for number, row in enumerate(rows, start=2):
         for column, value in enumerate(row, start=1):
             if value is None:
@@ -1315,6 +1337,8 @@ def write_xlsx(rows: list[list], with_help: bool = False) -> bytes:
             if isinstance(value, str):
                 # Always a string, openpyxl must never store a formula
                 cell.data_type = 's'
+            if COLUMNS[column - 1] in PROTECTED_COLUMNS:
+                cell.fill = _RED_VALUE
 
     if with_help:
         help_sheet = workbook.create_sheet('help')
@@ -1324,6 +1348,10 @@ def write_xlsx(rows: list[list], with_help: bool = False) -> bytes:
             help_sheet.append(line)
             for cell in help_sheet[help_sheet.max_row]:
                 cell.data_type = 's'
+            if line[0] in PROTECTED_COLUMNS and len(line) == 3:
+                for cell in help_sheet[help_sheet.max_row]:
+                    cell.fill = _RED
+                    cell.font = _WHITE_BOLD
 
     out = io.BytesIO()
     workbook.save(out)
