@@ -418,12 +418,35 @@ class SlotEntry(models.Model):
 
             return custom_logic.calculate()
 
+        configs = {
+            field: list(getattr(self, f'{field}config_set').all()) for field in PROGRESSION_FIELDS
+        }
+        result = self.resolve_config_data(iteration, configs, logs)
+
+        cache.set(
+            key,
+            result,
+            settings.WGER_SETTINGS['ROUTINE_CACHE_TTL'],
+        )
+
+        return result
+
+    def resolve_config_data(
+        self,
+        iteration: int,
+        configs: dict[str, List[AbstractChangeConfig]],
+        logs: List[WorkoutLog],
+    ) -> SetConfigData:
+        """
+        The config walk of ``get_config_data`` over the given configs and logs
+
+        Pure apart from reading the unit names: the configs need not be saved,
+        the private routine preview resolves unsaved entries through here.
+        """
         target = max(iteration, 1)
         configs_by_field = {
             field: {
-                config.iteration: config
-                for config in getattr(self, f'{field}config_set').all()
-                if config.iteration <= target
+                config.iteration: config for config in configs[field] if config.iteration <= target
             }
             for field in PROGRESSION_FIELDS
         }
@@ -483,7 +506,7 @@ class SlotEntry(models.Model):
         rest = states['rest'].value
         max_rest = states['maxrest'].value
 
-        result = SetConfigData(
+        return SetConfigData(
             slot_entry_id=self.id,
             exercise=self.exercise_id,
             type=str(self.type),
@@ -517,11 +540,3 @@ class SlotEntry(models.Model):
             if max_rest and rest and max_rest > rest
             else None,
         )
-
-        cache.set(
-            key,
-            result,
-            settings.WGER_SETTINGS['ROUTINE_CACHE_TTL'],
-        )
-
-        return result

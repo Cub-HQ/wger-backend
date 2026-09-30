@@ -25,6 +25,7 @@ from wger.manager.views import (
     ical,
     pdf,
     routine,
+    routine_preview,
 )
 
 
@@ -58,6 +59,11 @@ patterns_days = [
 
 # sub patterns for routines
 patterns_routine = [
+    path(
+        'preview/<uuid:preview_id>/',
+        routine_preview.RoutinePreviewView.as_view(),
+        name='preview',
+    ),
     path(
         'overview',
         ReactView.as_view(login_required=True),

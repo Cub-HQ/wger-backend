@@ -32,6 +32,7 @@ from .rir_config import (
     RiRConfig,
 )
 from .routine import Routine
+from .routine_preview import RoutinePreview
 from .session import WorkoutSession
 from .session_recovery import WorkoutSessionRecovery
 from .sets_config import (
