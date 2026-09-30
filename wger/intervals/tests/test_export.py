@@ -35,6 +35,7 @@ class FakeCompletedIntervals:
         self.calls = []
         self.fail_post = False
         self.mismatch = False
+        self.lost = False
 
     def __call__(self, method, url, params=None, json=None, **kwargs):
         assert kwargs['auth'] == ('API_KEY', KEY) and kwargs['timeout']
@@ -52,7 +53,8 @@ class FakeCompletedIntervals:
             if path == 'athlete/0/events':
                 return response([dict(row) for row in self.events])
             if path.startswith('activity/'):
-                return response(dict(self.activities[path.split('/')[-1]]))
+                row = self.activities[path.split('/')[-1]]
+                return response({}, 404) if self.lost else response(dict(row))
         if method == 'POST' and path == 'athlete/0/activities/manual':
             if self.fail_post:
                 self.fail_post = False
@@ -442,6 +444,15 @@ class CompletedSessionExportTest(BaseTestCase, TransactionTestCase):
             self.assertEqual(again['action'], 'conflict')
             self.apply(again, retry_pending=retry)
         self.assertEqual(len(self.fake.writes()), 1)
+
+    def test_readback_404_is_a_recorded_failure_that_never_reposts(self):
+        plan = self.preview()
+        self.fake.lost = True
+        failed = self.apply(plan)
+        self.assertEqual(failed['failed']['error'], 'GET activity/i900001: HTTP 404')
+        self.assertEqual(failed['done'], [])
+        self.assertEqual(len(self.fake.writes()), 1)
+        self.assertIsNone(IntervalsActivityLink.objects.get().intervals_activity_id)
 
     def test_log_mutation_invalidates_hash_and_command_requires_hash(self):
         plan = self.preview()

@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('intervals', '0002_intervalseventlink'),
+        ('intervals', '0003_intervalsactivitylink'),
     ]
 
     operations = [
