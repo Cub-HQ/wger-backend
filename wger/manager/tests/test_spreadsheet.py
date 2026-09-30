@@ -560,6 +560,16 @@ class SpreadsheetApiTestCase(BaseTestCase, ApiBaseTestCase):
             self.assertEqual(workbook.sheetnames, ['routine', 'help'])
             self.assertEqual([c.value for c in workbook['routine'][1]], COLUMNS)
 
+            # Do-not-edit columns are red on the header and on every filled value
+            sheet = workbook['routine']
+            for cells in sheet.iter_cols():
+                protected = cells[0].value in spreadsheet.PROTECTED_COLUMNS
+                colour = cells[0].fill.fgColor.rgb
+                self.assertEqual(colour.endswith('C00000'), protected, cells[0].value)
+                for cell in cells[1:]:
+                    if cell.value is not None:
+                        self.assertEqual(cell.fill.fgColor.rgb.endswith('F8CBAD'), protected)
+
             # Every column is explained once, in header order, with what to do with it
             rows = [[c.value for c in row] for row in workbook['help'].iter_rows()]
             start = rows.index(['column', 'what it means', 'do you edit it?']) + 1
