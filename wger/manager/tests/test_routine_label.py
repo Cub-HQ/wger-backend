@@ -190,3 +190,40 @@ class RoutineLabelTestCase(WgerTestCase):
         r = self.create(0, 6)
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()['code'], 'routine_trashed')
+
+    def test_reparent_records_both_routines_and_undoes_safely(self):
+        """Labels are the one plan row that may change routine; each side gets its own undo"""
+        before = self.history()
+        other = Routine.objects.create(
+            user=self.user, name='Next', start='2024-06-02', end='2024-08-31'
+        )
+        pk = self.create(0, 6).json()['id']
+        rev = lambda routine: self.api.get(f'/api/v2/routine/{routine}/revision/').json()[
+            'revision'
+        ]
+        revs = rev(1), rev(other.pk)
+
+        r = self.api.patch(f'{URL}{pk}/', {'routine': other.pk}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(Label.objects.get(pk=pk).routine_id, other.pk)
+        edits = RoutineRecovery.objects.filter(operation='edit')
+        source, target = (edits.filter(routine_id=i).latest('pk') for i in (1, other.pk))
+
+        def restore(recovery, routine, key):
+            body = {'expected_revision': rev(routine), 'idempotency_key': key}
+            return self.api.post(
+                f'/api/v2/routine/recoveries/{recovery.pk}/restore/', body, format='json'
+            )
+
+        # The source cannot take the label back while the destination holds it
+        r = restore(source, 1, 'early')
+        self.assertEqual((r.status_code, r.json()['code']), (409, 'restore_conflict'))
+        self.assertEqual(Label.objects.get(pk=pk).routine_id, other.pk)
+
+        self.assertEqual(restore(target, other.pk, 'target').status_code, 200)
+        self.assertFalse(Label.objects.filter(pk=pk).exists())
+        r = restore(source, 1, 'source')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(Label.objects.get(pk=pk).routine_id, 1)
+        self.assertEqual((rev(1), rev(other.pk)), revs)
+        self.assertEqual(self.history(), before)
