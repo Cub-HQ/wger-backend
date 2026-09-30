@@ -19,6 +19,7 @@ import datetime
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.management import call_command
+from django.utils import timezone
 
 # wger
 from wger.core.models import UserProfile
@@ -45,7 +46,7 @@ class EmailReminderTestCase(WgerTestCase):
         """
         Test with no schedules or workouts
         """
-        Routine.objects.all().delete()
+        Routine.objects.all().update(deleted_at=timezone.now())
 
         call_command('email-reminders')
         self.assertEqual(len(mail.outbox), 0)
@@ -54,7 +55,7 @@ class EmailReminderTestCase(WgerTestCase):
         """
         Test user with no schedules but one workout
         """
-        Routine.objects.exclude(user_id=2).delete()
+        Routine.objects.exclude(user_id=2).update(deleted_at=timezone.now())
 
         call_command('email-reminders')
         self.assertEqual(len(mail.outbox), 1)
@@ -68,7 +69,7 @@ class EmailReminderTestCase(WgerTestCase):
         user.email = ''
         user.save()
 
-        Routine.objects.exclude(user_id=2).delete()
+        Routine.objects.exclude(user_id=2).update(deleted_at=timezone.now())
 
         call_command('email-reminders')
         self.assertEqual(len(mail.outbox), 0)
@@ -83,7 +84,7 @@ class EmailReminderTestCase(WgerTestCase):
         profile.last_workout_notification = datetime.date.today() - datetime.timedelta(days=3)
         profile.save()
 
-        Routine.objects.exclude(user_id=2).delete()
+        Routine.objects.exclude(user_id=2).update(deleted_at=timezone.now())
 
         call_command('email-reminders')
         self.assertEqual(len(mail.outbox), 0)
@@ -98,7 +99,7 @@ class EmailReminderTestCase(WgerTestCase):
         profile.last_workout_notification = datetime.date.today() - datetime.timedelta(days=10)
         profile.save()
 
-        Routine.objects.exclude(user_id=2).delete()
+        Routine.objects.exclude(user_id=2).update(deleted_at=timezone.now())
 
         call_command('email-reminders')
         self.assertEqual(len(mail.outbox), 1)
@@ -114,7 +115,7 @@ class EmailReminderTestCase(WgerTestCase):
         profile.last_workout_notification = None
         profile.save()
 
-        Routine.objects.exclude(user_id=2).delete()
+        Routine.objects.exclude(user_id=2).update(deleted_at=timezone.now())
 
         call_command('email-reminders')
         self.assertEqual(len(mail.outbox), 1)
@@ -127,7 +128,7 @@ class EmailReminderTestCase(WgerTestCase):
         user = User.objects.get(pk=2)
         user.userprofile.workout_reminder_active = False
         user.userprofile.save()
-        Routine.objects.exclude(user=user).delete()
+        Routine.objects.exclude(user=user).update(deleted_at=timezone.now())
 
         call_command('email-reminders')
         self.assertEqual(len(mail.outbox), 0)

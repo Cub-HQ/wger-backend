@@ -56,7 +56,11 @@ RUN_LOCK = 0x1C5  # pg advisory lock namespace for intervals-push-gym
 def gym_occurrences(user, oldest, newest):
     """(routine, WorkoutDayData) for the user's non-template routines in the window."""
     routines = Routine.objects.filter(
-        user=user, is_template=False, start__lte=newest, end__gte=oldest
+        user=user,
+        is_template=False,
+        deleted_at__isnull=True,
+        start__lte=newest,
+        end__gte=oldest,
     ).order_by('pk')
     return [(r, o) for r in routines for o in r.date_sequence if oldest <= o.date <= newest]
 

@@ -46,7 +46,7 @@ def copy_routine(request, pk):
     """
     routine = get_object_or_404(Routine, pk=pk)
 
-    if request.user != routine.user and not routine.is_public:
+    if request.user != routine.user and (not routine.is_public or routine.deleted_at):
         # Check if the user is a trainer and the routine belongs to a client, only if it does not
         # belong to the user.
         trainer_identity_pk = request.session.get('trainer.identity', None)
@@ -68,6 +68,8 @@ def copy_routine(request, pk):
     routine_copy.user = request.user
     routine_copy.is_template = False
     routine_copy.is_public = False
+    routine_copy.deleted_at = None
+    routine_copy.replaced_by = None
 
     # Update the start and end date
     routine_copy.start = datetime.date.today()

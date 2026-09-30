@@ -48,7 +48,7 @@ class Command(BaseCommand):
             if not profile.user.email:
                 continue
 
-            routine = Routine.objects.filter(user=profile.user).last()
+            routine = Routine.objects.filter(user=profile.user, deleted_at__isnull=True).last()
             if not routine:
                 continue
 

@@ -65,7 +65,10 @@ class RoutineSerializer(serializers.ModelSerializer):
             'fit_in_week',
             'is_template',
             'is_public',
+            'deleted_at',
+            'replaced_by',
         )
+        read_only_fields = ('deleted_at', 'replaced_by')
 
     def validate(self, data):
         start = data.get('start') or getattr(self.instance, 'start', None)

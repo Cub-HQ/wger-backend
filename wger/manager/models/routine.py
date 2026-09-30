@@ -129,6 +129,19 @@ class Routine(models.Model):
         default=False,
     )
 
+    deleted_at = models.DateTimeField(null=True, blank=True, editable=False, db_index=True)
+    """Set while the routine is in the trash; see routine_recovery"""
+
+    replaced_by = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        editable=False,
+        on_delete=models.SET_NULL,
+        related_name='+',
+    )
+    """The routine a rebuild replaced this one with"""
+
     def get_absolute_url(self):
         """
         Returns the canonical URL to view a workout

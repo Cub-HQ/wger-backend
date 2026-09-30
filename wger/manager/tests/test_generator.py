@@ -20,6 +20,7 @@ from wger.core.tests.base_testcase import WgerTestCase
 from wger.manager.models import (
     Routine,
     WorkoutLog,
+    WorkoutSession,
 )
 
 
@@ -27,6 +28,7 @@ class RoutineGeneratorTestCase(WgerTestCase):
     def setUp(self):
         super().setUp()
 
+        WorkoutSession.objects.all().delete()
         Routine.objects.all().delete()
 
     def test_generator_routines(self):

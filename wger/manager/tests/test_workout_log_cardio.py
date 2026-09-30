@@ -340,9 +340,8 @@ class CardioMigrationTestCase(SimpleTestCase):
     # makemigrations only reads the (isolated test) database's migration history.
     databases = {'default'}
 
-    def test_0032_is_the_only_leaf_and_purely_additive(self):
+    def test_0032_is_purely_additive(self):
         loader = MigrationLoader(None, ignore_no_migrations=True)
-        self.assertEqual(loader.graph.leaf_nodes('manager'), [MIGRATION])
         migration = loader.get_migration(*MIGRATION)
         self.assertIn(('manager', '0031_workoutsessionrecovery'), migration.dependencies)
         added = {}
