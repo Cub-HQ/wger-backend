@@ -35,15 +35,26 @@ def _error(error: routine_preview.PreviewError) -> Response:
     return Response(error.body(), status=error.status)
 
 
-class RoutinePreviewCreateView(APIView):
+class _PrivateView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        routine_preview.refuse_trainer(request)
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
+
+class RoutinePreviewCreateView(_PrivateView):
     """
     Create (or replay) a private preview of a proposed routine
 
     Writes only the preview record: no routine, day, slot, entry, config,
     session or log is created.
     """
-
-    permission_classes = (IsAuthenticated,)
 
     def post(self, request):
         # Size is checked on the raw body, before anything is parsed
@@ -61,7 +72,7 @@ class RoutinePreviewCreateView(APIView):
             )
         try:
             body = json.loads(raw)
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             return Response(
                 {'detail': 'The body must be JSON.', 'code': 'invalid_request'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -76,10 +87,8 @@ class RoutinePreviewCreateView(APIView):
         )
 
 
-class RoutinePreviewDetailView(APIView):
+class RoutinePreviewDetailView(_PrivateView):
     """The owner's immutable preview snapshot"""
-
-    permission_classes = (IsAuthenticated,)
 
     def get(self, request, preview_id):
         try:

@@ -17,9 +17,14 @@
 import copy
 import datetime
 import json
+import threading
+from unittest import skipUnless
 
 # Django
 from django.apps import apps
+from django.contrib.auth.models import User
+from django.db import connection
+from django.test import TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -27,7 +32,10 @@ from django.utils import timezone
 from rest_framework import status
 
 # wger
-from wger.core.tests.base_testcase import WgerTestCase
+from wger.core.tests.base_testcase import (
+    BaseTestCase,
+    WgerTestCase,
+)
 from wger.manager import routine_preview
 from wger.manager.models import (
     Label,
@@ -362,6 +370,34 @@ class RoutinePreviewTestCase(WgerTestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data['errors'][0]['code'], 'unsupported')
 
+    def test_trainer_logged_in_as_the_owner_cannot_post(self):
+        """No lookup or write: new key, replayed key, same plan and reused key all 404"""
+        created = self.post(body())
+        self.user_logout()
+        self.user_login('trainer1')
+        r = self.client.post(reverse('core:user:trainer-login', args=[2]))
+        self.assertEqual(r.status_code, status.HTTP_302_FOUND)
+        self.assertEqual(int(self.client.session['_auth_user_id']), 2)
+
+        changed = twelve_weeks()
+        changed['days'][0]['name'] = 'Other'
+        for data in (body(key='new'), body(), body(key='same-plan'), body(changed)):
+            response = self.post(data)
+            self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND, data)
+            self.assertNotIn(created.data['preview_id'], response.content.decode())
+        self.assertEqual(
+            [str(pk) for pk in RoutinePreview.objects.values_list('pk', flat=True)],
+            [created.data['preview_id']],
+        )
+
+    def test_private_headers(self):
+        created = self.post(body())
+        detail = self.client.get(
+            reverse('routine-preview-detail', args=[created.data['preview_id']])
+        )
+        for response in (created, detail, self.post({})):
+            self.assertEqual(response['Cache-Control'], 'private, no-store')
+
     def test_body_bounds(self):
         too_big = json.dumps(body()) + ' ' * routine_preview.MAX_BODY_BYTES
         response = self.client.post(URL, too_big, content_type='application/json')
@@ -377,3 +413,57 @@ class RoutinePreviewTestCase(WgerTestCase):
             self.client.post(URL, 'nope', content_type='application/json').status_code,
             status.HTTP_400_BAD_REQUEST,
         )
+        # Deep nesting within the size limit is a bad request, not a server error
+        nested = '[' * 100_000 + ']' * 100_000
+        response = self.client.post(URL, nested, content_type='application/json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'invalid_request')
+
+
+@skipUnless(connection.vendor == 'postgresql', 'PostgreSQL row locks')
+class RoutinePreviewConcurrencyTestCase(BaseTestCase, TransactionTestCase):
+    """Parallel POSTs of one owner: one row per key or plan, never over the limit"""
+
+    def race(self, bodies):
+        user = User.objects.get(username='test')
+        barrier = threading.Barrier(len(bodies))
+        results = []
+
+        def post(data):
+            try:
+                barrier.wait()
+                results.append(routine_preview.create(user, data)[1])
+            except routine_preview.PreviewError as e:
+                results.append(e.code)
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=post, args=(b,)) for b in bodies]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return sorted(results, key=str)
+
+    def test_same_key(self):
+        self.assertEqual(self.race([body()] * 4), [False, True, True, True])
+        self.assertEqual(RoutinePreview.objects.count(), 1)
+
+    def test_same_plan_new_keys(self):
+        self.assertEqual(
+            self.race([body(key=f'k{i}') for i in range(4)]), [False, True, True, True]
+        )
+        self.assertEqual(RoutinePreview.objects.count(), 1)
+
+    def test_limit(self):
+        def plan(i):
+            proposal = twelve_weeks()
+            proposal['routine']['name'] = f'Plan {i}'
+            return body(proposal, key=f'k{i}')
+
+        user = User.objects.get(username='test')
+        for i in range(routine_preview.MAX_ACTIVE_PREVIEWS - 2):
+            routine_preview.create(user, plan(i))
+        results = self.race([plan(100 + i) for i in range(5)])
+        self.assertEqual(results, [False, False] + ['too_many_previews'] * 3)
+        self.assertEqual(RoutinePreview.objects.count(), routine_preview.MAX_ACTIVE_PREVIEWS)

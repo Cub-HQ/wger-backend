@@ -141,6 +141,27 @@ class RoutineLabelTestCase(WgerTestCase):
         self.assertEqual(APIClient().get(URL).status_code, 403)
         self.assertEqual(Label.objects.get(pk=pk).label, 'Deload')
 
+    def test_no_trainer_logged_in_as_the_owner(self):
+        """A trainer's real trainer-login session neither reads nor writes the member's labels"""
+        Routine.objects.filter(pk=2).update(end='2024-03-31')
+        pk = Label.objects.create(routine_id=2, start_offset=0, end_offset=6, label='Deload').pk
+        self.user_login('trainer1')
+        r = self.client.post(reverse('core:user:trainer-login', args=[2]))
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(int(self.client.session['_auth_user_id']), 2)
+
+        new = {'routine': 2, 'start_offset': 10, 'end_offset': 12, 'label': 'Mine'}
+        responses = (
+            self.client.get(URL),
+            self.client.get(f'{URL}{pk}/'),
+            self.client.post(URL, new, content_type='application/json'),
+            self.client.patch(f'{URL}{pk}/', {'label': 'x'}, content_type='application/json'),
+            self.client.delete(f'{URL}{pk}/'),
+        )
+        self.assertEqual([r.status_code for r in responses], [404] * 5)
+        self.assertEqual(list(Label.objects.values_list('pk', 'label')), [(pk, 'Deload')])
+        self.assertFalse(RoutineRecovery.objects.exists())
+
     def test_writes_are_recorded_and_undoable(self):
         before = self.history()
         rev = self.api.get('/api/v2/routine/1/revision/').json()['revision']

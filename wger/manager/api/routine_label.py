@@ -27,6 +27,7 @@ routine never overlap, so every date has at most one label.
 from rest_framework import serializers
 
 # wger
+from wger.manager import routine_preview
 from wger.manager.api.views import RecordedPlanEditMixin
 from wger.manager.models import (
     Label,
@@ -81,6 +82,11 @@ class RoutineLabelViewSet(RecordedPlanEditMixin, WgerOwnerObjectModelViewSet):
     is_private = True
     ordering_fields = '__all__'
     filterset_fields = ('routine',)
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        # Labels are owner-only like previews: no trainer logged in as the member
+        routine_preview.refuse_trainer(request)
 
     def get_queryset(self):
         # REST API generation

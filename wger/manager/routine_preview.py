@@ -37,10 +37,10 @@ from decimal import (
 
 # Django
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import (
-    IntegrityError,
     models,
     transaction,
 )
@@ -707,63 +707,75 @@ def _replay(preview, request_hash):
     return preview
 
 
+def refuse_trainer(request):
+    """A trainer logged in as a member must not see or write the member's private proposals"""
+    if request.session.get('trainer.identity'):
+        raise Http404
+
+
 def create(user, body):
     """(preview, replayed) for a POST body; raises PreviewError"""
     body = _validate_body(body)
     request_hash = _sha({k: body[k] for k in ('schema_version', 'external_version', 'proposal')})
-    now = timezone.now()
-
-    # Expired previews are gone for good, there is no background job
-    RoutinePreview.objects.filter(user=user, expires_at__lte=now).delete()
-
-    existing = RoutinePreview.objects.filter(user=user, idempotency_key=body['idempotency_key'])
+    existing = RoutinePreview.objects.filter(
+        user=user,
+        idempotency_key=body['idempotency_key'],
+        expires_at__gt=timezone.now(),
+    )
+    # A retry is answered without validating the plan again
     if (preview := existing.first()) is not None:
         return _replay(preview, request_hash), True
 
+    # Slow and read-only, so it runs before the owner's lock is taken
     canonical, schedule, names = build(user, body['proposal'])
     plan_hash = _sha(canonical)
 
-    same = RoutinePreview.objects.filter(
-        user=user,
-        plan_hash=plan_hash,
-        external_version=body['external_version'],
-    ).first()
-    if same is not None:
-        return same, True
+    with transaction.atomic():
+        # One create per owner at a time, so the key, plan and limit checks
+        # below cannot interleave with a concurrent POST of the same owner
+        User.objects.select_for_update(no_key=True).get(pk=user.pk)
+        now = timezone.now()
 
-    if RoutinePreview.objects.filter(user=user).count() >= MAX_ACTIVE_PREVIEWS:
-        raise PreviewError(
-            429,
-            'too_many_previews',
-            f'At most {MAX_ACTIVE_PREVIEWS} unexpired previews per user.',
-        )
+        # Expired previews are gone for good, there is no background job
+        RoutinePreview.objects.filter(user=user, expires_at__lte=now).delete()
 
-    try:
-        with transaction.atomic():
-            preview = RoutinePreview(
-                user=user,
-                idempotency_key=body['idempotency_key'],
-                external_version=body['external_version'],
-                request_hash=request_hash,
-                plan_hash=plan_hash,
-                canonical_proposal=canonical,
-                schedule=schedule,
-                exercise_names=names,
-                created_at=now,
-                expires_at=now + PREVIEW_LIFETIME,
+        if (preview := existing.first()) is not None:
+            return _replay(preview, request_hash), True
+
+        same = RoutinePreview.objects.filter(
+            user=user,
+            plan_hash=plan_hash,
+            external_version=body['external_version'],
+        ).first()
+        if same is not None:
+            return same, True
+
+        if RoutinePreview.objects.filter(user=user).count() >= MAX_ACTIVE_PREVIEWS:
+            raise PreviewError(
+                429,
+                'too_many_previews',
+                f'At most {MAX_ACTIVE_PREVIEWS} unexpired previews per user.',
             )
-            preview.save()
-    except IntegrityError:
-        # A concurrent retry with the same key won the race
-        return _replay(existing.get(), request_hash), True
+
+        preview = RoutinePreview(
+            user=user,
+            idempotency_key=body['idempotency_key'],
+            external_version=body['external_version'],
+            request_hash=request_hash,
+            plan_hash=plan_hash,
+            canonical_proposal=canonical,
+            schedule=schedule,
+            exercise_names=names,
+            created_at=now,
+            expires_at=now + PREVIEW_LIFETIME,
+        )
+        preview.save()
     return preview, False
 
 
 def owned(request, preview_id) -> RoutinePreview:
     """The requesting owner's unexpired preview; 404 for anyone else, 410 when expired"""
-    # A trainer logged in as a member must not see the member's private proposals
-    if request.session.get('trainer.identity'):
-        raise Http404
+    refuse_trainer(request)
     preview = RoutinePreview.objects.filter(pk=preview_id, user=request.user).first()
     if preview is None:
         raise Http404
