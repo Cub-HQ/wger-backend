@@ -22,7 +22,7 @@ from uuid import UUID
 
 # Django
 from django.conf import settings
-from django.db import DatabaseError
+from django.db import DatabaseError, connection
 from django.utils import timezone
 
 # wger
@@ -34,9 +34,16 @@ from wger.intervals.push import _config, _run_lock
 from wger.manager.models import WorkoutSession
 
 
-UNSUPPORTED = ['moving_time', 'icu_training_load', 'heart rate', 'RPE/feel', 'structured sets']
+UNSUPPORTED = [
+    'moving_time',
+    'icu_training_load',
+    'heart rate',
+    'RPE/feel',
+    'RiR',
+    'structured sets',
+]
 # The measures _set renders; a log with none of them is not a recorded set.
-RECORDED = ('repetitions', 'weight', 'duration', 'distance', 'level', 'rir')
+RECORDED = ('repetitions', 'weight', 'duration', 'distance', 'level')
 
 
 def _hash(value):
@@ -66,9 +73,8 @@ def _set(log):
     if log.distance is not None:
         unit = log.distance_unit.name if log.distance_unit else ''
         parts.append(f'{_number(log.distance)} {unit}'.rstrip())
-    for field in ('level', 'rir'):
-        if getattr(log, field) is not None:
-            parts.append(f'{field} {_number(getattr(log, field))}')
+    if log.level is not None:
+        parts.append(f'level {_number(log.level)}')
     return ' '.join(parts)
 
 
@@ -177,17 +183,24 @@ def _plan(user, session_id, retry_pending, need_write=False):
         raise PlanError(
             'Intervals athlete timezone is missing or differs from the wger profile timezone'
         )
+    # Plans and strength are checked on every local date the session touches;
+    # activities from the day before too, since they can run into the session.
+    # ponytail: an activity starting 2+ days earlier is not fetched (needs >24 h duration).
     oldest, newest = start.date(), end.date()
-    activities = client.list_activities(api_key, oldest, newest)
-    events = client.list_events(api_key, oldest, newest)
-    _batch(activities, 'icu_athlete_id', athlete_id, oldest, newest)
-    _batch(events, 'athlete_id', athlete_id, oldest, newest)
+    touched = {oldest + datetime.timedelta(days=d) for d in range((newest - oldest).days + 1)}
+    earliest = oldest - datetime.timedelta(days=1)
+    activities = client.list_activities(api_key, earliest, newest)
+    events = client.list_events(api_key, earliest, newest)
+    _batch(activities, 'icu_athlete_id', athlete_id, earliest, newest)
+    _batch(events, 'athlete_id', athlete_id, earliest, newest)
     ledger = IntervalsActivityLink.objects.filter(
         user=user, external_id=payload['external_id']
     ).first()
     copies = [a for a in activities if a.get('external_id') == payload['external_id']]
     checks = {
+        'window': [earliest.isoformat(), newest.isoformat()],
         'overlaps': [],
+        'unknown_duration': [],
         'same_day_strength': [],
         'planned_events': [],
         'ledger': 'missing'
@@ -211,21 +224,30 @@ def _plan(user, session_id, retry_pending, need_write=False):
                 raise PlanError(f'activity {activity["id"]} has invalid duration')
         if activity.get('external_id') == payload['external_id']:
             continue
-        if seconds is not None:
-            remote_start = local.replace(tzinfo=zone).astimezone(datetime.timezone.utc)
-            remote_end = remote_start + datetime.timedelta(seconds=seconds)
-            if remote_start < session.datetime_end and remote_end > session.datetime_start:
+        remote_start = local.replace(tzinfo=zone).astimezone(datetime.timezone.utc)
+        if seconds is None:
+            # No duration, so overlap cannot be ruled out: refuse one that starts before
+            # the session ends on a touched date or within a max-length session before it.
+            # ponytail: fixed look-back; widen if duration-less day-long activities appear.
+            if remote_start < session.datetime_end and (
+                local.date() in touched
+                or remote_start > session.datetime_start - WorkoutSession.max_duration()
+            ):
+                checks['unknown_duration'].append(str(activity['id']))
+        elif remote_start + datetime.timedelta(seconds=seconds) > session.datetime_start:
+            if remote_start < session.datetime_end:
                 checks['overlaps'].append(str(activity['id']))
-        if activity.get('type') == 'WeightTraining' and local.date() == oldest:
+        if activity.get('type') == 'WeightTraining' and local.date() in touched:
             checks['same_day_strength'].append(str(activity['id']))
     for event in events:
         if (
             event.get('category') == 'WORKOUT'
-            and datetime.datetime.fromisoformat(event['start_date_local']).date() == oldest
+            and datetime.datetime.fromisoformat(event['start_date_local']).date() in touched
         ):
             checks['planned_events'].append(str(event['id']))
     for check, reason in (
         ('overlaps', 'overlapping activity'),
+        ('unknown_duration', 'activity without duration may overlap'),
         ('same_day_strength', 'same-day WeightTraining activity'),
         ('planned_events', 'same-day planned WORKOUT event'),
     ):
@@ -289,6 +311,10 @@ def preview(user, session_id, retry_pending=False):
 
 def apply(user, session_id, plan_hash, retry_pending=False):
     """Recompute under the shared writer lock, then apply the approved plan."""
+    # The pending ledger row must be committed before the POST so an uncertain
+    # write is remembered; inside an enclosing transaction it would not be.
+    if connection.in_atomic_block or not connection.get_autocommit():
+        raise PlanError('apply needs autocommit; do not call it inside a transaction')
     api_key, _ = _config(user)
     with _run_lock(user):
         result = _plan(user, session_id, retry_pending, need_write=True)

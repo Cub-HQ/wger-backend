@@ -10,10 +10,11 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import override_settings
+from django.db import connection, transaction
+from django.test import TransactionTestCase, override_settings
 
 # wger
-from wger.core.tests.base_testcase import WgerTestCase
+from wger.core.tests.base_testcase import BaseTestCase
 from wger.intervals import export
 from wger.intervals.client import IntervalsError
 from wger.intervals.models import IntervalsActivityLink, IntervalsEventLink
@@ -39,6 +40,10 @@ class FakeCompletedIntervals:
         assert kwargs['auth'] == ('API_KEY', KEY) and kwargs['timeout']
         path = url.split('/api/v1/')[1]
         self.calls.append((method, path, json))
+        if method == 'POST':
+            # The pending ledger row is already committed (autocommit, no outer atomic).
+            assert not connection.in_atomic_block and connection.get_autocommit()
+            assert IntervalsActivityLink.objects.filter(intervals_activity_id=None).exists()
         if method == 'GET':
             if path == 'athlete/0':
                 return response(dict(self.athlete))
@@ -70,7 +75,9 @@ class FakeCompletedIntervals:
     INTERVALS_WGER_USERNAME='admin',
     TIME_ZONE='UTC',
 )
-class CompletedSessionExportTest(WgerTestCase):
+class CompletedSessionExportTest(BaseTestCase, TransactionTestCase):
+    """Autocommit, like the command: apply refuses to run inside a transaction."""
+
     def setUp(self):
         super().setUp()
         self.user = User.objects.get(username='admin')
@@ -185,16 +192,19 @@ class CompletedSessionExportTest(WgerTestCase):
             repetitions_target=99,
             weight_target=999,
         )
-        description = self.preview()['payload']['description']
+        plan = self.preview()
+        description = plan['payload']['description']
         for recorded in (
             '14 reps × 87.5 kg',
             '0 reps × 0 lb',
             '30 s',
             '2 Kilometers',
             'level 0',
-            'rir 0',
         ):
             self.assertIn(recorded, description)
+        # RiR is self-rated effort: stored, but never sent.
+        self.assertNotIn('rir', description.lower())
+        self.assertIn('RiR', plan['unsupported_fields'])
         self.assertNotIn('× 999 lb', description)
         self.assertNotIn('99 reps', description)
         self.assertEqual(self.fake.writes(), [])
@@ -286,6 +296,75 @@ class CompletedSessionExportTest(WgerTestCase):
                 self.apply(plan)
                 self.assertEqual(self.fake.writes(), [])
                 self.assertEqual(IntervalsActivityLink.objects.count(), 0)
+
+    def test_ambiguous_or_touched_date_candidates_conflict_but_prior_day_plan_does_not(self):
+        walk = {'id': 'i8101', 'type': 'Walk', 'icu_athlete_id': ATHLETE}
+        # Session 23:30 → 00:30: both local dates are touched.
+        WorkoutSession.objects.filter(pk=self.session.pk).update(
+            datetime_start=START.replace(hour=23, minute=30),
+            datetime_end=START.replace(hour=23, minute=30) + timedelta(hours=1),
+        )
+        for activities, events, expected in (
+            # No duration and started before the session ended: overlap unknown.
+            ([{**walk, 'start_date_local': '2040-06-24T23:40:00'}], [], 'conflict'),
+            ([{**walk, 'start_date_local': '2040-06-24T21:00:00'}], [], 'conflict'),
+            # Previous-day activity running into the session.
+            (
+                [{**walk, 'start_date_local': '2040-06-23T23:00:00', 'elapsed_time': 90000}],
+                [],
+                'conflict',
+            ),
+            # Strength or a planned workout on the second touched date.
+            (
+                [{**walk, 'type': 'WeightTraining', 'start_date_local': '2040-06-25T18:00:00'}],
+                [],
+                'conflict',
+            ),
+            (
+                [],
+                [
+                    {
+                        'id': 7101,
+                        'category': 'WORKOUT',
+                        'start_date_local': '2040-06-25T00:00:00',
+                        'athlete_id': ATHLETE,
+                    }
+                ],
+                'conflict',
+            ),
+            # Not ambiguous: after the session, or a plan the day before only.
+            ([{**walk, 'start_date_local': '2040-06-25T01:00:00'}], [], 'create'),
+            (
+                [{**walk, 'start_date_local': '2040-06-23T12:00:00', 'elapsed_time': 600}],
+                [
+                    {
+                        'id': 7102,
+                        'category': 'WORKOUT',
+                        'start_date_local': '2040-06-23T00:00:00',
+                        'athlete_id': ATHLETE,
+                    }
+                ],
+                'create',
+            ),
+        ):
+            with self.subTest(activities=activities, events=events):
+                self.fake.activities = {row['id']: row for row in activities}
+                self.fake.events = events
+                plan = self.preview()
+                self.assertEqual(plan['action'], expected, plan['conflicts'])
+                self.assertEqual(plan['checks']['window'], ['2040-06-23', '2040-06-25'])
+                if expected == 'conflict':
+                    self.apply(plan)
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(IntervalsActivityLink.objects.count(), 0)
+
+    def test_apply_inside_a_transaction_refuses_before_any_request(self):
+        plan = self.preview()
+        calls = len(self.fake.calls)
+        with self.assertRaises(PlanError), transaction.atomic():
+            self.apply(plan)
+        self.assertEqual(len(self.fake.calls), calls)
+        self.assertEqual(IntervalsActivityLink.objects.count(), 0)
 
     def test_entire_remote_batch_is_validated_before_adopting_a_match(self):
         payload = self.preview()['payload']
