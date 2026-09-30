@@ -45,6 +45,7 @@ from wger.exercises.sitemap import ExercisesSitemap
 from wger.gallery.api import views as gallery_api_views
 from wger.intervals.api import views as intervals_api_views
 from wger.manager.api import (
+    routine_label as manager_routine_label_api,
     routine_preview as manager_routine_preview_api,
     views as manager_api_views,
 )
@@ -93,6 +94,11 @@ router.register(
     r'slot-entry',
     manager_api_views.SlotEntryViewSet,
     basename='slot-entry',
+)
+router.register(
+    r'routine-label',
+    manager_routine_label_api.RoutineLabelViewSet,
+    basename='routine-label',
 )
 router.register(
     r'weight-config',

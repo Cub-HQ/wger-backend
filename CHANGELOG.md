@@ -13,6 +13,9 @@ Deleting a routine now moves it to the trash for 14 days instead of erasing it, 
 
 Planning changes and undo are for the routine's owner only: a trainer logged in as a member can still view the member's routines but can no longer change, delete, trash, rebuild or restore them, or see their undo list. Days, slots, exercises and their set settings can no longer be moved to a different routine (409 `cross_routine_move`); moving and reordering within a routine, and moving labels, still work. Trashed routines no longer show on a gym member's page. Known limits: the routine PDFs still render for a trashed routine (owner only), and an admin's exercise replacement also changes trashed plans without an undo record.
 
+### Private routine previews and routine labels
+A proposed routine can be previewed before anything is saved: `POST /api/v2/routine-preview/` checks the plan and returns its full calendar (every date, week, label and target) exactly as the saved routine would show it, and the preview page `/{lang}/routine/preview/{id}/` shows it to its owner only. Previews expire after 14 days and never create or change a routine or workout. Only plans with explicit weekly targets are supported for now. Routine labels, such as "Deload" for a week, can now be managed over the API at `/api/v2/routine-label/`; labels of a routine may not overlap and every change can be undone like other plan changes.
+
 ### Sync with Apple Health and Health Connect
 The mobile app can now import your body metrics from Apple Health (iOS) and Health Connect (Android). Once enabled in the settings, the data your smart scale, blood pressure monitor, smartwatch or what other health apps record is imported automatically and shows up alongside your manually entered entries. At the moment we support these:
 
