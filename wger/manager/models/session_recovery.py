@@ -41,7 +41,7 @@ def _snapshot(obj):
 
 
 # Columns added after snapshot version 1 was first written (manager 0032 and
-# 0033). Snapshots archived before those migrations lack them and restore with
+# 0034). Snapshots archived before those migrations lack them and restore with
 # the value the migration gave existing rows; any other missing or unknown key
 # still refuses the restore.
 ADDED_AFTER_V1 = {

@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('manager', '0032_workoutlog_cardio_station'),
+        ('manager', '0033_routine_recovery'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

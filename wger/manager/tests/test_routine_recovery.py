@@ -319,6 +319,21 @@ class RoutineRecoveryTestCase(WgerTestCase):
         self.assertEqual((WorkoutLog.objects.values().get(pk=log.pk), WorkoutSession.objects.values().get(pk=session.pk)), later)
         self.assertTrue(SlotEntry.objects.filter(pk=entry.pk).exists())
 
+    def test_trash_rebuild_and_undo_keep_unknown_session_time(self):
+        WorkoutSession.objects.filter(pk=self.session.pk).update(
+            datetime_end=self.session.datetime_start, time_unknown=True
+        )
+        before = self.history()
+        trash = self.post('1/trash/', {'expected_revision': self.rev(), 'idempotency_key': 't'}).json()
+        self.assertEqual(self.restore(trash['recovery_id'], self.rev(), 'r').status_code, 200)
+        rev = self.rev()
+        plan_hash = routine_recovery.preview(self.user, 1, rev, REPLACEMENT)['plan_hash']
+        receipt = routine_recovery.rebuild(self.user, 1, rev, REPLACEMENT, plan_hash, 'b')
+        new = receipt['replacement_routine_id']
+        self.assertEqual(self.restore(receipt['previous_recovery_id'], self.rev(new), 'u').status_code, 200)
+        self.assertEqual(self.history(), before)
+        self.assertTrue(WorkoutSession.objects.get(pk=self.session.pk).time_unknown)
+
     def test_caches_reset_only_on_commit(self):
         with patch.object(routine_recovery, 'reset_routine_cache') as reset:
             with self.captureOnCommitCallbacks(execute=False) as callbacks:

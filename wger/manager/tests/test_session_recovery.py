@@ -208,7 +208,7 @@ class SessionRecoveryTestCase(BaseTestCase, TransactionTestCase):
     }
 
     def pre_0032_snapshot(self, row):
-        # Also before 0033: the session has no time_unknown key
+        # Also before 0034: the session has no time_unknown key
         snapshot = row.snapshot
         snapshot['logs'] = [
             {key: log[key] for key in self.PRE_0032_LOG_KEYS} for log in snapshot['logs']
