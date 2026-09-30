@@ -28,7 +28,7 @@ from wger.intervals.models import IntervalsEventLink
 from wger.intervals.outbound import external_id, payload_hash, plan_outbound
 from wger.intervals.tests.test_outbound import day, desired, remote
 from wger.intervals.tests.test_planning import ATHLETE, NEWEST, OLDEST
-from wger.manager.models import Day, Routine
+from wger.manager.models import Day, Routine, WorkoutLog, WorkoutSession
 
 
 LINK_FIELDS = ('external_id', 'intervals_event_id', 'pushed_hash', 'date', 'state')
@@ -94,6 +94,8 @@ class IntervalsEventLinkTest(WgerTestCase):
     def test_ledger_row_survives_routine_deletion_so_its_event_can_be_deleted(self):
         link = self.record()
 
+        WorkoutLog.objects.filter(routine=self.routine).delete()
+        WorkoutSession.objects.filter(routine=self.routine).delete()
         self.routine.delete()
 
         link.refresh_from_db()

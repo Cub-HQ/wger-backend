@@ -26,6 +26,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 # wger
+from wger.manager.models.routine_recovery import protect_history
 from wger.utils.uuid import uuid7
 
 
@@ -68,14 +69,15 @@ class WorkoutSession(models.Model):
 
     routine = models.ForeignKey(
         'Routine',
-        on_delete=models.CASCADE,
+        # History keeps its plan graph; see protect_history
+        on_delete=protect_history,
         related_name='sessions',
         null=True,
     )
 
     day = models.ForeignKey(
         'Day',
-        on_delete=models.CASCADE,
+        on_delete=protect_history,
         null=True,
     )
     """

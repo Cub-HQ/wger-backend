@@ -37,6 +37,7 @@ from wger.manager.consts import (
     WEIGHT_UNIT_KG,
 )
 from wger.manager.managers import WorkoutLogManager
+from wger.manager.models.routine_recovery import protect_history
 from wger.manager.models.session import WorkoutSession
 from wger.manager.validators import (
     NullMinValueValidator,
@@ -104,13 +105,14 @@ class WorkoutLog(models.Model):
     routine = models.ForeignKey(
         'Routine',
         verbose_name='Workout',
-        on_delete=models.CASCADE,
+        # History keeps its plan graph; see protect_history
+        on_delete=protect_history,
         null=True,
     )
 
     slot_entry = models.ForeignKey(
         'SlotEntry',
-        on_delete=models.CASCADE,
+        on_delete=protect_history,
         null=True,
     )
 

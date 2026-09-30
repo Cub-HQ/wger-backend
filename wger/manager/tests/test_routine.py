@@ -620,6 +620,15 @@ class RoutineApiTestCase(ApiBaseResourceTestCase):
         'end': '2024-06-20',
     }
 
+    def test_delete_detail(self):
+        """DELETE moves the owner's routine to the trash; others get 404"""
+        self.assertEqual(self.client.delete(self.url_detail).status_code, 403)
+        self.authenticate(self.user_fail)
+        self.assertEqual(self.client.delete(self.url_detail).status_code, 404)
+        self.authenticate()
+        self.assertEqual(self.client.delete(self.url_detail).status_code, 200)
+        self.assertIsNotNone(Routine.objects.get(pk=self.pk).deleted_at)
+
 
 class RoutineDateValidationTestCase(WgerTestCase):
     """
