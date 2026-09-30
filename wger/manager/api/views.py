@@ -30,6 +30,7 @@ from drf_spectacular.utils import (
     extend_schema,
 )
 from rest_framework import (
+    permissions,
     status,
     viewsets,
 )
@@ -78,6 +79,7 @@ from wger.manager.api.serializers import (
 )
 from wger.manager.models import (
     Day,
+    Label,
     MaxRepetitionsConfig,
     MaxRestConfig,
     MaxRiRConfig,
@@ -106,6 +108,15 @@ def request_user_or_trainer_q(request):
     if trainer_identity_pk:
         return Q(user=request.user) | Q(user_id=trainer_identity_pk)
     return Q(user=request.user)
+
+
+def refuse_trainer(request):
+    """
+    A trainer logged in as a member gets no owner planning or recovery rights
+    (wger-gym#24); 404 like the other owner-only routes
+    """
+    if request.session.get('trainer.identity'):
+        raise NotFound()
 
 
 def _recorded(request, routine_ids, write):
@@ -139,6 +150,11 @@ class RecoveryErrorMixin:
 class RecordedPlanEditMixin(RecoveryErrorMixin):
     """Writes to a routine's plan children record an undoable `edit` recovery"""
 
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.method not in permissions.SAFE_METHODS:
+            refuse_trainer(request)
+
     def _routine_ids(self, request, instance=None):
         ids = set()
         if instance is not None:
@@ -162,7 +178,15 @@ class RecordedPlanEditMixin(RecoveryErrorMixin):
 
     def update(self, request, *args, **kwargs):
         self._check_owner_permission(request)
-        ids = self._routine_ids(request, self.get_object())
+        instance = self.get_object()
+        ids = self._routine_ids(request, instance)
+        # History and undo snapshots point at these rows by primary key. Moved to
+        # another routine, history and plan disagree and no undo can move them
+        # back, so only labels (never referenced by history) may change routine.
+        if len(ids) > 1 and not isinstance(instance, Label):
+            raise routine_recovery.RecoveryError(
+                409, 'cross_routine_move', 'Plan rows cannot be moved to another routine.'
+            )
         return _recorded(request, ids, partial(super().update, request, *args, **kwargs))
 
     def destroy(self, request, *args, **kwargs):
@@ -204,10 +228,19 @@ class RoutineViewSet(RecoveryErrorMixin, viewsets.ModelViewSet):
             | Q(is_public=True, deleted_at__isnull=True)
         )
         if self.action != 'list':
-            return qs
+            # Only the owner sees a trashed routine, also through the trainer branch
+            return qs.filter(Q(deleted_at__isnull=True) | Q(user=self.request.user))
         if self.request.query_params.get('trashed') == 'true':
             return qs.filter(user=self.request.user, deleted_at__isnull=False)
         return qs.filter(deleted_at__isnull=True)
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.method not in permissions.SAFE_METHODS or self.action in (
+            'revision',
+            'recoveries',
+        ):
+            refuse_trainer(request)
 
     def perform_create(self, serializer):
         """

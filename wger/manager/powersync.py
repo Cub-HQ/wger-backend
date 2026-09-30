@@ -69,6 +69,7 @@ class RoutineHandler(PowerSyncHandler):
     serializer_class = RoutineSerializer
     viewset_class = RoutineViewSet
     supports_create = False
+    owner_only = True
 
     def handle_update(self, payload, user_id):
         """A recorded, undoable edit; trashed routines refuse writes"""

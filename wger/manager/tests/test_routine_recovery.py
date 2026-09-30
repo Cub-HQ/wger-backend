@@ -27,6 +27,7 @@ from wger.manager.models import (
     Day,
     Routine,
     RoutineRecovery,
+    Slot,
     SlotEntry,
     WeightConfig,
     WorkoutLog,
@@ -326,6 +327,91 @@ class RoutineRecoveryTestCase(WgerTestCase):
             for callback in callbacks:
                 callback()
             reset.assert_called()
+
+    def test_cross_routine_moves_are_refused_before_any_write(self):
+        before = self.history()
+        rev = self.rev()
+        day, slot = self.entry.slot.day, self.entry.slot
+        other = Routine.objects.create(user=self.user, name='Other', start='2024-01-01', end='2024-02-01')
+        other_slot = Slot.objects.create(day=Day.objects.create(routine=other, order=1), order=1)
+        moves = (
+            (f'/api/v2/day/{day.pk}/', {'routine': other.pk}),
+            (f'/api/v2/slot/{slot.pk}/', {'day': other_slot.day_id}),
+            (f'/api/v2/slot-entry/{self.entry.pk}/', {'slot': other_slot.pk}),
+        )
+        for url, body in moves:
+            r = self.api.patch(url, body, format='json')
+            self.assertEqual(r.status_code, 409, url)
+            self.assertEqual(r.json()['code'], 'cross_routine_move')
+        self.assertEqual(self.rev(), rev)
+        self.assertFalse(RoutineRecovery.objects.exists())
+        self.assertEqual(self.history(), before)
+        self.assertEqual(Day.objects.get(pk=day.pk).routine_id, self.routine.pk)
+        self.assertEqual(SlotEntry.objects.get(pk=self.entry.pk).slot.day.routine_id, self.routine.pk)
+
+        # Reordering and moving within the routine stay possible and undoable
+        target = Day.objects.filter(routine=self.routine).exclude(pk=day.pk).first()
+        r = self.api.patch(f'/api/v2/slot/{slot.pk}/', {'day': target.pk, 'order': 7}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(self.restore(r['X-Routine-Recovery-Id'], self.rev(), 'u').status_code, 200)
+        self.assertEqual(Slot.objects.get(pk=slot.pk).day_id, day.pk)
+        self.assertEqual(self.rev(), rev)
+        self.assertEqual(self.history(), before)
+
+    def test_trainer_logged_in_as_member_gets_no_owner_rights(self):
+        member, trainer = User.objects.get(username='test'), User.objects.get(username='trainer1')
+        day = Day.objects.create(routine_id=2, order=1, name='Owner day')
+        owner = APIClient()
+        owner.force_authenticate(member)
+        edit = owner.patch(f'/api/v2/day/{day.pk}/', {'name': 'Owner edit'}, format='json')
+        self.assertEqual(edit.status_code, 200, edit.content)
+        recovery_id = edit['X-Routine-Recovery-Id']
+        routine_recovery.legacy_delete(member, 3)
+        own = Routine.objects.create(user=trainer, name='Tpl', is_template=True, start='2024-01-01', end='2024-02-01')
+        trashed = Routine.objects.create(user=trainer, name='Old', is_template=True, start='2024-01-01', end='2024-02-01')
+        routine_recovery.legacy_delete(trainer, trashed.pk)
+        state = lambda: (
+            list(Routine.objects.order_by('pk').values()),
+            list(Day.objects.order_by('pk').values()),
+            list(RoutineRecovery.objects.order_by('pk').values_list('pk', 'restored_at')),
+        )
+
+        self.client.login(username='trainer1', password='trainer1trainer1')
+        page = self.client.get(reverse('core:user:overview', kwargs={'pk': member.pk}))
+        self.assertEqual([d['routine'].pk for d in page.context['routine_data']], [2, 4])
+        self.assertEqual(self.client.post(reverse('core:user:trainer-login', args=[member.pk])).status_code, 302)
+        self.assertEqual(self.client.session['trainer.identity'], trainer.pk)
+        before = state()
+
+        # Reads keep working, except the owner's recovery data and trashed rows
+        self.assertEqual(self.client.get(f'{URL}2/').status_code, 200)
+        self.assertEqual(self.client.get(f'{URL}{own.pk}/').status_code, 200)
+        self.assertEqual(self.client.get(f'{URL}{trashed.pk}/').status_code, 404)
+        self.assertEqual(self.client.get(f'{URL}{trashed.pk}/structure/').status_code, 404)
+        self.assertEqual(self.client.get(f'/api/v2/day/{day.pk}/').status_code, 200)
+
+        body = {'expected_revision': 'x', 'idempotency_key': 't', 'replacement': REPLACEMENT}
+        json = 'application/json'
+        refused = {
+            'revision': self.client.get(f'{URL}2/revision/'),
+            'recoveries': self.client.get(f'{URL}recoveries/'),
+            'restore': self.client.post(f'{URL}recoveries/{recovery_id}/restore/', body, content_type=json),
+            'trash': self.client.post(f'{URL}2/trash/', body, content_type=json),
+            'rebuild-preview': self.client.post(f'{URL}2/rebuild-preview/', body, content_type=json),
+            'rebuild': self.client.post(f'{URL}2/rebuild/', body, content_type=json),
+            'routine patch': self.client.patch(f'{URL}2/', {'name': 'T'}, content_type=json),
+            'routine delete': self.client.delete(f'{URL}2/'),
+            'day create': self.client.post('/api/v2/day/', {'routine': 2, 'order': 2}, content_type=json),
+            'day patch': self.client.patch(f'/api/v2/day/{day.pk}/', {'name': 'T'}, content_type=json),
+            'day delete': self.client.delete(f'/api/v2/day/{day.pk}/'),
+            'slot create': self.client.post('/api/v2/slot/', {'day': day.pk, 'order': 1}, content_type=json),
+        }
+        self.assertEqual({k: r.status_code for k, r in refused.items()}, dict.fromkeys(refused, 404))
+        sync = self.client.patch(
+            '/api/v2/upload-powersync-data', {'table': 'manager_routine', 'data': {'id': 2, 'name': 'T'}}, content_type=json
+        )
+        self.assertEqual(sync.json()['error'], 'Forbidden')
+        self.assertEqual(state(), before)
 
 
 @skipUnless(connection.vendor == 'postgresql', 'PostgreSQL row locks')

@@ -84,6 +84,10 @@ class PowerSyncHandler:
     # of deleting the row.
     supports_delete: bool = True
 
+    # Set to True for tables a trainer logged in as the member must not write
+    # (routine planning, wger-gym#24). The upload view refuses those writes.
+    owner_only: bool = False
+
     # If True, the handler passes ``user_id`` into the serializer context so
     # that owner-scoped fields (e.g. WorkoutLogSerializer.session) can filter
     # their queryset.
