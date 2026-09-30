@@ -87,6 +87,11 @@ class IntervalsEventLink(models.Model):
     their routine/day (SET_NULL) so a removed routine's event can still be
     deleted. `deleted` rows are history; one is reactivated only by a previewed
     `adopt` of an identical remote event.
+
+    `removing`/`removed` mark a deliberate removal of a still-planned event
+    (removal.py): intervals_event_id, pushed_hash and pushed_at keep the
+    original identity, `removal` holds the audit record. No planner path ever
+    writes such a key again, whatever the flags.
     """
 
     id = models.UUIDField(default=uuid7, primary_key=True)
@@ -98,11 +103,17 @@ class IntervalsEventLink(models.Model):
     intervals_event_id = models.BigIntegerField(null=True)
     pushed_hash = models.CharField(max_length=64)
     state = models.CharField(
-        max_length=7,
-        choices=[('active', 'active'), ('deleted', 'deleted')],
+        max_length=8,
+        choices=[
+            ('active', 'active'),
+            ('deleted', 'deleted'),
+            ('removing', 'removing'),
+            ('removed', 'removed'),
+        ],
         default='active',
     )
     pushed_at = models.DateTimeField()
+    removal = models.JSONField(null=True)
 
     class Meta:
         ordering = ['date', 'external_id']
