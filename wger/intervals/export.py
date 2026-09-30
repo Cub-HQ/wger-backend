@@ -18,6 +18,7 @@
 import datetime
 import hashlib
 import json
+import math
 from decimal import Decimal
 from uuid import UUID
 
@@ -233,8 +234,11 @@ def _batch(rows, owner_field, athlete_id, oldest, newest):
 def _owned(row):
     """The owned fields as compared and hashed: text as Intervals stores it, kg to 0.1."""
     kg = row.get('kg_lifted')
-    if isinstance(kg, (int, float)) and not isinstance(kg, bool):
+    if isinstance(kg, (int, float)) and not isinstance(kg, bool) and math.isfinite(kg):
         kg = float(round(kg, 1))
+    elif kg is not None:
+        # Never equal to a value this export sends (a float or None), so it is a conflict.
+        kg = f'invalid: {kg!r}'
     return {**{field: _norm(row.get(field)) for field in LEGACY_FIELDS}, 'kg_lifted': kg}
 
 

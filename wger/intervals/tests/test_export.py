@@ -642,11 +642,16 @@ class CompletedSessionExportTest(BaseTestCase, TransactionTestCase):
         self.assertEqual([w for w in self.fake.writes() if w[0] == 'PUT'], [])
 
     def test_wrong_readback_identity_or_body_keeps_the_last_proven_ledger(self):
+        # A 1 kg total, so a boolean readback (True == 1.0 in Python) must still fail.
+        WorkoutLog.objects.filter(pk=self.log.pk).update(repetitions=1, weight=1)
         link, row = self.exported()
         for put, readback in (
             (None, {'id': 'i8888'}),
             (None, {'icu_athlete_id': 'i9999'}),
             (None, {'external_id': 'someone-else'}),
+            (None, {'kg_lifted': True}),
+            (None, {'kg_lifted': float('inf')}),
+            (None, {'kg_lifted': '1.0'}),
             ('rewrite', {}),
             ('partial', {}),
         ):
