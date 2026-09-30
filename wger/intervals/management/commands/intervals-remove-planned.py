@@ -34,7 +34,7 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
-        parser.add_argument('--external-id', required=True, help='e.g. wger-gym:37:2026-09-28')
+        parser.add_argument('--external-id', required=True, help='e.g. wger-gym:7:2040-01-02')
         parser.add_argument('--event-id', required=True, help='the Intervals event id')
         parser.add_argument('--apply', action='store_true')
         parser.add_argument('--removal-hash', help='removal_hash printed by the preview')
