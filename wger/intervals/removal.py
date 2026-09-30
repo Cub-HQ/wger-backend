@@ -15,10 +15,11 @@
 """Deliberately remove ONE owned planned gym event from Intervals and keep a
 tombstone so no planner path ever writes that key again.
 
-Preview is GET only. Apply repeats every check under the push run lock and
-refuses unless the preview's removal_hash still matches. Then, in order: commit
-`removing` plus the audit snapshot, re-read the event, DELETE, read back its
-absence, commit `removed`. Any failure after the first commit leaves the
+Preview is GET only. Apply runs only in autocommit (outside any transaction),
+repeats every check under the push run lock and refuses unless the preview's
+removal_hash still matches. Then, in order: commit `removing` plus the audit
+snapshot, re-read the event, DELETE, read back its absence, commit `removed`
+and read that row back. Any failure after the first commit leaves the
 `removing` tombstone (never recreated); preview again to resume. Routines,
 days and workout history are only read.
 
@@ -30,10 +31,13 @@ approval phrase printed by the preview.
 """
 
 # Standard Library
+import datetime
 import hashlib
 import json
 
 # Django
+from django.db import DatabaseError, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 # wger
@@ -69,13 +73,28 @@ def _absent(api_key, event_id, external_id, events):
         return False
     try:
         client.get_event(api_key, event_id)
-    except client.IntervalsError as e:
-        # ponytail: client reports the status only in its message; use a typed
-        # not-found error once client.py grows one.
-        if str(e).endswith('HTTP 404'):
-            return True
-        raise
+    except client.NotFound:
+        return True
     return False
+
+
+def _linked_sessions(user, link):
+    """The user's wger sessions on the link's local day that belong to its
+    routine or day: by the session itself or by any of its logs. Sessions of
+    other routines/days on the same date are unrelated and never block. A link
+    whose routine and day are both gone cannot tell, so every session counts."""
+    tz = user.userprofile.zone_info
+    start = datetime.datetime.combine(link.date, datetime.time.min, tz)
+    end = datetime.datetime.combine(link.date + datetime.timedelta(days=1), datetime.time.min, tz)
+    sessions = WorkoutSession.objects.filter(
+        user=user, datetime_start__gte=start, datetime_start__lt=end
+    )
+    related = Q()
+    if link.routine_id is not None:
+        related |= Q(routine_id=link.routine_id) | Q(logs__routine_id=link.routine_id)
+    if link.day_id is not None:
+        related |= Q(day_id=link.day_id) | Q(logs__slot_entry__slot__day_id=link.day_id)
+    return sessions.filter(related).distinct() if related else sessions
 
 
 def _check(user, api_key, athlete_id, external_id, event_id, need_write=False):
@@ -96,8 +115,11 @@ def _check(user, api_key, athlete_id, external_id, event_id, need_write=False):
         raise PlanError('Intervals returned an event of another athlete')
     if activities:
         raise PlanError(f'Intervals has a completed activity on {date}; not removing')
-    if WorkoutSession.objects.filter(user=user, datetime_start__date=date).exists():
-        raise PlanError(f'a wger workout session is logged on {date}; not removing')
+    linked = list(_linked_sessions(user, link).values_list('pk', flat=True))
+    if linked:
+        raise PlanError(
+            f'wger workout session(s) {linked} on {date} belong to this routine/day; not removing'
+        )
 
     snapshot = (link.removal or {}).get('event')
     if _absent(api_key, event_id, external_id, events):
@@ -155,6 +177,10 @@ def apply(user, external_id, event_id, removal_hash, approval=None):
     Raises PlanError before any write, or IntervalsError/DatabaseError after
     the `removing` tombstone is committed (preview again to resume).
     """
+    # The tombstone must be committed before the DELETE is sent; inside an
+    # enclosing transaction its UPDATE could still roll back afterwards.
+    if transaction.get_connection().in_atomic_block or not transaction.get_autocommit():
+        raise PlanError('apply must run in autocommit, outside any transaction')
     api_key, athlete_id = _config(user)
     with _run_lock(user):
         link, plan = _check(user, api_key, athlete_id, external_id, event_id, need_write=True)
@@ -202,7 +228,10 @@ def apply(user, external_id, event_id, removal_hash, approval=None):
         if not _absent(api_key, event_id, external_id, events):
             raise client.IntervalsError(f'event {event_id} is still in Intervals')
         audit.update(removed_at=timezone.now().isoformat(), readback='absent')
-        IntervalsEventLink.objects.filter(pk=link.pk, state='removing').update(
+        done = IntervalsEventLink.objects.filter(pk=link.pk, state='removing').update(
             state='removed', removal=audit
         )
+        row = IntervalsEventLink.objects.filter(pk=link.pk).values('state', 'removal').first()
+        if done != 1 or row != {'state': 'removed', 'removal': audit}:
+            raise DatabaseError(f'ledger row {external_id} was not recorded removed')
     return {**plan, 'ledger_state': 'removed'}

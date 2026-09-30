@@ -32,6 +32,10 @@ class RateLimited(IntervalsError):
     pass
 
 
+class NotFound(IntervalsError):
+    pass
+
+
 def _request(method, api_key, path, params=None, body=None, parse=True):
     error = None
     try:
@@ -54,6 +58,8 @@ def _request(method, api_key, path, params=None, body=None, parse=True):
             error = RateLimited(f'rate limited, retry after {retry}s')
         elif response.status_code in (401, 403):
             error = IntervalsError(f'HTTP {response.status_code}, API key rejected')
+        elif response.status_code == 404:
+            error = NotFound('HTTP 404')
         elif response.status_code != 200:
             error = IntervalsError(f'HTTP {response.status_code}')
         elif not parse:

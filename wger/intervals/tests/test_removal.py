@@ -24,15 +24,17 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import OperationalError
+from django.db import OperationalError, connections, transaction
 from django.db.models.query import QuerySet
+from django.test import TransactionTestCase
 
 # wger
-from wger.core.tests.base_testcase import WgerTestCase
+from wger.core.tests.base_testcase import BaseTestCase
+from wger.intervals import client
 from wger.intervals.models import IntervalsEventLink
 from wger.intervals.tests import test_push
-from wger.intervals.tests.test_command import CONFIGURED, response
-from wger.manager.models import Day, Routine, WorkoutLog, WorkoutSession
+from wger.intervals.tests.test_command import CONFIGURED, KEY, response
+from wger.manager.models import Day, Routine, SlotEntry, WorkoutLog, WorkoutSession
 
 
 class Fake(test_push.FakeIntervals):
@@ -63,13 +65,17 @@ def plan_graph():
 
 
 @CONFIGURED
-class IntervalsRemovePlannedTest(WgerTestCase):
+class IntervalsRemovePlannedTest(BaseTestCase, TransactionTestCase):
+    """Autocommit (TransactionTestCase), as in production: apply refuses to
+    run inside a transaction, and its tombstone commit is what is observed."""
+
     # Push through the real intervals-push-gym command (routine 1, admin).
     run_command = test_push.IntervalsPushGymTest.run_command
     apply = test_push.IntervalsPushGymTest.apply
 
     def setUp(self):
         super().setUp()
+        self.user = User.objects.get(username='admin')
         self.fake = Fake()
         self.apply(self.fake)
         self.link = IntervalsEventLink.objects.order_by('date').first()
@@ -81,6 +87,25 @@ class IntervalsRemovePlannedTest(WgerTestCase):
     def tearDown(self):
         self.assertEqual((WorkoutSession.objects.count(), WorkoutLog.objects.count()), self.history)
         super().tearDown()
+
+    def local(self, day_offset, hour, minute=0):
+        """An aware datetime at the given local time around the link's date."""
+        date = self.link.date + datetime.timedelta(days=day_offset)
+        return datetime.datetime.combine(
+            date, datetime.time(hour, minute), self.user.userprofile.zone_info
+        )
+
+    def session(self, when, **fields):
+        session = WorkoutSession.objects.create(user=self.user, datetime_start=when, **fields)
+        self.history = (self.history[0] + 1, self.history[1])
+        return session
+
+    def log(self, session, **fields):
+        log = WorkoutLog.objects.create(
+            user=self.user, session=session, exercise_id=1, duration=600, **fields
+        )
+        self.history = (self.history[0], self.history[1] + 1)
+        return log
 
     def remove(self, *extra):
         out = io.StringIO()
@@ -198,16 +223,40 @@ class IntervalsRemovePlannedTest(WgerTestCase):
         self.assert_refused('completed activity')
         self.fake.activities = ()
 
-        WorkoutSession.objects.create(
-            user=User.objects.get(username='admin'),
-            routine_id=1,
-            datetime_start=datetime.datetime.combine(
-                self.link.date, datetime.time(12), datetime.timezone.utc
-            ),
+        self.session(self.local(0, 12), routine_id=self.link.routine_id)
+        self.assert_refused('belong to this routine/day')
+
+    def test_only_sessions_of_the_target_routine_or_day_on_its_local_day_block(self):
+        # Stretch: another routine's completed session and log on the same date.
+        stretch = Routine.objects.create(
+            user=self.user, name='Stretch', start=self.link.date, end=self.link.date
         )
-        self.assert_refused('workout session is logged')
-        WorkoutSession.objects.filter(datetime_start__date=self.link.date).delete()
-        self.history = (WorkoutSession.objects.count(), self.history[1])
+        unrelated = self.session(self.local(0, 7), routine=stretch, notes='stretch')
+        self.log(unrelated, routine=stretch)
+        # Target routine, but the next local day (still the date in the instance zone).
+        self.user.userprofile.time_zone = 'Pacific/Auckland'
+        self.user.userprofile.save()
+        self.session(self.local(1, 0, 30), routine_id=self.link.routine_id)
+        before = list(WorkoutSession.objects.filter(pk=unrelated.pk).values())
+        logs_before = list(WorkoutLog.objects.filter(session=unrelated).values())
+
+        self.assertEqual(self.remove_approved()['ledger_state'], 'removed')
+
+        self.assertEqual(list(WorkoutSession.objects.filter(pk=unrelated.pk).values()), before)
+        self.assertEqual(list(WorkoutLog.objects.filter(session=unrelated).values()), logs_before)
+
+    def test_a_session_of_the_target_day_blocks_by_its_logs_at_local_midnight(self):
+        self.user.userprofile.time_zone = 'Pacific/Auckland'
+        self.user.userprofile.save()
+        # Just after local midnight: the previous date in UTC and the instance zone.
+        other = Routine.objects.create(
+            user=self.user, name='Other', start=self.link.date, end=self.link.date
+        )
+        session = self.session(self.local(0, 0, 30), routine=other)
+        entry = SlotEntry.objects.filter(slot__day_id=self.link.day_id).first()
+        self.log(session, slot_entry=entry, repetitions=5, repetitions_unit_id=1)
+
+        self.assert_refused('belong to this routine/day')
 
     def test_foreign_or_unowned_targets_are_refused(self):
         self.assert_refused('not 1', '--event-id', '1')  # argparse keeps the last value
@@ -240,6 +289,84 @@ class IntervalsRemovePlannedTest(WgerTestCase):
             len(IntervalsEventLink.objects.get(pk=self.link.pk).removal['attempts']), 2
         )
         self.assert_never_recreated()
+
+    def test_apply_refuses_inside_a_transaction_before_any_write(self):
+        preview = self.remove()
+        writes = len(self.fake.writes())
+        with transaction.atomic(), self.assertRaisesMessage(CommandError, 'autocommit'):
+            self.remove(
+                '--apply',
+                '--removal-hash',
+                preview['removal_hash'],
+                '--approve',
+                preview['approval_required'],
+            )
+        self.assertEqual(len(self.fake.writes()), writes)
+        self.assertEqual(IntervalsEventLink.objects.get(pk=self.link.pk).state, 'active')
+
+    def test_tombstone_is_committed_before_the_delete_is_sent(self):
+        link_pk = self.link.pk
+        seen = []
+
+        class Observes(Fake):
+            def __call__(self, method, url, params=None, json=None, **kw):
+                if method == 'DELETE':
+                    other = connections.create_connection('default')
+                    try:
+                        with other.cursor() as cursor:
+                            cursor.execute(
+                                'SELECT state FROM intervals_intervalseventlink WHERE id = %s',
+                                [str(link_pk).replace('-', '')],
+                            )
+                            seen.append(cursor.fetchone())
+                    finally:
+                        other.close()
+                return super().__call__(method, url, params=params, json=json, **kw)
+
+        self.fake.__class__ = Observes
+        self.remove_approved()
+        self.assertEqual(seen, [('removing',)])
+
+    def test_removed_is_reported_only_after_the_ledger_reads_back_removed(self):
+        real = QuerySet.update
+        calls = []
+
+        def update(qs, **fields):
+            calls.append(fields.get('state'))
+            return 0 if fields.get('state') == 'removed' else real(qs, **fields)
+
+        with (
+            mock.patch.object(QuerySet, 'update', update),
+            self.assertRaisesMessage(CommandError, 'was not recorded removed'),
+        ):
+            self.remove_approved()
+        self.assertEqual(calls, ['removing', 'removed'])
+        self.assertEqual(IntervalsEventLink.objects.get(pk=self.link.pk).state, 'removing')
+
+    def test_not_found_is_a_typed_redacted_intervals_error(self):
+        with (
+            mock.patch('wger.intervals.client.requests.request', return_value=response({}, 404)),
+            self.assertRaises(client.NotFound) as raised,
+        ):
+            client.get_event(KEY, f'{KEY}1')
+        self.assertIsInstance(raised.exception, client.IntervalsError)
+        self.assertIn('HTTP 404', str(raised.exception))
+        self.assertNotIn(KEY, str(raised.exception))
+
+    def test_readback_error_other_than_404_is_not_taken_as_absent(self):
+        class ReadbackFails(Fake):
+            deleted = False
+
+            def __call__(self, method, url, params=None, json=None, **kw):
+                if method == 'GET' and self.deleted and '/events/' in url:
+                    return response({}, 503)
+                self.deleted |= method == 'DELETE'
+                return super().__call__(method, url, params=params, json=json, **kw)
+
+        self.fake.__class__ = ReadbackFails
+        with self.assertRaisesMessage(CommandError, 'preview again to resume'):
+            self.remove_approved()
+        self.assertEqual(IntervalsEventLink.objects.get(pk=self.link.pk).state, 'removing')
 
     def test_uncertain_delete_is_confirmed_by_readback_without_a_second_delete(self):
         class LostResponse(Fake):
