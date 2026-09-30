@@ -137,6 +137,31 @@ class UserStatisticsServiceTestCase(WgerTestCase):
 
         self.assertEqual(stats.earliest_workout_time, datetime.time(19, 30))
 
+    def test_unknown_time_counts_as_a_workout_but_sets_no_clock_time(self):
+        """The date anchor of an unknown-time session is a workout, never a clock time"""
+
+        profile = self.user.userprofile
+        profile.time_zone = 'America/Denver'
+        profile.save()
+        anchor = datetime.datetime(2024, 6, 18, 20, 0, tzinfo=datetime.timezone.utc)
+        WorkoutSession.objects.create(
+            user=self.user, datetime_start=anchor, datetime_end=anchor, time_unknown=True
+        )
+
+        stats = UserStatistics.objects.get(user=self.user)
+        self.assertEqual(stats.total_workouts, 1)
+        self.assertEqual((stats.earliest_workout_time, stats.latest_workout_time), (None, None))
+
+        self.make_session(
+            datetime.datetime(2024, 6, 19, 1, 30, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 6, 19, 2, 30, tzinfo=datetime.timezone.utc),
+        )
+        stats = UserStatisticsService.update_statistics(self.user)
+
+        self.assertEqual(stats.total_workouts, 2)
+        self.assertEqual(stats.earliest_workout_time, datetime.time(19, 30))
+        self.assertEqual(stats.latest_workout_time, datetime.time(19, 30))
+
     def test_update_statistics_creates_if_missing(self):
         """Test update_statistics creates statistics if missing"""
         self.assertEqual(UserStatistics.objects.filter(user=self.user).count(), 0)
