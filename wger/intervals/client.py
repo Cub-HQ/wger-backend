@@ -142,6 +142,12 @@ def create_manual_activity(api_key, payload):
     return get_activity(api_key, created['id'])
 
 
+def update_activity(api_key, activity_id, fields):
+    """PUT the given fields of one activity, then return what Intervals stored (readback)."""
+    _request('PUT', api_key, f'activity/{activity_id}', body=fields)
+    return get_activity(api_key, activity_id)
+
+
 def list_events(api_key, oldest, newest):
     """Calendar events (plans, notes) in the inclusive local-date window."""
     rows = _get(

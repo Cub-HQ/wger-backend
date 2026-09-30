@@ -18,6 +18,7 @@
 import datetime
 import hashlib
 import json
+from decimal import Decimal
 from uuid import UUID
 
 # Django
@@ -31,7 +32,15 @@ from wger.intervals.models import IntervalsActivityLink
 from wger.intervals.outbound import _norm
 from wger.intervals.planning import SESSION_ECHO_PREFIX, PlanError
 from wger.intervals.push import _config, _run_lock
+from wger.manager.consts import (
+    REP_UNIT_MAX_REPS,
+    REP_UNIT_REPETITIONS,
+    REP_UNIT_TILL_FAILURE,
+    WEIGHT_UNIT_KG,
+    WEIGHT_UNIT_LB,
+)
 from wger.manager.models import WorkoutSession
+from wger.utils.units import AbstractWeight
 
 
 UNSUPPORTED = [
@@ -44,6 +53,8 @@ UNSUPPORTED = [
 ]
 # The measures _set renders; a log with none of them is not a recorded set.
 RECORDED = ('repetitions', 'weight', 'duration', 'distance', 'level')
+# Repetition units whose value is a count of repetitions.
+REP_COUNTS = (REP_UNIT_REPETITIONS, REP_UNIT_TILL_FAILURE, REP_UNIT_MAX_REPS)
 
 
 def _hash(value):
@@ -76,6 +87,37 @@ def _set(log):
     if log.level is not None:
         parts.append(f'level {_number(log.level)}')
     return ' '.join(parts)
+
+
+def _volume(recorded):
+    """Lines stating the sum of recorded weight × reps in kg, and what it leaves out."""
+    total, skipped = Decimal(0), {}
+    for log in recorded:
+        if (
+            log.weight is None
+            or log.repetitions is None
+            or log.weight_unit_id not in (WEIGHT_UNIT_KG, WEIGHT_UNIT_LB)
+            or log.repetitions_unit_id not in REP_COUNTS
+        ):
+            name = log.exercise.get_translation().name
+            skipped[name] = skipped.get(name, 0) + 1
+            continue
+        mode = 'lb' if log.weight_unit_id == WEIGHT_UNIT_LB else 'kg'
+        total += AbstractWeight(log.weight, mode).kg * log.repetitions
+    counted = len(recorded) - sum(skipped.values())
+    if not counted:
+        return ['Weight lifted: unavailable; no set has both a weight in kg or lb and a rep count.']
+    lines = [
+        f'Weight lifted: {_number(total.quantize(Decimal("0.1")))} kg = recorded weight × reps'
+        f' over {counted} of {len(recorded)} sets. Weights as logged per set;'
+        ' dumbbell and per-side loads are not doubled.'
+    ]
+    if skipped:
+        lines.append(
+            'Not counted (no weight in kg or lb, or no rep count): '
+            + ', '.join(f'{name} ({n} set{"s" if n > 1 else ""})' for name, n in skipped.items())
+        )
+    return lines
 
 
 def _source(user, session_id):
@@ -128,7 +170,7 @@ def _source(user, session_id):
         groups.setdefault(log.exercise_id, [log.exercise.get_translation().name, []])[1].append(
             _set(log)
         )
-    lines = [f'{len(recorded)} sets recorded in wger.']
+    lines = [f'{len(recorded)} sets recorded in wger.', *_volume(recorded)]
     lines.extend(f'{name}: {", ".join(sets)}' for name, sets in groups.values())
     source = next((line for line in notes if line.startswith('Source: ')), None)
     if source:
@@ -258,10 +300,16 @@ def _plan(user, session_id, retry_pending, need_write=False):
     remote_id = str(remote['id']) if remote else None
     action = 'create'
     if ledger and ledger.intervals_activity_id is not None:
-        if not remote or remote_id != ledger.intervals_activity_id or _diff(remote, payload):
-            conflicts.append('deleted/edited in Intervals; no recreate/update support')
+        if not remote or remote_id != ledger.intervals_activity_id:
+            conflicts.append('deleted or replaced in Intervals; no recreate support')
+        elif not _diff(remote, payload):
+            # A stale ledger hash (interrupted update) is only re-recorded, never re-sent.
+            action = 'unchanged' if ledger.pushed_hash == _hash(payload) else 'adopt'
+        elif _hash({field: remote.get(field) for field in payload}) == ledger.pushed_hash:
+            # Still exactly what was last sent, so nobody edited it in Intervals.
+            action = 'update'
         else:
-            action = 'unchanged'
+            conflicts.append('edited in Intervals since the last export; not overwriting')
     elif remote:
         if _diff(remote, payload):
             conflicts.append('remote activity with this external_id has a different payload')
@@ -284,6 +332,7 @@ def _plan(user, session_id, retry_pending, need_write=False):
         'unsupported_fields': UNSUPPORTED,
         'intervals_activity_id': remote_id,
         'link': f'https://intervals.icu/activities/{remote_id}' if remote_id else None,
+        'update_fields': _diff(remote, payload) if action == 'update' else [],
     }
     result['plan_hash'] = _hash(
         {
@@ -299,6 +348,7 @@ def _plan(user, session_id, retry_pending, need_write=False):
             'activity_ids': sorted(str(a['id']) for a in activities),
             'event_ids': sorted(str(e['id']) for e in events),
             'retry_pending': retry_pending,
+            'update_fields': result['update_fields'],
         }
     )
     return result
@@ -325,7 +375,7 @@ def apply(user, session_id, plan_hash, retry_pending=False):
         try:
             if action == 'conflict':
                 raise client.IntervalsError('; '.join(result['conflicts']))
-            if action in ('create', 'retry', 'adopt'):
+            if action in ('create', 'retry', 'adopt', 'update'):
                 defaults = {
                     'session_id': result['session'],
                     'pushed_hash': _hash(payload),
@@ -338,6 +388,14 @@ def apply(user, session_id, plan_hash, retry_pending=False):
                         defaults={**defaults, 'intervals_activity_id': None},
                     )
                     remote = client.create_manual_activity(api_key, payload)
+                elif action == 'update':
+                    # Only the differing fields are sent; the readback check below
+                    # applies as for create, and an interrupted update previews as adopt.
+                    remote = client.update_activity(
+                        api_key,
+                        result['intervals_activity_id'],
+                        {field: payload[field] for field in result['update_fields']},
+                    )
                 else:
                     remote = client.get_activity(api_key, result['intervals_activity_id'])
                 remote_id = str(remote['id'])

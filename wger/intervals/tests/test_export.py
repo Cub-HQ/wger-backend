@@ -36,6 +36,7 @@ class FakeCompletedIntervals:
         self.fail_post = False
         self.mismatch = False
         self.lost = False
+        self.fail_put = False
 
     def __call__(self, method, url, params=None, json=None, **kwargs):
         assert kwargs['auth'] == ('API_KEY', KEY) and kwargs['timeout']
@@ -55,6 +56,13 @@ class FakeCompletedIntervals:
             if path.startswith('activity/'):
                 row = self.activities[path.split('/')[-1]]
                 return response({}, 404) if self.lost else response(dict(row))
+        if method == 'PUT' and path.startswith('activity/'):
+            if self.fail_put:
+                self.fail_put = False
+                return response({}, 503)
+            row = self.activities[path.split('/')[-1]]
+            row.update(json)
+            return response(dict(row))
         if method == 'POST' and path == 'athlete/0/activities/manual':
             if self.fail_post:
                 self.fail_post = False
@@ -466,3 +474,106 @@ class CompletedSessionExportTest(BaseTestCase, TransactionTestCase):
             self.command('--apply', '--plan-hash', plan['plan_hash'])
         self.assertEqual(self.fake.writes(), [])
         self.assertEqual(IntervalsActivityLink.objects.count(), 0)
+
+    def test_weight_lifted_sums_recorded_kg_and_lb_and_states_what_is_left_out(self):
+        base = {'user': self.user, 'session': self.session, 'date': START, 'exercise_id': 1}
+        for fields in (
+            # 10 × 20 lb = 90.718 kg: converted, per-dumbbell weight not doubled.
+            {'repetitions': 10, 'weight': 20, 'repetitions_unit_id': 1, 'weight_unit_id': 2},
+            # Zero load is a recorded weight: counted, adds nothing.
+            {'repetitions': 15, 'weight': 0, 'repetitions_unit_id': 1, 'weight_unit_id': 1},
+            # Never invented: no weight, no reps, body weight, or seconds instead of reps.
+            {'repetitions': 14, 'repetitions_unit_id': 1},
+            {'weight': 40, 'weight_unit_id': 1, 'weight_target': 40, 'repetitions_target': 8},
+            {'repetitions': 8, 'weight': 10, 'repetitions_unit_id': 1, 'weight_unit_id': 3},
+            {'repetitions': 30, 'weight': 20, 'repetitions_unit_id': 3, 'weight_unit_id': 1},
+        ):
+            WorkoutLog.objects.create(**base, **fields)
+        name = self.log.exercise.get_translation().name
+        lines = self.preview()['payload']['description'].splitlines()
+        # 14 × 87.5 kg + 90.718 kg = 1315.718 kg over 3 of 7 sets.
+        self.assertEqual(
+            lines[1],
+            'Weight lifted: 1315.7 kg = recorded weight × reps over 3 of 7 sets.'
+            ' Weights as logged per set; dumbbell and per-side loads are not doubled.',
+        )
+        self.assertEqual(
+            lines[2], f'Not counted (no weight in kg or lb, or no rep count): {name} (4 sets)'
+        )
+        WorkoutLog.objects.filter(pk=self.log.pk).update(weight=None)
+        WorkoutLog.objects.filter(weight_unit_id__in=(1, 2)).update(weight_unit_id=3)
+        lines = self.preview()['payload']['description'].splitlines()
+        self.assertEqual(
+            lines[1],
+            'Weight lifted: unavailable; no set has both a weight in kg or lb and a rep count.',
+        )
+        self.assertEqual(self.fake.writes(), [])
+
+    def export_without_weight_lifted(self):
+        """An activity exported before the weight-lifted line existed."""
+        with mock.patch('wger.intervals.export._volume', return_value=[]):
+            self.apply(self.preview())
+        return IntervalsActivityLink.objects.get()
+
+    def test_existing_export_is_updated_in_place_once(self):
+        old = self.export_without_weight_lifted()
+        activity_id = old.intervals_activity_id
+        before = dict(self.fake.activities[activity_id])
+        plan = self.preview()
+        self.assertEqual(plan['action'], 'update')
+        self.assertEqual(plan['update_fields'], ['description'])
+        applied = self.command('--apply', '--plan-hash', plan['plan_hash'])
+        self.assertIsNone(applied['failed'])
+        self.assertEqual(applied['intervals_activity_id'], activity_id)
+        self.assertEqual(
+            self.fake.writes()[-1],
+            ('PUT', f'activity/{activity_id}', {'description': plan['payload']['description']}),
+        )
+        self.assertEqual(len(self.fake.activities), 1)
+        after = self.fake.activities[activity_id]
+        self.assertIn('Weight lifted: 1225 kg', after['description'])
+        for field in ('type', 'start_date_local', 'elapsed_time', 'name', 'external_id'):
+            self.assertEqual(after[field], before[field])
+        link = IntervalsActivityLink.objects.get()
+        self.assertEqual(link.intervals_activity_id, activity_id)
+        self.assertEqual(link.pushed_hash, export._hash(plan['payload']))
+        again = self.preview()
+        self.assertEqual(again['action'], 'unchanged')
+        self.apply(again)
+        self.assertEqual(len(self.fake.writes()), 2)
+
+    def test_update_never_overwrites_a_remote_edit_or_recreates_a_lost_activity(self):
+        activity_id = self.export_without_weight_lifted().intervals_activity_id
+        row = self.fake.activities[activity_id]
+        for change in ({'name': 'Renamed in Intervals'}, {'elapsed_time': 60}):
+            with self.subTest(change=change):
+                self.fake.activities[activity_id] = {**row, **change}
+                plan = self.preview()
+                self.assertEqual(plan['action'], 'conflict')
+                self.assertIn('edited in Intervals', plan['conflicts'][0])
+                self.assertIsNotNone(self.apply(plan)['failed'])
+        for activities in ({}, {'i8009': {**row, 'id': 'i8009'}}):
+            with self.subTest(activities=activities):
+                self.fake.activities = activities
+                plan = self.preview()
+                self.assertEqual(plan['action'], 'conflict')
+                self.apply(plan)
+        self.assertEqual(len(self.fake.writes()), 1)
+
+    def test_failed_or_interrupted_update_is_recorded_without_a_second_write(self):
+        old = self.export_without_weight_lifted()
+        plan = self.preview()
+        self.fake.fail_put = True
+        self.assertIsNotNone(self.apply(plan)['failed'])
+        self.assertEqual(IntervalsActivityLink.objects.get().pushed_hash, old.pushed_hash)
+        self.assertEqual(self.preview()['action'], 'update')
+        # The PUT landed but the ledger was not saved: adopt the readback, never re-send.
+        self.fake.activities[old.intervals_activity_id].update(plan['payload'])
+        adopt = self.preview()
+        self.assertEqual(adopt['action'], 'adopt')
+        self.assertIsNone(self.apply(adopt)['failed'])
+        self.assertEqual(
+            IntervalsActivityLink.objects.get().pushed_hash, export._hash(plan['payload'])
+        )
+        self.assertEqual(self.preview()['action'], 'unchanged')
+        self.assertEqual(len(self.fake.writes()), 2)
