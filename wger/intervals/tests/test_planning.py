@@ -77,8 +77,8 @@ def stored(entry):
     return {field: entry[field] for field in STORED_FIELDS}
 
 
-def run(activities=(), events=(), existing=()):
-    return plan(ATHLETE, OLDEST, NEWEST, list(activities), list(events), list(existing))
+def run(activities=(), existing=(), selected=None):
+    return plan(ATHLETE, OLDEST, NEWEST, list(activities), list(existing), selected)
 
 
 class PlanTest(SimpleTestCase):
@@ -156,18 +156,18 @@ class PlanTest(SimpleTestCase):
             with self.subTest(start=start), self.assertRaises(PlanError):
                 run([ride(start_date_local=start)])
         with self.assertRaises(PlanError):
-            plan(ATHLETE, NEWEST, OLDEST, [], [], [])
+            plan(ATHLETE, NEWEST, OLDEST, [], [])
 
     def test_retry_of_same_fetch_is_unchanged_and_order_independent(self):
         activities = [ride(), ride(id='i900004', start_date_local='2040-06-21T08:00:00')]
-        first = run(activities, [event()])
+        first = run(activities)
         existing = [stored(e) for e in first['create']]
 
-        again = run(reversed(activities), [event()], reversed(existing))
+        again = run(reversed(activities), reversed(existing))
 
         self.assertEqual(again['create'] + again['update'] + again['mark_missing'], [])
         self.assertEqual(again['unchanged'], first['create'])
-        self.assertEqual(run(reversed(activities), [event()]), first)
+        self.assertEqual(run(reversed(activities)), first)
 
     def test_changed_value_is_one_update_naming_only_that_field(self):
         existing = [stored(e) for e in run([ride()])['create']]
@@ -180,56 +180,84 @@ class PlanTest(SimpleTestCase):
         self.assertEqual(result['create'] + result['unchanged'], [])
 
     def test_record_absent_from_refetch_is_marked_missing_not_deleted(self):
-        existing = [stored(e) for e in run([ride()], [event()])['create']]
-        outside = stored(run([ride(id='i800000')])['create'][0]) | {
+        existing = [stored(e) for e in run([ride()])['create']]
+        outside = existing[0] | {
+            'intervals_id': 'i800000',
             'local_date': datetime.date(2040, 5, 1),
         }
+        planned = existing[0] | {'kind': 'planned', 'intervals_id': '5001'}
 
-        result = run([], [event()], existing + [outside])
+        result = run(existing=existing + [outside, planned])
 
         self.assertEqual(result['mark_missing'], [{'kind': 'completed', 'intervals_id': 'i900001'}])
-        [kept] = result['unchanged']
-        self.assertEqual(kept['kind'], 'planned')
+        self.assertEqual(result['unchanged'], [])
+        flagged = [existing[0] | {'upstream_state': 'missing'}, planned]
+        self.assertEqual(run(existing=flagged)['mark_missing'], [])
+        self.assertEqual(
+            [u['changed'] for u in run([ride()], flagged)['update']], [['upstream_state']]
+        )
 
-        # Already flagged: no repeat proposal. Reappearing: update back to present.
-        flagged = [existing[0] | {'upstream_state': 'missing'}, existing[1]]
-        self.assertEqual(run([], [event()], flagged)['mark_missing'], [])
-        back = run([ride()], [event()], flagged)['update']
-        self.assertEqual([u['changed'] for u in back], [['upstream_state']])
-
-    def test_planned_event_gets_explicit_day_fallback_link(self):
-        [entry] = run(events=[event()])['create']
-
-        self.assertEqual(entry['kind'], 'planned')
-        self.assertEqual(entry['intervals_id'], '5001')
-        self.assertEqual((entry['load_target'], entry['time_target']), (180, 14400))
-        self.assertEqual(entry['link'], 'https://intervals.icu/?s=2040-06-24&e=2040-06-24')
-        self.assertFalse(entry['link_exact'])
-
-    def test_our_echo_gym_and_non_workout_rows_are_counted_not_mirrored(self):
+    def test_session_echo_and_gym_rows_are_counted_not_mirrored(self):
         result = run(
-            [ride(id='i900005', type='WeightTraining')],
             [
-                event(id=6001, type='WeightTraining', external_id='wger-gym:3:2040-06-24'),
-                event(id=6002, category='NOTE'),
-                event(id=6003, type='WeightTraining'),
-            ],
+                ride(id='i1', type='WeightTraining'),
+                ride(id='i2', external_id='wger-gym-session:3:42'),
+                ride(id='i3', type='WeightTraining', external_id='wger-gym-session:3:43'),
+            ]
         )
 
         self.assertEqual(result['create'], [])
-        self.assertEqual(result['skipped'], {'echo': 1, 'weight_training': 2, 'non_workout': 1})
+        self.assertEqual(result['skipped'], {'echo': 2, 'weight_training': 1})
 
-    def test_foreign_athlete_rows_refuse_the_batch_even_if_skippable(self):
-        with self.assertRaises(PlanError):
-            run([ride(icu_athlete_id='i9999')])
-        with self.assertRaises(PlanError):
-            run(events=[event(athlete_id='i9999', external_id='wger-gym:3:2040-06-24')])
+    def test_exact_selects_only_one_completed_ride(self):
+        result = run([ride(), ride(id='i2')], selected='i900001')
+        self.assertEqual((result['mode'], result['selected']), ('exact', 'i900001'))
+        self.assertEqual(result['create'], run([ride()])['create'])
+        window = run([ride()])
+        self.assertEqual((window['mode'], window['selected']), ('window', None))
 
-    def test_duplicate_identities_refuse_the_batch(self):
-        with self.assertRaises(PlanError):
-            run([ride(), ride(name='copy')])
-        with self.assertRaises(PlanError):
-            run(events=[event(), event(id='5001')])
+    def test_exact_refuses_absent_gym_echo_and_durationless_stub(self):
+        for activities in (
+            [],
+            [ride(type='WeightTraining')],
+            [ride(external_id='wger-gym-session:3:42')],
+            [ride(moving_time=None, elapsed_time=None)],
+        ):
+            with self.subTest(activities=activities), self.assertRaises(PlanError):
+                run(activities, selected='i900001')
+        for changes in ({'moving_time': None}, {'elapsed_time': None}, {'moving_time': 0}):
+            with self.subTest(changes=changes):
+                self.assertEqual(len(run([ride(**changes)], selected='i900001')['create']), 1)
+
+    def test_entire_fetch_is_validated_before_selection_or_skipping(self):
+        for changes in (
+            {'icu_athlete_id': 'i9999'},
+            {'start_date_local': '2040-06-27T00:00:00'},
+            {'start_date_local': None},
+        ):
+            for skipped in ({}, {'type': 'WeightTraining'}, {'external_id': 'wger-gym-session:x'}):
+                for selected in (None, 'i900001'):
+                    with self.subTest(changes=changes, skipped=skipped, selected=selected):
+                        with self.assertRaises(PlanError):
+                            run([ride(), ride(id='i2', **(changes | skipped))], selected=selected)
+
+    def test_duplicate_identities_refuse_even_unselected_or_skipped_rows(self):
+        for skipped in ({}, {'type': 'WeightTraining'}, {'external_id': 'wger-gym-session:x'}):
+            for selected in (None, 'i900001'):
+                with self.subTest(skipped=skipped, selected=selected), self.assertRaises(PlanError):
+                    run(
+                        [ride(), ride(id='i2', **skipped), ride(id='i2', **skipped)],
+                        selected=selected,
+                    )
         existing = stored(run([ride()])['create'][0])
         with self.assertRaises(PlanError):
             run(existing=[existing, dict(existing)])
+
+    def test_exact_leaves_unselected_missing_and_planned_rows_alone(self):
+        entries = run([ride(), ride(id='i2')])['create']
+        existing = [stored(entry) for entry in entries]
+        existing.append(existing[0] | {'kind': 'planned', 'intervals_id': '5001'})
+        result = run([ride()], existing, selected='i900001')
+        self.assertEqual(result['mark_missing'], [])
+        self.assertEqual(result['unchanged'], run([ride()])['create'])
+        self.assertEqual(result['create'] + result['update'], [])

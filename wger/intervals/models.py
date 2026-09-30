@@ -115,3 +115,25 @@ class IntervalsEventLink(models.Model):
 
     def get_owner_object(self):
         return self
+
+
+class IntervalsActivityLink(models.Model):
+    """Completed-session ledger; a null remote id marks an uncertain write."""
+
+    id = models.UUIDField(default=uuid7, primary_key=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    session = models.ForeignKey('manager.WorkoutSession', null=True, on_delete=models.SET_NULL)
+    external_id = models.CharField(max_length=64)
+    intervals_activity_id = models.CharField(max_length=32, null=True)
+    pushed_hash = models.CharField(max_length=64)
+    pushed_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'external_id'], name='intervals_activity_link_identity'
+            ),
+        ]
+
+    def get_owner_object(self):
+        return self

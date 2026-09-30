@@ -30,7 +30,7 @@ import requests
 # wger
 from wger.core.tests.base_testcase import WgerTestCase
 from wger.intervals.models import EnduranceEntry
-from wger.intervals.tests.test_planning import ATHLETE, NEWEST, OLDEST, event, ride
+from wger.intervals.tests.test_planning import ATHLETE, NEWEST, OLDEST, ride
 from wger.manager.models import WorkoutLog, WorkoutSession
 
 
@@ -49,17 +49,18 @@ def response(body, status=200, headers=None):
     return fake
 
 
-def intervals(athlete=None, activities=None, events=None):
+def intervals(athlete=None, activities=None):
     """A fake requests.request serving one athlete window (GET only)."""
     served = {
         'athlete/0': response(athlete or {'id': ATHLETE}),
         'athlete/0/activities': response([ride()] if activities is None else activities),
-        'athlete/0/events': response([event()] if events is None else events),
     }
 
     def serve(method, url, **kw):
         assert method == 'GET', method
-        return served[url.split('/api/v1/')[1]]
+        path = url.split('/api/v1/')[1]
+        assert path in served, f'Unexpected Intervals path: {path}'
+        return served[path]
 
     return mock.Mock(side_effect=serve)
 
@@ -68,10 +69,19 @@ def intervals(athlete=None, activities=None, events=None):
 class IntervalsSyncCommandTest(WgerTestCase):
     def setUp(self):
         super().setUp()
-        self.history = (WorkoutSession.objects.count(), WorkoutLog.objects.count())
+        self.history = (
+            list(WorkoutSession.objects.order_by('pk').values()),
+            list(WorkoutLog.objects.order_by('pk').values()),
+        )
 
     def tearDown(self):
-        self.assertEqual((WorkoutSession.objects.count(), WorkoutLog.objects.count()), self.history)
+        self.assertEqual(
+            (
+                list(WorkoutSession.objects.order_by('pk').values()),
+                list(WorkoutLog.objects.order_by('pk').values()),
+            ),
+            self.history,
+        )
         super().tearDown()
 
     def run_command(self, get, *extra):
@@ -88,23 +98,24 @@ class IntervalsSyncCommandTest(WgerTestCase):
         report = self.run_command(get)
 
         self.assertEqual(EnduranceEntry.objects.count(), 0)
-        self.assertEqual(report['mode'], 'preview (no writes)')
-        self.assertEqual([r['intervals_id'] for r in report['create']], ['i900001', '5001'])
+        self.assertEqual(report['operation'], 'preview (no writes)')
+        self.assertEqual((report['mode'], report['selected']), ('window', None))
+        self.assertEqual([r['intervals_id'] for r in report['create']], ['i900001'])
         calls = [(c.args[1], c.kwargs) for c in get.call_args_list]
         self.assertEqual(
             [url.rsplit('/v1/', 1)[1] for url, _ in calls],
-            ['athlete/0', 'athlete/0/activities', 'athlete/0/events'],
+            ['athlete/0', 'athlete/0/activities'],
         )
         self.assertEqual(calls[1][1]['params'], {'oldest': OLDEST, 'newest': f'{NEWEST}T23:59:59'})
-        self.assertEqual(calls[2][1]['params'], {'oldest': OLDEST, 'newest': NEWEST})
         self.assertTrue(all(kw['auth'] == ('API_KEY', KEY) and kw['timeout'] for _, kw in calls))
 
         applied = self.run_command(intervals(), '--apply', '--plan-hash', report['plan_hash'])
         self.assertEqual(applied['plan_hash'], report['plan_hash'])
-        self.assertEqual(EnduranceEntry.objects.filter(user__username='admin').count(), 2)
+        self.assertEqual(applied['operation'], 'apply')
+        self.assertEqual(EnduranceEntry.objects.filter(user__username='admin').count(), 1)
 
         again = self.run_command(intervals())
-        self.assertEqual((again['create'], again['update'], again['unchanged']), ([], [], 2))
+        self.assertEqual((again['create'], again['update'], again['unchanged']), ([], [], 1))
 
     def test_apply_refuses_without_or_with_stale_hash(self):
         with self.assertRaisesMessage(CommandError, '--plan-hash'):
@@ -115,6 +126,89 @@ class IntervalsSyncCommandTest(WgerTestCase):
                 intervals(activities=[ride(icu_training_load=1)]), '--apply', '--plan-hash', stale
             )
         self.assertEqual(EnduranceEntry.objects.count(), 0)
+
+    def test_exact_imports_selected_ride_only_and_reapply_is_noop(self):
+        activities = [
+            ride(),
+            ride(id='i2'),
+            ride(id='i3', type='WeightTraining'),
+            ride(id='i4', external_id='wger-gym-session:1:42'),
+        ]
+        report = self.run_command(intervals(activities=activities), '--activity', 'i900001')
+        self.assertEqual((report['mode'], report['selected']), ('exact', 'i900001'))
+        self.assertEqual(report['operation'], 'preview (no writes)')
+        self.assertEqual(report['skipped'], {'echo': 1, 'weight_training': 1})
+        self.assertFalse(EnduranceEntry.objects.exists())
+        [entry] = report['create']
+        self.assertEqual(entry['intervals_id'], 'i900001')
+        applied = self.run_command(
+            intervals(activities=activities),
+            '--activity',
+            'i900001',
+            '--apply',
+            '--plan-hash',
+            report['plan_hash'],
+        )
+        self.assertEqual(applied['operation'], 'apply')
+        stored = EnduranceEntry.objects.get()
+        self.assertEqual(stored.intervals_id, 'i900001')
+        self.assertEqual(
+            (
+                stored.moving_time_s,
+                stored.elapsed_time_s,
+                stored.distance_m,
+                stored.training_load,
+                stored.avg_hr,
+            ),
+            (14400, 15320, 112340.5, 187, 131),
+        )
+        self.user_login('admin')
+        entry = self.client.get(f'/api/v2/endurance-entry/{stored.pk}/').json()
+        self.assertEqual(entry['link'], 'https://intervals.icu/activities/i900001')
+        self.assertTrue(entry['link_exact'])
+        snapshot = list(EnduranceEntry.objects.values())
+        again = self.run_command(intervals(activities=activities), '--activity', 'i900001')
+        self.assertEqual((again['create'], again['update'], again['unchanged']), ([], [], 1))
+        self.run_command(
+            intervals(activities=activities),
+            '--activity',
+            'i900001',
+            '--apply',
+            '--plan-hash',
+            again['plan_hash'],
+        )
+        self.assertEqual(list(EnduranceEntry.objects.values()), snapshot)
+
+    def test_exact_refuses_unavailable_or_untrustworthy_batches_without_writes(self):
+        for activities in (
+            [],
+            [ride(type='WeightTraining')],
+            [ride(external_id='wger-gym-session:1:42')],
+            [ride(moving_time=None, elapsed_time=None)],
+            [ride(), ride(id='i2', icu_athlete_id='i9999')],
+            [ride(), ride(id='i2', start_date_local='2040-06-27T00:00:00')],
+            [ride(), ride(id='i2'), ride(id='i2')],
+        ):
+            for operation in ((), ('--apply', '--plan-hash', 'f' * 64)):
+                with self.subTest(activities=activities, operation=operation):
+                    with self.assertRaises(CommandError):
+                        self.run_command(
+                            intervals(activities=activities), '--activity', 'i900001', *operation
+                        )
+                    self.assertFalse(EnduranceEntry.objects.exists())
+
+    def test_cross_mode_apply_refuses_without_writes(self):
+        window = self.run_command(intervals())
+        exact = self.run_command(intervals(), '--activity', 'i900001')
+        self.assertEqual(window['create'], exact['create'])
+        self.assertNotEqual(window['plan_hash'], exact['plan_hash'])
+        for digest, selector in (
+            (window['plan_hash'], ('--activity', 'i900001')),
+            (exact['plan_hash'], ()),
+        ):
+            with self.subTest(selector=selector), self.assertRaises(CommandError):
+                self.run_command(intervals(), *selector, '--apply', '--plan-hash', digest)
+        self.assertFalse(EnduranceEntry.objects.exists())
 
     def test_key_for_another_athlete_stops_before_reading_data(self):
         get = intervals(athlete={'id': 'i9999'})

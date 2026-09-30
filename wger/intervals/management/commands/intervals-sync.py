@@ -27,13 +27,14 @@ from wger.intervals.planning import PlanError, window
 
 class Command(BaseCommand):
     help = (
-        'Mirror Intervals.icu rides/runs/swims and planned workouts for one date window. '
+        'Mirror completed-only Intervals.icu endurance activities for one date window. '
         'Previews by default (no writes); --apply --plan-hash H writes that exact preview.'
     )
 
     def add_arguments(self, parser):
         parser.add_argument('--oldest', required=True, help='first local date, YYYY-MM-DD')
         parser.add_argument('--newest', required=True, help='last local date (inclusive)')
+        parser.add_argument('--activity', help='select one completed activity id from the window')
         parser.add_argument('--apply', action='store_true')
         parser.add_argument('--plan-hash', help='plan_hash printed by the preview')
 
@@ -51,14 +52,16 @@ class Command(BaseCommand):
             raise CommandError(str(e)) from None
 
         try:
-            activities, events = client.fetch_window(
-                getattr(settings, 'INTERVALS_API_KEY', ''), athlete_id, oldest, newest
-            )
-            args = (user, athlete_id, oldest, newest, activities, events)
+            api_key = getattr(settings, 'INTERVALS_API_KEY', '')
+            client.bind_athlete(api_key, athlete_id)
+            activities = client.list_activities(api_key, oldest, newest)
+            args = (user, athlete_id, oldest, newest, activities)
             if options['apply']:
-                result = persistence.apply(*args, options['plan_hash'])
+                result = persistence.apply(
+                    *args, options['plan_hash'], selected=options['activity']
+                )
             else:
-                result = persistence.preview(*args)
+                result = persistence.preview(*args, selected=options['activity'])
         except (client.IntervalsError, PlanError) as e:
             raise CommandError(str(e)) from None
 
@@ -73,7 +76,9 @@ class Command(BaseCommand):
             }
 
         report = {
-            'mode': 'apply' if options['apply'] else 'preview (no writes)',
+            'operation': 'apply' if options['apply'] else 'preview (no writes)',
+            'mode': result['mode'],
+            'selected': result['selected'],
             'window': [str(oldest), str(newest)],
             'create': [brief(e) for e in result['create']],
             'update': [brief(u['entry'], changed=u['changed']) for u in result['update']],
