@@ -210,9 +210,9 @@ class UserStatisticsService:
                 # Update weekend streak
                 cls._update_weekend_streak_incremental(stats, session_date, tz)
 
-        # Update workout times if session has time info. Skipped without a
+        # Update workout times if session has a measured time. Skipped without a
         # reported zone, see update_statistics
-        if session and session.datetime_end and profile.time_zone:
+        if session and session.datetime_end and not session.time_unknown and profile.time_zone:
             session_time = timezone.localtime(session.datetime_start, timezone=tz).time()
             if stats.earliest_workout_time is None or session_time < stats.earliest_workout_time:
                 stats.earliest_workout_time = session_time
@@ -333,11 +333,12 @@ class UserStatisticsService:
             Tuple of (earliest_time, latest_time)
         """
         # Only sessions with an end carry a time the user actually recorded. The
-        # rest are migrated rows that only ever had a date.
+        # rest are migrated rows that only ever had a date, or sessions whose
+        # time is unknown and only anchored on their day.
         times = [
             timezone.localtime(s.datetime_start, timezone=tz).time()
             for s in sessions
-            if s.datetime_end
+            if s.datetime_end and not s.time_unknown
         ]
         if not times:
             return None, None

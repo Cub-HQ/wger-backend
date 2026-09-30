@@ -19,6 +19,7 @@ import datetime
 # Django
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
+from django.utils.translation import gettext as _
 
 # Third Party
 from rest_framework import serializers
@@ -443,6 +444,8 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
     # uploads written before the update still arrive in the old shape.
     LEGACY_FIELDS = ('date', 'time_start', 'time_end')
 
+    duration_seconds = serializers.SerializerMethodField()
+
     class Meta:
         model = WorkoutSession
         fields = (
@@ -453,14 +456,26 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
             'impression',
             'datetime_start',
             'datetime_end',
+            'time_unknown',
+            'duration_seconds',
         )
+        read_only_fields = ('time_unknown',)
+
+    def get_duration_seconds(self, obj):
+        """
+        Measured length in whole seconds; None while ongoing or when the time is unknown
+        """
+        if obj.time_unknown or obj.datetime_end is None:
+            return None
+        return int((obj.datetime_end - obj.datetime_start).total_seconds())
 
     def validate(self, attrs):
         """
         Run the model validation on the interval the request would end up with
 
         Sessions stored before the limit was introduced, or before it was lowered,
-        stay editable as long as the request leaves their times alone.
+        stay editable as long as the request leaves their times alone. A session
+        whose time is unknown keeps its date anchor: its times can't be changed.
         """
         start = attrs.get('datetime_start')
         end = attrs.get('datetime_end') if 'datetime_end' in attrs else None
@@ -470,6 +485,15 @@ class WorkoutSessionSerializer(serializers.ModelSerializer):
                 end = self.instance.datetime_end
             if (start, end) == (self.instance.datetime_start, self.instance.datetime_end):
                 return attrs
+            if self.instance.time_unknown:
+                raise serializers.ValidationError(
+                    {
+                        'time_unknown': _(
+                            'The time of this session is unknown; its start and end cannot '
+                            'be changed.'
+                        )
+                    }
+                )
         else:
             start = start or timezone.now()
 

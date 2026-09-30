@@ -111,6 +111,7 @@ def plan(
     differences=None,
     omit_incomplete=False,
     unreliable_time=False,
+    non_exercise=None,
 ):
     """
     mapping: {source exercise id (str): wger exercise id}, validated provenance only.
@@ -122,8 +123,11 @@ def plan(
     unreliable_time: user-approved policy: a source session that is open, negative or longer
     than the maximum is anchored like a date-only workout (duration unknown) instead of held;
     the original source times stay in the notes as provenance, never as the duration.
+    non_exercise: {source exercise id (str): reason}, user-approved entries that are not an
+    exercise (e.g. a programme video). With omit_incomplete their recorded values are listed as
+    omitted, never imported as a performed set.
     """
-    differences = differences or {}
+    differences, non_exercise = differences or {}, non_exercise or {}
     holds, logs, provenance = [], [], []
     omitted = [] if omit_incomplete else None
     iterations = {}
@@ -141,6 +145,17 @@ def plan(
         if wger_id and differences.get(str(source_id)):
             provenance[-1] += f' (source differs: {differences[str(source_id)]})'
         if not performed:
+            continue
+        if str(source_id) in non_exercise and omitted is not None:
+            omitted += [
+                {
+                    'exercise': source_id,
+                    'name': name,
+                    'raw': s,
+                    'reason': non_exercise[str(source_id)],
+                }
+                for s in performed
+            ]
             continue
         if not wger_id:
             holds.append(f'{line}]: no validated wger exercise mapping')
@@ -288,9 +303,6 @@ def apply(ready, *, user_id, routine_id, day_id):
         if clash.exists():
             found = [str(s.pk) for s in clash]
             raise AlreadyPresent(f'{ready["source_id"]}: session(s) {found} already present')
-        # Unknown time needs WorkoutSession.time_unknown; a model without the column
-        # refuses the plan here (TypeError) instead of storing a measured-looking time.
-        unknown = {'time_unknown': True} if ready['time_unknown'] else {}
         session = WorkoutSession(
             user=user,
             routine=day.routine,
@@ -298,7 +310,7 @@ def apply(ready, *, user_id, routine_id, day_id):
             notes=ready['notes'],
             datetime_start=start,
             datetime_end=end,
-            **unknown,
+            time_unknown=ready['time_unknown'],
         )
         session.clean()
         session.save()
@@ -317,7 +329,7 @@ def apply(ready, *, user_id, routine_id, day_id):
             stored.datetime_start,
             stored.datetime_end,
             stored.day_id,
-            getattr(stored, 'time_unknown', False),
+            stored.time_unknown,
         ) != (ready['notes'], start, end, day.pk, ready['time_unknown']):
             raise RuntimeError('session readback differs')
         order = ('exercise_id', 'iteration')

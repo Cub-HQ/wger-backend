@@ -206,6 +206,16 @@ class PlanTestCase(SimpleTestCase):
         self.assertNotIn('unreliable', result['notes'])
         self.assertFalse(result['time_unknown'])
 
+    def test_approved_non_exercise_entry_is_listed_not_imported(self):
+        source = workout(exercise(99, stats(reps=1)), exercise(12, stats(reps=5)))
+        reason = 'not an exercise (programme introduction video); not imported as a set'
+        result = plan(source, MAPPING, omit_incomplete=True, non_exercise={'99': reason})
+        self.assertEqual(result['status'], 'ready')
+        self.assertEqual([log['exercise'] for log in result['logs']], [2])
+        self.assertIn(f'set 1: {reason}; source values: reps 1', result['notes'])
+        # Without the omission policy an unmapped entry still holds the workout
+        self.assertEqual(plan(source, MAPPING, non_exercise={'99': reason})['status'], 'held')
+
     def test_setless_workout_needs_clarification(self):
         self.assertEqual(plan(workout(exercise(12, stats())), MAPPING)['status'], 'held')
         result = plan(
@@ -268,21 +278,27 @@ class ApplyTestCase(WgerTestCase):
             (WorkoutSession.objects.count(), WorkoutLog.objects.count()), (sessions, logs)
         )
 
-    def test_unknown_time_is_stored_explicitly_or_refused(self):
+    def test_unknown_time_is_stored_explicitly(self):
         ready = plan(
             workout(exercise(12, stats(reps=1)), endTime='2026-01-09 03:00:00'),
             MAPPING,
             unreliable_time=True,
         )
-        before = (WorkoutSession.objects.count(), WorkoutLog.objects.count())
-        if not hasattr(WorkoutSession, 'time_unknown'):
-            # Never stored as a measured 06:00 session without the explicit flag
-            with self.assertRaises(TypeError):
-                apply(ready, user_id=1, routine_id=1, day_id=1)
-            self.assertEqual((WorkoutSession.objects.count(), WorkoutLog.objects.count()), before)
-            return
         session = WorkoutSession.objects.get(pk=apply(ready, user_id=1, routine_id=1, day_id=1))
         self.assertTrue(session.time_unknown)
+        self.assertEqual(session.datetime_start, session.datetime_end)
+        known = plan(
+            workout(
+                exercise(12, stats(reps=1)),
+                id=900002,
+                startTime='2026-02-06 21:35:19',
+                endTime='2026-02-06 22:34:28',
+                date='2026-02-07',
+            ),
+            MAPPING,
+        )
+        known_id = apply(known, user_id=1, routine_id=1, day_id=1)
+        self.assertFalse(WorkoutSession.objects.get(pk=known_id).time_unknown)
 
     def test_held_plan_and_foreign_routine_are_refused(self):
         with self.assertRaises(ValueError):

@@ -208,11 +208,32 @@ class SessionRecoveryTestCase(BaseTestCase, TransactionTestCase):
     }
 
     def pre_0032_snapshot(self, row):
+        # Also before 0033: the session has no time_unknown key
         snapshot = row.snapshot
         snapshot['logs'] = [
             {key: log[key] for key in self.PRE_0032_LOG_KEYS} for log in snapshot['logs']
         ]
+        del snapshot['session']['time_unknown']
         WorkoutSessionRecovery.objects.filter(pk=row.pk).update(snapshot=snapshot)
+
+    def test_unknown_time_survives_archive_and_restore(self):
+        WorkoutSession.objects.filter(pk=self.session.pk).update(time_unknown=True)
+        before = self.state()
+        row = self.archive()
+        self.assertEqual(row.snapshot['session']['time_unknown'], 'True')
+        recovery.restore_session(self.user, row.pk)
+        self.assertEqual(self.state(), before)
+        self.assertTrue(WorkoutSession.objects.get(pk=self.session.pk).time_unknown)
+
+    def test_session_archived_before_time_unknown_restores_as_known(self):
+        before = self.state()
+        row = self.archive()
+        snapshot = row.snapshot
+        del snapshot['session']['time_unknown']
+        WorkoutSessionRecovery.objects.filter(pk=row.pk).update(snapshot=snapshot)
+        recovery.restore_session(self.user, row.pk)
+        self.assertEqual(self.state(), before)
+        self.assertFalse(WorkoutSession.objects.get(pk=self.session.pk).time_unknown)
 
     def test_snapshot_archived_before_new_columns_restores_them_as_null(self):
         # Legacy max speed as weight + km/h must come back exactly, not reinterpreted.
@@ -239,6 +260,7 @@ class SessionRecoveryTestCase(BaseTestCase, TransactionTestCase):
             'pre-existing log key missing': lambda s: s['logs'][0].pop('calories'),
             'only some new keys present': lambda s: s['logs'][0].update(level='1.0'),
             'new key on the session': lambda s: s['session'].update(duration=None),
+            'unknown session key': lambda s: s['session'].update(unexpected='1'),
             'session key missing': lambda s: s['session'].pop('notes'),
             'log is not an object': lambda s: s['logs'].__setitem__(0, ['id']),
         }

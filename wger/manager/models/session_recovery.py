@@ -40,13 +40,20 @@ def _snapshot(obj):
     }
 
 
-# Nullable columns added after snapshot version 1 was first written (manager
-# 0032). Snapshots archived before that migration lack them and restore as NULL;
-# any other missing or unknown key still refuses the restore.
+# Columns added after snapshot version 1 was first written (manager 0032 and
+# 0033). Snapshots archived before those migrations lack them and restore with
+# the value the migration gave existing rows; any other missing or unknown key
+# still refuses the restore.
 ADDED_AFTER_V1 = {
     WorkoutLog: {
-        'duration', 'distance', 'distance_unit_id', 'level', 'max_speed', 'max_speed_unit_id'
+        'duration': None,
+        'distance': None,
+        'distance_unit_id': None,
+        'level': None,
+        'max_speed': None,
+        'max_speed_unit_id': None,
     },
+    WorkoutSession: {'time_unknown': False},
 }
 
 
@@ -55,10 +62,12 @@ def _decode(model, data):
     if not isinstance(data, dict):
         raise RecoveryConflict()
     expected = {field.attname for field in fields}
-    if set(data) not in (expected, expected - ADDED_AFTER_V1.get(model, set())):
+    added = ADDED_AFTER_V1.get(model, {})
+    if set(data) not in (expected, expected - set(added)):
         raise RecoveryConflict()
+    data = {**added, **data}
     return {
-        field.attname: None if data.get(field.attname) is None else
+        field.attname: None if data[field.attname] is None else
         (field.target_field if field.is_relation else field).to_python(data[field.attname])
         for field in fields
     }

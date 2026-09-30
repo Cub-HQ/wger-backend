@@ -101,6 +101,17 @@ class WorkoutSession(models.Model):
     The date and time the workout session ended
     """
 
+    time_unknown = models.BooleanField(
+        verbose_name='Time unknown',
+        default=False,
+        editable=False,
+    )
+    """
+    The session happened on its calendar day, but its start, end and duration are
+    not known. datetime_start and datetime_end then hold the same date anchor, which
+    is not a measured time.
+    """
+
     notes = models.TextField(
         verbose_name='Notes',
         null=True,
@@ -168,6 +179,11 @@ class WorkoutSession(models.Model):
                 condition=models.Q(datetime_end__isnull=True)
                 | models.Q(datetime_end__gte=models.F('datetime_start')),
                 name='session_end_after_start',
+            ),
+            # An unknown-time session is completed, never ongoing
+            models.CheckConstraint(
+                condition=models.Q(time_unknown=False) | models.Q(datetime_end__isnull=False),
+                name='session_time_unknown_has_end',
             ),
         ]
 
