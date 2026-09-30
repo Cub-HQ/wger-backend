@@ -86,6 +86,7 @@ class Command(BaseCommand):
             'window': [str(oldest), str(newest)],
             **{a: [brief(i) for i in result[a]] for a in push.ACTIONS},
             'recreate_skipped': [brief(i) for i in result.get('recreate_skipped', [])],
+            'removed': result['removed'],
             'unchanged': len(result['unchanged']),
             'skipped': result['skipped'],
             'unsupported_fields': result['unsupported_fields'],

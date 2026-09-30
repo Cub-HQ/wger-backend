@@ -30,6 +30,8 @@ from wger.intervals.planning import ECHO_PREFIX, GYM_SPORT, PlanError, window
 
 # The fields we write; the remote payload is compared on exactly these.
 PAYLOAD_FIELDS = ('category', 'type', 'start_date_local', 'name', 'description', 'external_id')
+# Ledger states of a deliberate removal (removal.py): the key is never written again.
+REMOVAL_STATES = ('removing', 'removed')
 
 
 def external_id(routine_id, date):
@@ -110,8 +112,11 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
     links: dicts with external_id, intervals_event_id, pushed_hash, date, state.
     A link with no intervals_event_id is pending: saved just before its POST, so
     a POST that landed without its ledger save is adopted, never re-posted.
+    A `removing`/`removed` link is a deliberate removal (removal.py): its key is
+    only listed under `removed`, never created, recreated, adopted or written,
+    whatever the flags.
     Returns {action: [items]} for create, update, adopt, conflict, recreate,
-    delete, forget, unchanged, plus counts of remote events we never touch.
+    delete, forget, unchanged, removed, plus counts of remote events we never touch.
     """
     oldest, newest = window(oldest, newest)
     athlete_id = str(athlete_id)
@@ -131,9 +136,14 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
         else:
             foreign += 1
 
-    active = {}
+    active, removed = {}, {}
     for link in links:
-        if link['state'] != 'active' or not oldest <= link['date'] <= newest:
+        if not oldest <= link['date'] <= newest:
+            continue
+        if link['state'] in REMOVAL_STATES:
+            removed[link['external_id']] = link
+            continue
+        if link['state'] != 'active':
             continue
         if link['external_id'] in active:
             raise PlanError(f'duplicate ledger row {link["external_id"]}')
@@ -150,6 +160,7 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
             'delete',
             'forget',
             'unchanged',
+            'removed',
         )
     }
 
@@ -159,8 +170,17 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
             return 'duplicate'
         return found[0] if found else None
 
-    for key in sorted(desired.keys() | active.keys() | ours.keys()):
+    for key in sorted(desired.keys() | active.keys() | ours.keys() | removed.keys()):
         want, link, remote = desired.get(key), active.get(key), remote_for(key)
+        if key in removed:
+            result['removed'].append(
+                {
+                    'external_id': key,
+                    'state': removed[key]['state'],
+                    'remote_present': remote is not None,
+                }
+            )
+            continue
         if remote == 'duplicate':
             result['conflict'].append({'external_id': key, 'reason': 'several remote events'})
             continue
@@ -226,6 +246,8 @@ def plan_outbound(athlete_id, oldest, newest, desired, links, remote_events, ove
 
     result['skipped'] = {
         'foreign_events': foreign,
-        'unlinked_ours': sum(1 for k in ours if k not in desired and k not in active),
+        'unlinked_ours': sum(
+            1 for k in ours if k not in desired and k not in active and k not in removed
+        ),
     }
     return result
